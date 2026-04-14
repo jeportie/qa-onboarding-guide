@@ -324,74 +324,7 @@ This is the most important chapter in Part 1. Understanding the full end-to-end 
 
 ### 3.1 The Full Architecture Diagram
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         USER / CI TRIGGER                                   │
-│  Developer runs locally  ──or──  GitHub Actions workflow (scheduled/PR)     │
-└──────────────────────────────────┬──────────────────────────────────────────┘
-                                   │
-                    ┌──────────────┴──────────────┐
-                    │                             │
-         ┌──────────▼──────────┐       ┌──────────▼──────────┐
-         │   DESKTOP E2E       │       │    MOBILE E2E        │
-         │                     │       │                      │
-         │  Playwright         │       │  Detox + Jest        │
-         │  + Electron app     │       │  + iOS Sim / Android │
-         │  + Page Objects     │       │    Emulator          │
-         │  + Fixtures         │       │  + Page Objects      │
-         │  + @step decorators │       │  + WebSocket Bridge  │
-         └──────────┬──────────┘       └──────────┬───────────┘
-                    │                              │
-                    │    ┌──────────────────────┐   │
-                    └───►│  e2e/common/          │◄──┘
-                         │  Shared test infra:   │
-                         │  - Speculos transport │
-                         │  - Device models      │
-                         │  - Coin app configs   │
-                         │  - APDU helpers       │
-                         └──────────┬────────────┘
-                                    │
-                         ┌──────────▼────────────┐
-                         │  SPECULOS EMULATOR     │
-                         │  (Docker container)    │
-                         │                        │
-                         │  REST API :5000        │
-                         │  - /apdu (send cmds)   │
-                         │  - /events (responses) │
-                         │  - /button (press)     │
-                         │  - /finger (touch)     │
-                         │  - /screenshot         │
-                         └──────────┬─────────────┘
-                                    │
-                         ┌──────────▼─────────────┐
-                         │  COIN-APPS (.elf)       │
-                         │  github.com/LedgerHQ/   │
-                         │  coin-apps              │
-                         │                         │
-                         │  Structure:             │
-                         │  <device>/<fw>/<app>/   │
-                         │  app_<version>.elf      │
-                         └─────────────────────────┘
-                                    │
-                    ┌───────────────┼───────────────┐
-                    │               │               │
-         ┌──────────▼───┐  ┌───────▼──────┐  ┌─────▼──────────┐
-         │  FIREBASE     │  │  BACKEND     │  │  BLOCKCHAIN    │
-         │  Remote       │  │  APIs        │  │  Networks      │
-         │  Config       │  │  (rates,     │  │  (BTC, ETH,    │
-         │  (Feature     │  │  accounts,   │  │  SOL, ...)     │
-         │   Flags)      │  │  explorers)  │  │                │
-         └───────────────┘  └──────────────┘  └────────────────┘
-                                    │
-                         ┌──────────▼─────────────┐
-                         │  REPORTING              │
-                         │                         │
-                         │  Allure (HTML reports)   │
-                         │  Xray (Jira TMS)        │
-                         │  Slack (#live-repo-      │
-                         │         health)          │
-                         └─────────────────────────┘
-```
+![E2E Test Stack Architecture](images/e2e_stack.png)
 
 ### 3.2 Component Breakdown
 

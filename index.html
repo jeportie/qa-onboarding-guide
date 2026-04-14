@@ -12,6 +12,13 @@
       --sidebar-width: 280px;
     }
 
+    /* ── Responsive grid for homepage cards ── */
+    @media (max-width: 600px) {
+      [style*="grid-template-columns: 1fr 1fr"] {
+        grid-template-columns: 1fr !important;
+      }
+    }
+
     /* ── Quiz Container ── */
     .quiz-container {
       border: 2px solid #e2e8f0;
