@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QA Onboarding Guide — Ledger Live</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/docsify-themeable@0/dist/css/theme-simple.css">
+  <style>
+    /* ── Docsify overrides ── */
+    :root {
+      --theme-color: #6366f1;
+      --sidebar-width: 280px;
+    }
+
+    /* ── Quiz Container ── */
+    .quiz-container {
+      border: 2px solid #e2e8f0;
+      border-radius: 16px;
+      padding: 28px;
+      margin: 40px 0;
+      background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    }
+    .quiz-container h3 {
+      margin: 0 0 4px 0;
+      font-size: 1.3em;
+      color: #1e293b;
+    }
+    .quiz-subtitle {
+      color: #64748b;
+      font-size: 0.9em;
+      margin: 0 0 20px 0;
+    }
+    .quiz-progress {
+      background: #e2e8f0;
+      border-radius: 99px;
+      height: 8px;
+      margin-bottom: 24px;
+      overflow: hidden;
+    }
+    .quiz-progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #6366f1, #8b5cf6);
+      border-radius: 99px;
+      transition: width 0.4s ease;
+    }
+
+    /* ── Question Card ── */
+    .quiz-question {
+      margin: 16px 0;
+      padding: 20px;
+      background: #ffffff;
+      border-radius: 12px;
+      border-left: 4px solid #6366f1;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+      transition: border-color 0.3s;
+    }
+    .quiz-question.correct-q { border-left-color: #22c55e; }
+    .quiz-question.incorrect-q { border-left-color: #ef4444; }
+    .quiz-question p:first-child { margin-top: 0; font-weight: 500; color: #1e293b; }
+    .quiz-choices { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; }
+
+    /* ── Choice Button ── */
+    .quiz-choice {
+      text-align: left;
+      padding: 12px 16px;
+      border: 2px solid #e2e8f0;
+      border-radius: 10px;
+      background: #ffffff;
+      cursor: pointer;
+      font-size: 0.95em;
+      color: #334155;
+      transition: all 0.2s ease;
+      display: block;
+      width: 100%;
+      line-height: 1.4;
+    }
+    .quiz-choice:hover:not(.locked) {
+      border-color: #6366f1;
+      background: #f5f3ff;
+      transform: translateX(4px);
+    }
+    .quiz-choice.locked { cursor: default; opacity: 0.7; }
+    .quiz-choice.selected-correct {
+      border-color: #22c55e;
+      background: #f0fdf4;
+      color: #166534;
+      opacity: 1;
+      font-weight: 600;
+    }
+    .quiz-choice.selected-incorrect {
+      border-color: #ef4444;
+      background: #fef2f2;
+      color: #991b1b;
+      opacity: 1;
+    }
+    .quiz-choice.reveal-correct {
+      border-color: #22c55e;
+      background: #dcfce7;
+      color: #166534;
+      opacity: 1;
+      font-weight: 600;
+    }
+
+    /* ── Explanation ── */
+    .quiz-explanation {
+      display: none;
+      margin-top: 12px;
+      padding: 12px 16px;
+      background: #eff6ff;
+      border-radius: 8px;
+      font-size: 0.88em;
+      color: #1e40af;
+      line-height: 1.5;
+      border: 1px solid #bfdbfe;
+    }
+
+    /* ── Score Box ── */
+    .quiz-score {
+      text-align: center;
+      padding: 20px;
+      margin-top: 20px;
+      border-radius: 12px;
+      display: none;
+      font-size: 1.1em;
+    }
+    .quiz-score.pass {
+      display: block;
+      background: linear-gradient(135deg, #f0fdf4, #dcfce7);
+      color: #166534;
+      border: 2px solid #22c55e;
+    }
+    .quiz-score.fail {
+      display: block;
+      background: linear-gradient(135deg, #fef2f2, #fee2e2);
+      color: #991b1b;
+      border: 2px solid #ef4444;
+    }
+    .quiz-score .score-icon { font-size: 2em; display: block; margin-bottom: 8px; }
+    .quiz-score .score-text { font-weight: 700; font-size: 1.2em; }
+    .quiz-score .score-detail { font-size: 0.85em; margin-top: 6px; opacity: 0.8; }
+    .quiz-score .score-advice { font-size: 0.9em; margin-top: 10px; font-style: italic; }
+
+    /* ── Resource Box ── */
+    .resource-box {
+      border: 1px solid #e2e8f0;
+      border-radius: 12px;
+      padding: 20px;
+      margin: 24px 0;
+      background: #fafbfc;
+    }
+    .resource-box h4 { margin: 0 0 12px 0; color: #475569; font-size: 0.95em; text-transform: uppercase; letter-spacing: 0.5px; }
+    .resource-box ul { margin: 0; padding-left: 20px; }
+    .resource-box li { margin: 6px 0; line-height: 1.5; }
+    .resource-box a { color: #6366f1; text-decoration: none; font-weight: 500; }
+    .resource-box a:hover { text-decoration: underline; }
+
+    /* ── Chapter Intro/Outro ── */
+    .chapter-intro {
+      padding: 16px 20px;
+      background: #f8fafc;
+      border-radius: 10px;
+      border-left: 3px solid #6366f1;
+      margin: 16px 0 24px 0;
+      font-size: 0.95em;
+      color: #475569;
+      line-height: 1.6;
+    }
+    .chapter-outro {
+      padding: 16px 20px;
+      background: #fefce8;
+      border-radius: 10px;
+      border-left: 3px solid #eab308;
+      margin: 24px 0;
+      font-size: 0.95em;
+      color: #713f12;
+      line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <script>
+    // ── Quiz Engine (runs after each Docsify page render) ──
+    function initQuizzes() {
+      document.querySelectorAll('.quiz-container').forEach(function(quiz) {
+        // Skip if already initialized
+        if (quiz.dataset.initialized) return;
+        quiz.dataset.initialized = 'true';
+
+        var threshold = parseInt(quiz.dataset.passThreshold) || 80;
+        var questions = quiz.querySelectorAll('.quiz-question');
+        var total = questions.length;
+        var answered = 0;
+        var correct = 0;
+        var progressBar = quiz.querySelector('.quiz-progress-bar');
+
+        questions.forEach(function(q) {
+          var correctValue = q.dataset.correct;
+          var choices = q.querySelectorAll('.quiz-choice');
+          var explanation = q.querySelector('.quiz-explanation');
+
+          choices.forEach(function(choice) {
+            choice.addEventListener('click', function() {
+              if (q.classList.contains('answered')) return;
+              q.classList.add('answered');
+              answered++;
+
+              var picked = choice.dataset.value;
+              var isCorrect = picked === correctValue;
+
+              // Lock all choices
+              choices.forEach(function(c) { c.classList.add('locked'); });
+
+              if (isCorrect) {
+                correct++;
+                choice.classList.add('selected-correct');
+                q.classList.add('correct-q');
+              } else {
+                choice.classList.add('selected-incorrect');
+                q.classList.add('incorrect-q');
+                // Reveal the correct answer
+                q.querySelector('[data-value="' + correctValue + '"]').classList.add('reveal-correct');
+              }
+
+              // Show explanation
+              if (explanation) explanation.style.display = 'block';
+
+              // Update progress bar
+              if (progressBar) {
+                progressBar.style.width = Math.round((answered / total) * 100) + '%';
+              }
+
+              // Check if all answered
+              if (answered === total) {
+                var pct = Math.round((correct / total) * 100);
+                var scoreBox = quiz.querySelector('.quiz-score');
+                if (!scoreBox) return;
+
+                var passed = pct >= threshold;
+                scoreBox.className = 'quiz-score ' + (passed ? 'pass' : 'fail');
+
+                scoreBox.innerHTML = passed
+                  ? '<span class="score-icon">&#x1F389;</span>'
+                    + '<span class="score-text">PASSED! ' + pct + '%</span>'
+                    + '<span class="score-detail">' + correct + ' / ' + total + ' correct (threshold: ' + threshold + '%)</span>'
+                    + '<span class="score-advice">Great job! Move on to the next chapter.</span>'
+                  : '<span class="score-icon">&#x1F4DA;</span>'
+                    + '<span class="score-text">NOT YET — ' + pct + '%</span>'
+                    + '<span class="score-detail">' + correct + ' / ' + total + ' correct (threshold: ' + threshold + '%)</span>'
+                    + '<span class="score-advice">We recommend reviewing this chapter and retaking the quiz. Reload the page to reset.</span>';
+              }
+            });
+          });
+        });
+      });
+    }
+
+    // ── Docsify Configuration ──
+    window.$docsify = {
+      name: 'QA Onboarding Guide',
+      nameLink: '/',
+      loadSidebar: true,
+      subMaxLevel: 3,
+      auto2top: true,
+      search: {
+        placeholder: 'Search the guide...',
+        noData: 'No results found.',
+        depth: 3
+      },
+      plugins: [
+        function(hook) {
+          hook.doneEach(function() {
+            initQuizzes();
+          });
+        }
+      ]
+    };
+  </script>
+
+  <!-- Docsify core -->
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/docsify.min.js"></script>
+  <!-- Search plugin -->
+  <script src="https://cdn.jsdelivr.net/npm/docsify@4/lib/plugins/search.min.js"></script>
+  <!-- Code highlight -->
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-bash.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-typescript.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-json.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/prismjs@1/components/prism-yaml.min.js"></script>
+</body>
+</html>

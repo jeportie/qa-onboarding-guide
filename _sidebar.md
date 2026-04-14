@@ -1,0 +1,65 @@
+- [Home](/)
+
+- **Part 1 -- Foundations**
+  - [Chapter 1: What Is Ledger Live?](part1#chapter-1-what-is-ledger-live)
+  - [Chapter 2: The Tech Stack](part1#chapter-2-the-tech-stack)
+  - [Chapter 3: E2E Test Architecture](part1#chapter-3-e2e-test-architecture)
+  - [Chapter 4: Monorepo Structure & Team Ownership](part1#chapter-4-monorepo-structure-amp-team-ownership)
+  - [Chapter 5: Setting Up Your Dev Environment](part1#chapter-5-setting-up-your-development-environment)
+  - [Part 1 Assessment](part1#part-1-final-assessment)
+
+- **Part 2 -- Tools in Context**
+  - [Chapter 6: Git Workflow, Hooks & Changesets](part2#chapter-6-git-workflow-hooks-amp-changesets)
+  - [Chapter 7: pnpm, Turbo & Build Pipeline](part2#chapter-7-pnpm-turbo-amp-build-pipeline)
+  - [Chapter 8: Playwright in Ledger Live](part2#chapter-8-playwright-in-ledger-live)
+  - [Chapter 9: Detox in Ledger Live](part2#chapter-9-detox-in-ledger-live)
+  - [Chapter 10: Speculos Deep Dive](part2#chapter-10-speculos-deep-dive)
+  - [Chapter 11: Firebase & Feature Flags](part2#chapter-11-firebase-amp-feature-flags)
+  - [Chapter 12: Allure Reporting & Xray](part2#chapter-12-allure-reporting-amp-xray-integration)
+  - [Part 2 Assessment](part2#part-2-final-assessment)
+
+- **Part 3 -- E2E Testing in Practice**
+  - [Chapter 13: Desktop E2E Architecture](part3#chapter-13-desktop-e2e----architecture-deep-dive)
+  - [Chapter 14: Writing First Desktop Test](part3#chapter-14-writing-your-first-desktop-e2e-test)
+  - [Chapter 15: Mobile E2E Architecture](part3#chapter-15-mobile-e2e----architecture-deep-dive)
+  - [Chapter 16: Writing First Mobile Test](part3#chapter-16-writing-your-first-mobile-e2e-test)
+  - [Part 3 Assessment](part3#part-3-final-assessment)
+
+- **Part 4 -- CI/CD & Mastery**
+  - [Chapter 17: GitHub Actions Workflows](part4#chapter-17-github-actions-workflows)
+  - [Chapter 18: Test Strategy & Best Practices](part4#chapter-18-test-strategy-amp-best-practices)
+  - [Chapter 19: Debugging Failures](part4#chapter-19-debugging-failures-like-a-pro)
+  - [Chapter 20: Contributing Back](part4#chapter-20-contributing-back----writing-production-ready-tests)
+  - [Chapter 21: AI Agents & Automation](part4#chapter-21-ai-agents-amp-automation-rules)
+  - [Part 4 Assessment](part4#part-4-final-assessment)
+
+- **Part 5 -- Crash Courses**
+  - [Chapter 22: TypeScript](part5#chapter-22-typescript)
+  - [Chapter 23: React](part5#chapter-23-react)
+  - [Chapter 24: React Native](part5#chapter-24-react-native)
+  - [Chapter 25: Electron](part5#chapter-25-electron)
+  - [Chapter 26: Redux Toolkit](part5#chapter-26-redux-toolkit)
+  - [Chapter 27: React Router](part5#chapter-27-react-router)
+  - [Chapter 28: React Navigation](part5#chapter-28-react-navigation)
+  - [Chapter 29: i18next](part5#chapter-29-i18next)
+  - [Chapter 30: Styled-Components](part5#chapter-30-styled-components)
+  - [Chapter 31: Tailwind CSS](part5#chapter-31-tailwind-css)
+  - [Chapter 32: Playwright](part5#chapter-32-playwright)
+  - [Chapter 33: Detox](part5#chapter-33-detox)
+  - [Chapter 34: Jest](part5#chapter-34-jest)
+  - [Chapter 35: MSW](part5#chapter-35-msw)
+  - [Chapter 36: Allure](part5#chapter-36-allure)
+  - [Chapter 37: Testing Library](part5#chapter-37-testing-library)
+  - [Chapter 38: pnpm](part5#chapter-38-pnpm)
+  - [Chapter 39: Turborepo](part5#chapter-39-turborepo)
+  - [Chapter 40: Rspack](part5#chapter-40-rspack)
+  - [Chapter 41: Metro](part5#chapter-41-metro)
+  - [Chapter 42: ESLint & Oxlint](part5#chapter-42-eslint-amp-oxlint)
+  - [Part 5 Assessment](part5#part-5-final-assessment)
+
+- **Appendix**
+  - [A: Command Reference](appendix#a-complete-command-reference)
+  - [B: Environment Variables](appendix#b-environment-variables-reference)
+  - [C: Devices & Coins](appendix#c-supported-devices-amp-coins)
+  - [D: Troubleshooting FAQ](appendix#d-troubleshooting-faq)
+  - [E: Glossary](appendix#e-glossary)
