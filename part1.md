@@ -172,71 +172,71 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 
 ### 2.1 Language & Runtime
 
-| Technology | Version | Purpose |
-|-----------|---------|---------|
-| **TypeScript** | 5.x | Primary language for all code |
-| **Node.js** | 20+ (managed via Proto) | Runtime for build tools, CLI, and main process |
-| **Hermes** | (bundled) | JavaScript engine for React Native on mobile |
+| Technology | Version | Purpose | Docs |
+|-----------|---------|---------|------|
+| **TypeScript** | 5.x | Primary language for all code | [typescriptlang.org](https://www.typescriptlang.org/) |
+| **Node.js** | 20+ (managed via Proto) | Runtime for build tools, CLI, and main process | [nodejs.org](https://nodejs.org/) |
+| **Hermes** | (bundled) | JavaScript engine for React Native on mobile | [hermesengine.dev](https://hermesengine.dev/) |
 
 ### 2.2 Frontend Frameworks
 
-| Technology | Where Used | Purpose |
-|-----------|-----------|---------|
-| **React** 18 | Desktop (renderer process) | UI component library |
-| **React Native** 0.76+ | Mobile (iOS + Android) | Cross-platform native mobile UI |
-| **Electron** 33+ | Desktop (shell) | Cross-platform desktop app framework |
+| Technology | Where Used | Purpose | Docs |
+|-----------|-----------|---------|------|
+| **React** 18 | Desktop (renderer process) | UI component library | [react.dev](https://react.dev/) |
+| **React Native** 0.76+ | Mobile (iOS + Android) | Cross-platform native mobile UI | [reactnative.dev](https://reactnative.dev/) |
+| **Electron** 33+ | Desktop (shell) | Cross-platform desktop app framework | [electronjs.org](https://www.electronjs.org/) |
 
 ### 2.3 State Management & Routing
 
-| Technology | Where Used | Purpose |
-|-----------|-----------|---------|
-| **Redux Toolkit** | Desktop + Mobile | Global state management |
-| **RTK Query** | Desktop + Mobile | API data fetching and caching |
-| **React Router** 6 | Desktop | Page navigation |
-| **React Navigation** 6 | Mobile | Native navigation (stacks, tabs, drawers) |
+| Technology | Where Used | Purpose | Docs |
+|-----------|-----------|---------|------|
+| **Redux Toolkit** | Desktop + Mobile | Global state management | [redux-toolkit.js.org](https://redux-toolkit.js.org/) |
+| **RTK Query** | Desktop + Mobile | API data fetching and caching | [redux-toolkit.js.org/rtk-query](https://redux-toolkit.js.org/rtk-query/overview) |
+| **React Router** 6 | Desktop | Page navigation | [reactrouter.com](https://reactrouter.com/) |
+| **React Navigation** 6 | Mobile | Native navigation (stacks, tabs, drawers) | [reactnavigation.org](https://reactnavigation.org/) |
 
 ### 2.4 Styling & UI
 
-| Technology | Where Used | Purpose |
-|-----------|-----------|---------|
-| **Styled-Components** | Desktop | CSS-in-JS component styling |
-| **Lumen UI (React)** | Desktop | Ledger's design system for web |
-| **Lumen UI (RN)** | Mobile | Ledger's design system for native |
-| **Tailwind CSS** | Internal tools | Utility-first CSS |
-| **i18next** | Desktop + Mobile | Internationalization (18 languages) |
+| Technology | Where Used | Purpose | Docs |
+|-----------|-----------|---------|------|
+| **Styled-Components** | Desktop | CSS-in-JS component styling | [styled-components.com](https://styled-components.com/) |
+| **Lumen UI (React)** | Desktop | Ledger's design system for web | (internal) |
+| **Lumen UI (RN)** | Mobile | Ledger's design system for native | (internal) |
+| **Tailwind CSS** | Internal tools | Utility-first CSS | [tailwindcss.com](https://tailwindcss.com/) |
+| **i18next** | Desktop + Mobile | Internationalization (18 languages) | [i18next.com](https://www.i18next.com/) |
 
 ### 2.5 Build & Package Tools
 
-| Technology | Purpose |
-|-----------|---------|
-| **pnpm** | Fast, disk-efficient package manager |
-| **Turborepo** | Monorepo build orchestration + caching |
-| **Rspack** | Rust-based bundler for Desktop (replaces webpack) |
-| **Metro** | JavaScript bundler for React Native (Mobile) |
-| **ESLint** + **Oxlint** | Linting (Oxlint in Rust for speed, ESLint for depth) |
+| Technology | Purpose | Docs |
+|-----------|---------|------|
+| **pnpm** | Fast, disk-efficient package manager | [pnpm.io](https://pnpm.io/) |
+| **Turborepo** | Monorepo build orchestration + caching | [turbo.build](https://turbo.build/) |
+| **Rspack** | Rust-based bundler for Desktop (replaces webpack) | [rspack.dev](https://rspack.dev/) |
+| **Metro** | JavaScript bundler for React Native (Mobile) | [metrobundler.dev](https://metrobundler.dev/) |
+| **ESLint** + **Oxlint** | Linting (Oxlint in Rust for speed, ESLint for depth) | [eslint.org](https://eslint.org/) / [oxc.rs](https://oxc.rs/) |
 
 ### 2.6 Testing Tools
 
-| Tool | Layer | Used For |
-|------|-------|----------|
-| **Playwright** | E2E (Desktop) | Browser automation in Electron |
-| **Detox** | E2E (Mobile) | Native app automation (iOS/Android) |
-| **Jest** | Unit + Integration | Test runner, assertions, mocks |
-| **MSW** | Integration | Network API mocking at service-worker level |
-| **Testing Library** | Integration | User-centric DOM/component querying |
-| **Allure** | Reporting | Rich interactive test reports |
-| **Xray** | Test Management | Jira-integrated test case management |
-| **Speculos** | E2E | Hardware wallet emulation |
+| Tool | Layer | Used For | Docs |
+|------|-------|----------|------|
+| **Playwright** | E2E (Desktop) | Browser automation in Electron | [playwright.dev](https://playwright.dev/) |
+| **Detox** | E2E (Mobile) | Native app automation (iOS/Android) | [wix.github.io/Detox](https://wix.github.io/Detox/) |
+| **Jest** | Unit + Integration | Test runner, assertions, mocks | [jestjs.io](https://jestjs.io/) |
+| **MSW** | Integration | Network API mocking at service-worker level | [mswjs.io](https://mswjs.io/) |
+| **Testing Library** | Integration | User-centric DOM/component querying | [testing-library.com](https://testing-library.com/) |
+| **Allure** | Reporting | Rich interactive test reports | [allurereport.org](https://allurereport.org/) |
+| **Xray** | Test Management | Jira-integrated test case management | [getxray.app](https://www.getxray.app/) |
+| **Speculos** | E2E | Hardware wallet emulation | [GitHub](https://github.com/LedgerHQ/speculos) |
 
 ### 2.7 DevOps & CI
 
-| Technology | Purpose |
-|-----------|---------|
-| **GitHub Actions** | CI/CD (73+ workflow files) |
-| **Docker** | Containerization (Speculos, builds) |
-| **Changesets** | Version management and changelogs |
-| **hk** | Git hooks runner |
-| **Gitleaks** | Secret detection in commits |
+| Technology | Purpose | Docs |
+|-----------|---------|------|
+| **GitHub Actions** | CI/CD (73+ workflow files) | [docs.github.com/actions](https://docs.github.com/en/actions) |
+| **Docker** | Containerization (Speculos, builds) | [docker.com](https://www.docker.com/) |
+| **Changesets** | Version management and changelogs | [GitHub](https://github.com/changesets/changesets) |
+| **hk** | Git hooks runner | [GitHub](https://github.com/jdx/hk) |
+| **Gitleaks** | Secret detection in commits | [gitleaks.io](https://gitleaks.io/) |
 
 <div class="chapter-outro">
 This is a large stack, but you do not need to master everything at once. As a QA engineer, your primary tools are Playwright, Detox, Speculos, Jest, and Allure. Part 5 provides crash courses for every technology listed here.

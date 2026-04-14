@@ -23,7 +23,7 @@
     /* ── Tables ── */
     .markdown-section table {
       border-collapse: collapse;
-      width: 100%;
+      width: auto;
       margin: 20px 0;
       border: 1px solid #e2e8f0;
       border-radius: 8px;
@@ -220,6 +220,23 @@
     .quiz-retry:hover {
       background: #fef2f2;
     }
+    .quiz-next {
+      margin-top: 14px;
+      padding: 10px 28px;
+      border: 2px solid #6366f1;
+      border-radius: 10px;
+      background: #6366f1;
+      color: #ffffff;
+      font-weight: 600;
+      font-size: 0.95em;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-block;
+    }
+    .quiz-next:hover {
+      background: #4f46e5;
+      border-color: #4f46e5;
+    }
 
     /* ── Resource Box ── */
     .resource-box {
@@ -354,27 +371,46 @@
                 var passed = pct >= threshold;
                 scoreBox.className = 'quiz-score ' + (passed ? 'pass' : 'fail');
 
-                if (passed) {
-                  scoreBox.innerHTML =
-                    '<span class="score-icon">&#x1F389;</span>'
-                    + '<span class="score-text">PASSED! ' + pct + '%</span>'
-                    + '<span class="score-detail">' + correct + ' / ' + total + ' correct (threshold: ' + threshold + '%)</span>'
-                    + '<span class="score-advice">Great job! Move on to the next chapter.</span>';
-                  // Collapse quiz after a short delay
-                  setTimeout(function() { quiz.classList.add('passed'); }, 2000);
-                } else {
-                  scoreBox.innerHTML =
-                    '<span class="score-icon">&#x1F4DA;</span>'
-                    + '<span class="score-text">NOT YET — ' + pct + '%</span>'
-                    + '<span class="score-detail">' + correct + ' / ' + total + ' correct (threshold: ' + threshold + '%)</span>'
-                    + '<span class="score-advice">Review the chapter and try again.</span>'
-                    + '<br><button class="quiz-retry" onclick="resetQuiz(this)">Retry Quiz</button>';
-                }
+                // Show score after a brief pause so user reads the last explanation
+                var showScore = function() {
+                  if (passed) {
+                    scoreBox.innerHTML =
+                      '<span class="score-icon">&#x1F389;</span>'
+                      + '<span class="score-text">PASSED! ' + pct + '%</span>'
+                      + '<span class="score-detail">' + correct + ' / ' + total + ' correct (threshold: ' + threshold + '%)</span>'
+                      + '<span class="score-advice">Great job! Move on to the next chapter.</span>';
+                    quiz.classList.add('passed');
+                  } else {
+                    scoreBox.innerHTML =
+                      '<span class="score-icon">&#x1F4DA;</span>'
+                      + '<span class="score-text">NOT YET — ' + pct + '%</span>'
+                      + '<span class="score-detail">' + correct + ' / ' + total + ' correct (threshold: ' + threshold + '%)</span>'
+                      + '<span class="score-advice">Review the chapter and try again.</span>'
+                      + '<br><button class="quiz-retry" onclick="resetQuiz(this)">Retry Quiz</button>';
+                  }
+                };
+
+                // Add "See Results" button on last question
+                var resultsBtn = document.createElement('button');
+                resultsBtn.className = 'quiz-next';
+                resultsBtn.textContent = 'See Results';
+                resultsBtn.addEventListener('click', function() {
+                  q.classList.remove('active');
+                  showScore();
+                  resultsBtn.remove();
+                });
+                q.appendChild(resultsBtn);
+
               } else {
-                // Advance to next question after a brief pause
-                setTimeout(function() {
+                // Add "Next" button to advance
+                var nextBtn = document.createElement('button');
+                nextBtn.className = 'quiz-next';
+                nextBtn.textContent = 'Next Question';
+                nextBtn.addEventListener('click', function() {
                   showQuestion(qIdx + 1);
-                }, 800);
+                  nextBtn.remove();
+                });
+                q.appendChild(nextBtn);
               }
             });
           });
