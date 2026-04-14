@@ -8,7 +8,7 @@ Part 1 gave you the mental model — what you are testing, how the pieces fit to
 
 ---
 
-## Chapter 6: Git Workflow, Hooks & Changesets
+## Git Workflow, Hooks & Changesets
 
 <div class="chapter-intro">
 Every contribution you make — whether it is a new E2E test, a bug fix, or a page object refactor — flows through Git. This chapter covers the branching model, naming conventions, commit format, pre-commit hooks, and the changeset system that Ledger Live uses for versioning its 200+ packages. Getting this right from day one prevents friction in code review and CI.
@@ -204,10 +204,12 @@ pnpm mobile pod
 <strong>Key takeaway:</strong> The Git workflow is strict for a reason — 200+ packages, multiple teams, and a release train that ships to millions of users. Conventional commits feed into changelogs, changesets feed into version bumps, and the <code>@Gate</code> job protects <code>develop</code>. Internalize these patterns now and you will never block a PR on process issues.
 </div>
 
+### 6.8 Quiz
+
 <!-- ── Chapter 6 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 6 Quiz — Git Workflow, Hooks & Changesets</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -271,7 +273,7 @@ pnpm mobile pod
 
 ---
 
-## Chapter 7: pnpm, Turbo & Build Pipeline
+## pnpm, Turbo & Build Pipeline
 
 <div class="chapter-intro">
 A monorepo with 200+ packages needs a fast package manager and an intelligent build orchestrator. This chapter covers <strong>pnpm</strong> (the package manager), <strong>Turborepo</strong> (the build system), and the practical commands you will use daily to install, build, and run packages. You will also learn how to deal with dependency duplicates — a recurring challenge in large monorepos.
@@ -412,10 +414,12 @@ On Windows, running binaries by specifying their path in package.json scripts wi
 <strong>Key takeaway:</strong> In a monorepo this size, you will rarely install or build everything. Learn <code>--filter</code>, learn the aliases (<code>pnpm desktop</code>, <code>pnpm e2e:desktop</code>), and know when to rebuild a stale library. These commands will be your most-typed shell inputs.
 </div>
 
+### 7.9 Quiz
+
 <!-- ── Chapter 7 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 7 Quiz — pnpm, Turbo & Build Pipeline</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -479,7 +483,7 @@ On Windows, running binaries by specifying their path in package.json scripts wi
 
 ---
 
-## Chapter 8: Playwright in Ledger Live
+## Playwright in Ledger Live
 
 <div class="chapter-intro">
 Playwright is the E2E testing framework for <strong>Ledger Live Desktop</strong>. This chapter covers the Playwright configuration, the custom fixture system (the most important architectural pattern in the desktop E2E suite), locator strategies, the <code>@step</code> decorator for Allure reporting, test tags, userdata profiles, and the complete test development workflow as documented in the team wiki.
@@ -695,10 +699,12 @@ pnpm e2e:desktop allure
 <strong>Key takeaway:</strong> The fixture system in <code>common.ts</code> is the heart of desktop E2E testing. Every test declares what it needs (userdata, device, feature flags) and the fixture orchestrates the setup and teardown. Master fixtures and you master the test suite.
 </div>
 
+### 8.9 Quiz
+
 <!-- ── Chapter 8 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 8 Quiz — Playwright in Ledger Live</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -762,7 +768,7 @@ pnpm e2e:desktop allure
 
 ---
 
-## Chapter 9: Detox in Ledger Live
+## Detox in Ledger Live
 
 <div class="chapter-intro">
 Detox is the E2E testing framework for <strong>Ledger Live Mobile</strong>. While the high-level testing philosophy (Page Object Model, Speculos emulation, feature flag overrides) mirrors the desktop suite, the implementation is fundamentally different. This chapter covers Detox configuration, the global app singleton, the WebSocket bridge, helper functions, the multi-phase initialization, and the complete mobile E2E project structure and debugging techniques as documented in the team wiki.
@@ -961,10 +967,12 @@ The mobile E2E CI workflow accepts several inputs that control test execution:
 <strong>Key takeaway:</strong> Mobile E2E has more moving parts than desktop — native builds, the WebSocket bridge, device simulators, port forwarding. The <code>app.init()</code> method abstracts most of this complexity. When debugging failures, know which layer to look at: Detox framework, bridge communication, React Native app, or native platform.
 </div>
 
+### 9.11 Quiz
+
 <!-- ── Chapter 9 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 9 Quiz — Detox in Ledger Live</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -1028,7 +1036,7 @@ The mobile E2E CI workflow accepts several inputs that control test execution:
 
 ---
 
-## Chapter 10: Speculos Deep Dive
+## Speculos Deep Dive
 
 <div class="chapter-intro">
 Speculos is the Ledger device emulator — the component that makes E2E testing possible without physical hardware. It runs real firmware inside a Docker container, exposing a REST API for interaction. This chapter covers all six device models, the REST API, touch vs non-touch interaction, the coin-apps repository, Docker commands, and the Ledger Live Bot — an autonomous testing system built on top of Speculos.
@@ -1223,10 +1231,12 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 <strong>Key takeaway:</strong> Speculos is what makes your tests realistic — it runs real firmware, real coin apps, and responds to real APDU commands. The bot extends this further by performing autonomous transactions on the blockchain. When a test involves device interaction, understanding Speculos is non-negotiable.
 </div>
 
+### 10.9 Quiz
+
 <!-- ── Chapter 10 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 10 Quiz — Speculos Deep Dive</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -1290,7 +1300,7 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 
 ---
 
-## Chapter 11: Firebase & Feature Flags
+## Firebase & Feature Flags
 
 <div class="chapter-intro">
 Feature flags are a critical part of modern software delivery. They let teams decouple deployment from release, run experiments, and kill broken features instantly. This chapter covers how Ledger Live uses Firebase Remote Config, the four environments, how to override flags in E2E tests, and — crucially — the <strong>anti-patterns</strong> that have caused real problems in the codebase. Understanding what NOT to do with feature flags is as important as knowing how to use them.
@@ -1455,10 +1465,12 @@ The QA team monitors feature flag impact through the Slack channel **#qa-b2c-rel
 <strong>Key takeaway:</strong> In your E2E tests, <strong>always explicitly override every feature flag your test depends on</strong>. Never rely on Firebase defaults — they can change without notice. Document flag dependencies in your test code. And when debugging a flaky test, check whether a flag change is the root cause before investigating other hypotheses.
 </div>
 
+### 11.8 Quiz
+
 <!-- ── Chapter 11 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 11 Quiz — Firebase & Feature Flags</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -1522,7 +1534,7 @@ The QA team monitors feature flag impact through the Slack channel **#qa-b2c-rel
 
 ---
 
-## Chapter 12: Allure Reporting & Xray Integration
+## Allure Reporting & Xray Integration
 
 <div class="chapter-intro">
 Running tests without reading reports is like writing code without running it. <strong>Allure</strong> is the test reporting framework used by Ledger Live E2E tests. It transforms raw test results into interactive HTML reports with step-by-step traces, screenshots, videos, and environment data. Combined with <strong>Xray</strong> integration, it connects automated test results to Jira test case definitions. This chapter shows you how to generate, read, and interpret these reports.
@@ -1658,10 +1670,12 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 <strong>Key takeaway:</strong> The Allure report is your first stop when a test fails. The step trace tells you <em>what</em> went wrong, the screenshot tells you <em>what the user would see</em>, and the TMS link tells you <em>what should have happened</em>. Learn to read reports fluently — it will save you hours of debugging.
 </div>
 
+### 12.9 Quiz
+
 <!-- ── Chapter 12 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 12 Quiz — Allure Reporting & Xray Integration</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 

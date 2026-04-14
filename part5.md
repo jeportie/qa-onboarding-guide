@@ -10,7 +10,7 @@ These crash courses provide a quick introduction to every technology in the Ledg
 
 ---
 
-## Chapter 22: TypeScript
+## TypeScript
 
 TypeScript is a **statically-typed superset of JavaScript** developed by **Microsoft** (Anders Hejlsberg). Every valid JS file is also valid TS. In Ledger Live, TypeScript is used everywhere — desktop, mobile, libraries, and E2E tests.
 
@@ -30,7 +30,7 @@ TypeScript is a **statically-typed superset of JavaScript** developed by **Micro
 
 ---
 
-## Chapter 23: React
+## React
 
 React is a **UI library** for building component-based interfaces, created by **Meta** (Jordan Walke). It uses a virtual DOM for efficient rendering.
 
@@ -49,7 +49,7 @@ React is a **UI library** for building component-based interfaces, created by **
 
 ---
 
-## Chapter 24: React Native
+## React Native
 
 React Native is a framework for building **native mobile apps** using React, created by **Meta**. It renders to native iOS/Android components, not a WebView.
 
@@ -68,7 +68,7 @@ React Native is a framework for building **native mobile apps** using React, cre
 
 ---
 
-## Chapter 25: Electron
+## Electron
 
 Electron is a framework for building **cross-platform desktop apps** with web technologies, created by **GitHub** (Cheng Zhao). It combines Chromium (renderer) + Node.js (main process).
 
@@ -87,7 +87,7 @@ Electron is a framework for building **cross-platform desktop apps** with web te
 
 ---
 
-## Chapter 26: Redux Toolkit
+## Redux Toolkit
 
 Redux Toolkit (RTK) is the official **state management** library for Redux, created by **Mark Erikson**. It simplifies Redux with `createSlice`, `createAsyncThunk`, and `configureStore`.
 
@@ -105,7 +105,7 @@ Redux Toolkit (RTK) is the official **state management** library for Redux, crea
 
 ---
 
-## Chapter 27: React Router
+## React Router
 
 React Router is a **routing library** for React web apps, created by **Remix** (Ryan Florence, Michael Jackson).
 
@@ -122,7 +122,7 @@ React Router is a **routing library** for React web apps, created by **Remix** (
 
 ---
 
-## Chapter 28: React Navigation
+## React Navigation
 
 React Navigation is the standard **navigation library** for React Native, created by the **React Navigation team** (Satyajit Sahoo, Michał Osadnik).
 
@@ -140,7 +140,7 @@ React Navigation is the standard **navigation library** for React Native, create
 
 ---
 
-## Chapter 29: i18next
+## i18next
 
 i18next is an **internationalization framework** for JavaScript, created by **Jan Mühlemann**. It provides translation management with interpolation, plurals, and context.
 
@@ -158,7 +158,7 @@ i18next is an **internationalization framework** for JavaScript, created by **Ja
 
 ---
 
-## Chapter 30: Styled-Components
+## Styled-Components
 
 Styled-components is a **CSS-in-JS library** that uses tagged template literals to style React components, created by **Max Stoiber** and **Glen Maddern**.
 
@@ -175,7 +175,7 @@ Styled-components is a **CSS-in-JS library** that uses tagged template literals 
 
 ---
 
-## Chapter 31: Tailwind CSS
+## Tailwind CSS
 
 Tailwind CSS is a **utility-first CSS framework** created by **Adam Wathan**. It provides pre-built utility classes instead of writing custom CSS.
 
@@ -193,7 +193,7 @@ Tailwind CSS is a **utility-first CSS framework** created by **Adam Wathan**. It
 
 ---
 
-## Chapter 32: Playwright
+## Playwright
 
 Playwright is a **browser automation framework** for E2E testing, created by **Microsoft** (Andrey Lushnikov, Dmitry Gozman — former Puppeteer team).
 
@@ -213,7 +213,7 @@ Playwright is a **browser automation framework** for E2E testing, created by **M
 
 ---
 
-## Chapter 33: Detox
+## Detox
 
 Detox is a **gray-box E2E testing framework** for React Native, created by **Wix Engineering** (Rotem Mizrachi-Meidan). It provides native-level interaction with automatic synchronization.
 
@@ -232,7 +232,7 @@ Detox is a **gray-box E2E testing framework** for React Native, created by **Wix
 
 ---
 
-## Chapter 34: Jest
+## Jest
 
 Jest is a **JavaScript testing framework** created by **Meta** (Christoph Nakazawa). It includes test runner, assertion library, mocking, and code coverage.
 
@@ -250,7 +250,7 @@ Jest is a **JavaScript testing framework** created by **Meta** (Christoph Nakaza
 
 ---
 
-## Chapter 35: MSW
+## MSW
 
 MSW (Mock Service Worker) is an **API mocking library** that intercepts HTTP requests at the network level, created by **Artem Zakharchenko**.
 
@@ -268,7 +268,7 @@ MSW (Mock Service Worker) is an **API mocking library** that intercepts HTTP req
 
 ---
 
-## Chapter 36: Allure
+## Allure
 
 Allure is a **test reporting framework** created by **Qameta Software**. It generates interactive HTML reports from test results.
 
@@ -287,7 +287,7 @@ Allure is a **test reporting framework** created by **Qameta Software**. It gene
 
 ---
 
-## Chapter 37: Testing Library
+## Testing Library
 
 Testing Library is a family of **testing utilities** that encourage testing from the user's perspective, created by **Kent C. Dodds**.
 
@@ -306,7 +306,7 @@ Testing Library is a family of **testing utilities** that encourage testing from
 
 ---
 
-## Chapter 38: pnpm
+## pnpm
 
 pnpm is a **fast, disk-space efficient package manager** created by **Zoltan Kochan**. It uses a content-addressable store with symlinks.
 
@@ -325,7 +325,7 @@ pnpm is a **fast, disk-space efficient package manager** created by **Zoltan Koc
 
 ---
 
-## Chapter 39: Turborepo
+## Turborepo
 
 Turborepo is a **build system for monorepos** created by **Jared Palmer** (now maintained by **Vercel**). It orchestrates task execution with caching and parallel builds.
 
@@ -343,7 +343,7 @@ Turborepo is a **build system for monorepos** created by **Jared Palmer** (now m
 
 ---
 
-## Chapter 40: Rspack
+## Rspack
 
 Rspack is a **high-performance JavaScript bundler** written in Rust, created by **ByteDance**. It is webpack-compatible but significantly faster.
 
@@ -361,7 +361,7 @@ Rspack is a **high-performance JavaScript bundler** written in Rust, created by 
 
 ---
 
-## Chapter 41: Metro
+## Metro
 
 Metro is the **JavaScript bundler for React Native**, created by **Meta**. It bundles JS code and assets for iOS and Android.
 
@@ -379,7 +379,7 @@ Metro is the **JavaScript bundler for React Native**, created by **Meta**. It bu
 
 ---
 
-## Chapter 42: ESLint & Oxlint
+## ESLint & Oxlint
 
 ESLint is a **JavaScript/TypeScript linter** created by **Nicholas Zakas**. Oxlint is a newer, faster alternative written in Rust by the **oxc** project.
 

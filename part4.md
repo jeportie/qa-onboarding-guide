@@ -8,7 +8,7 @@ You can write tests. Now you need to understand the system that runs them, the s
 
 ---
 
-## Chapter 17: GitHub Actions Workflows
+## GitHub Actions Workflows
 
 <div class="chapter-intro">
 The Ledger Live repository uses <strong>GitHub Actions</strong> as its CI/CD platform. With over <strong>73 workflow files</strong>, this is one of the most complex CI configurations you will encounter. This chapter explains the workflow anatomy, the E2E test pipelines, sharding, composite actions, and how to read CI logs and artifacts when things fail.
@@ -217,10 +217,12 @@ npx allure open allure-report
 <strong>Key takeaway:</strong> You will rarely need to create workflows from scratch — most of your CI interaction will be reading logs, downloading artifacts, and understanding why a shard failed. Know where to find the Allure report URL, how to download artifacts, and how to reproduce failures locally. The <code>@Gate</code> job is your single source of truth for whether a PR is ready.
 </div>
 
+### 17.8 Quiz
+
 <!-- ── Chapter 17 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 17 Quiz — GitHub Actions Workflows</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -284,7 +286,7 @@ npx allure open allure-report
 
 ---
 
-## Chapter 18: Test Strategy & Best Practices
+## Test Strategy & Best Practices
 
 <div class="chapter-intro">
 Knowing how to write a test is not enough — you need to know <strong>which</strong> tests to write, <strong>how</strong> to structure them, and <strong>what</strong> to do when they become flaky. This chapter covers the testing pyramid, naming conventions, page object best practices, data-driven testing, and flaky test management. These are the principles that separate a test suite that helps from one that hinders.
@@ -414,10 +416,12 @@ test.fixme("send flow times out on CI", async ({ app }) => {
 <strong>Key takeaway:</strong> E2E tests are expensive. Every test you write should earn its place by covering a critical path that lower-level tests cannot. When a test becomes flaky, fix the root cause — adding retries or timeouts just delays the problem.
 </div>
 
+### 18.6 Quiz
+
 <!-- ── Chapter 18 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 18 Quiz — Test Strategy & Best Practices</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -481,7 +485,7 @@ test.fixme("send flow times out on CI", async ({ app }) => {
 
 ---
 
-## Chapter 19: Debugging Failures Like a Pro
+## Debugging Failures Like a Pro
 
 <div class="chapter-intro">
 When an E2E test fails, resist the urge to immediately re-run it. This chapter teaches a systematic debugging approach: read the error, check the artifacts, reproduce locally, and fix the root cause. You will learn the Playwright Inspector, Trace Viewer, Detox debugging tools, Speculos troubleshooting, and common failure patterns with their solutions.
@@ -613,7 +617,7 @@ For desktop app debugging beyond E2E tests:
 
 ---
 
-## Chapter 20: Contributing Back -- Writing Production-Ready Tests
+## Contributing Back -- Writing Production-Ready Tests
 
 <div class="chapter-intro">
 This chapter covers the complete workflow for contributing new E2E tests to the Ledger Live repository: from picking a test case to merging your PR. You will learn the anatomy of a production-ready test, the PR checklist, and what reviewers look for.
@@ -673,7 +677,7 @@ Before opening your PR, verify:
 
 ---
 
-## Chapter 21: AI Agents & Automation Rules
+## AI Agents & Automation Rules
 
 <div class="chapter-intro">
 The Ledger Live repository uses two AI-assisted development tools: <strong>Claude Code</strong> (Anthropic's CLI) and <strong>Cursor</strong> (AI-powered IDE). Both are configured with project-specific rules, agents, commands, and skills that enforce the team's coding standards and accelerate development. As a QA engineer, understanding these configurations helps you use AI tools effectively and understand the guardrails they enforce.
@@ -847,10 +851,12 @@ The most relevant Cursor agents for QA work:
 <strong>Key takeaway:</strong> AI tools are configured with project-specific rules that enforce Ledger Live's standards. They are powerful accelerators for repetitive QA tasks (writing similar tests, debugging failures, adding coin support). Use them — but always verify the output. The <code>.claude/rules/</code> and <code>.cursor/rules/</code> directories are the source of truth for how the AI should behave.
 </div>
 
+### 21.9 Quiz
+
 <!-- ── Chapter 21 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 21 Quiz — AI Agents & Automation Rules</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 

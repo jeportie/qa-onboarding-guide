@@ -8,7 +8,7 @@ Parts 1 and 2 gave you the knowledge — what you are testing, how the repo is o
 
 ---
 
-## Chapter 13: Desktop E2E -- Architecture Deep Dive
+## Desktop E2E -- Architecture Deep Dive
 
 <div class="chapter-intro">
 Before writing a test, you need to understand the architecture that supports it. The desktop E2E suite is a carefully layered system: spec files call page objects, page objects use the Playwright Page, and the fixture system orchestrates the entire lifecycle from Speculos launch to screenshot capture on failure. This chapter maps the directory structure, the class hierarchy, the Application hub, and the fixture lifecycle in detail.
@@ -198,10 +198,12 @@ Each shard runs independently, with its own Speculos containers, and produces it
 <strong>Key takeaway:</strong> The architecture is layered by design — specs → page objects → fixtures → utilities. Each layer has a single responsibility. When you write a test, you only interact with the <code>app</code> object. When you maintain the suite, you modify one layer without breaking the others. This separation is what makes a 26-file test suite manageable.
 </div>
 
+### 13.6 Quiz
+
 <!-- ── Chapter 13 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 13 Quiz — Desktop E2E Architecture Deep Dive</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -265,7 +267,7 @@ Each shard runs independently, with its own Speculos containers, and produces it
 
 ---
 
-## Chapter 14: Writing Your First Desktop E2E Test
+## Writing Your First Desktop E2E Test
 
 <div class="chapter-intro">
 You have seen the architecture — now it is time to write code. This chapter walks through real tests from the codebase, explains each section line by line, shows data-driven patterns, and provides a template you can copy for your first test. By the end, you will have the muscle memory for the standard test structure.
@@ -450,10 +452,12 @@ test.describe("YOUR FEATURE NAME", () => {
 <strong>Key takeaway:</strong> Every desktop E2E test follows the same pattern: import from custom fixtures, configure with <code>test.use()</code>, tag and annotate, interact through <code>app</code>. Once you have written one test, you have written them all — the variation is in the page objects you call, not the structure.
 </div>
 
+### 14.6 Quiz
+
 <!-- ── Chapter 14 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 14 Quiz — Writing Your First Desktop E2E Test</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">4 questions · 75% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -506,7 +510,7 @@ test.describe("YOUR FEATURE NAME", () => {
 
 ---
 
-## Chapter 15: Mobile E2E -- Architecture Deep Dive
+## Mobile E2E -- Architecture Deep Dive
 
 <div class="chapter-intro">
 The mobile E2E suite tests Ledger Live Mobile (React Native) using Detox + Jest. While the high-level patterns mirror the desktop suite — Page Object Model, Speculos emulation, feature flag overrides — the implementation differs significantly. This chapter maps the directory structure, the initialization flow, the WebSocket bridge, and the key architectural differences from desktop.
@@ -645,10 +649,12 @@ So `app.init()` runs once per describe block in `beforeAll`. All tests in that b
 <strong>Key takeaway:</strong> Mobile E2E testing has more constraints than desktop: slower builds, limited parallelism, and the WebSocket bridge as an indirection layer. But the patterns are similar — Page Object Model, Speculos for device emulation, feature flag overrides. Understanding the constraints helps you design better tests.
 </div>
 
+### 15.6 Quiz
+
 <!-- ── Chapter 15 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 15 Quiz — Mobile E2E Architecture Deep Dive</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -712,7 +718,7 @@ So `app.init()` runs once per describe block in `beforeAll`. All tests in that b
 
 ---
 
-## Chapter 16: Writing Your First Mobile E2E Test
+## Writing Your First Mobile E2E Test
 
 <div class="chapter-intro">
 Time to write mobile code. This chapter mirrors Chapter 14 but for the mobile platform. You will see real mobile test patterns, the helper functions that simplify Detox interactions, and how to translate between desktop and mobile test styles. By the end, you will have a template for your first mobile E2E test.
@@ -842,10 +848,12 @@ These wrappers reduce the verbosity of raw Detox API calls and provide consisten
 <strong>Key takeaway:</strong> Mobile tests follow the same logical structure as desktop — describe block, setup, test steps, teardown. The differences are in the APIs (Detox vs Playwright) and the lifecycle (<code>app.init()</code> in <code>beforeAll</code> vs per-test fixtures). Use the helper functions to keep your tests concise and readable.
 </div>
 
+### 16.6 Quiz
+
 <!-- ── Chapter 16 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 16 Quiz — Writing Your First Mobile E2E Test</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">4 questions · 75% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 

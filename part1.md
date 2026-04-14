@@ -7,7 +7,7 @@ Welcome to the Ledger Live QA Automation team. This first part builds the mental
 
 ---
 
-## Chapter 1: What Is Ledger Live?
+## What Is Ledger Live?
 
 <div class="chapter-intro">
 Before you can test software effectively, you need to understand what it does and who it serves. This chapter introduces Ledger Live as a product, its platform architecture, and your role as a QA Automation Engineer within the team. This is the "why" behind everything you will build.
@@ -96,9 +96,11 @@ You now understand what Ledger Live is, what platforms it runs on, and what your
 </ul>
 </div>
 
+### 1.6 Quiz
+
 <!-- Chapter 1 Quiz -->
 <div class="quiz-container" id="quiz-ch1" data-pass-threshold="80">
-<h3>Chapter 1 Quiz</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">Test your understanding of Ledger Live fundamentals. Click an answer to check it.</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -162,7 +164,7 @@ You now understand what Ledger Live is, what platforms it runs on, and what your
 
 ---
 
-## Chapter 2: The Tech Stack
+## The Tech Stack
 
 <div class="chapter-intro">
 Ledger Live is built on a modern JavaScript/TypeScript stack with specific choices for each platform. Understanding the tech stack helps you read code, write tests, and debug failures. This chapter maps every technology to its purpose in the project.
@@ -250,9 +252,11 @@ This is a large stack, but you do not need to master everything at once. As a QA
 </ul>
 </div>
 
+### 2.8 Quiz
+
 <!-- Chapter 2 Quiz -->
 <div class="quiz-container" id="quiz-ch2" data-pass-threshold="80">
-<h3>Chapter 2 Quiz</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">Verify you know the stack components. Click an answer to check it.</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -316,7 +320,7 @@ This is a large stack, but you do not need to master everything at once. As a QA
 
 ---
 
-## Chapter 3: E2E Test Architecture
+## E2E Test Architecture
 
 <div class="chapter-intro">
 This is the most important chapter in Part 1. Understanding the full end-to-end test architecture — every component, how data flows, and where failures can occur — is the foundation for everything you will build. Study the diagram carefully; you will reference it constantly.
@@ -391,9 +395,11 @@ This architecture is what makes Ledger Live E2E testing unique. Every test invol
 </ul>
 </div>
 
+### 3.4 Quiz
+
 <!-- Chapter 3 Quiz -->
 <div class="quiz-container" id="quiz-ch3" data-pass-threshold="80">
-<h3>Chapter 3 Quiz</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">Test your understanding of the E2E architecture. This is critical knowledge.</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -457,7 +463,7 @@ This architecture is what makes Ledger Live E2E testing unique. Every test invol
 
 ---
 
-## Chapter 4: Monorepo Structure & Team Ownership
+## Monorepo Structure & Team Ownership
 
 <div class="chapter-intro">
 The Ledger Live monorepo is one of the largest JavaScript monorepos you will encounter. Understanding its directory structure and team ownership model is essential for navigating the codebase, knowing where to make changes, and understanding code review workflows.
@@ -570,9 +576,11 @@ Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e
 </ul>
 </div>
 
+### 4.5 Quiz
+
 <!-- Chapter 4 Quiz -->
 <div class="quiz-container" id="quiz-ch4" data-pass-threshold="80">
-<h3>Chapter 4 Quiz</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">Make sure you can navigate the monorepo confidently.</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
@@ -636,7 +644,7 @@ Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e
 
 ---
 
-## Chapter 5: Setting Up Your Development Environment
+## Setting Up Your Development Environment
 
 <div class="chapter-intro">
 This chapter walks you through setting up your machine to build Ledger Live and run E2E tests. Follow each step carefully — environment issues are the #1 source of "it doesn't work" questions for new joiners. There is no quiz for this chapter; the test is whether your setup works.
