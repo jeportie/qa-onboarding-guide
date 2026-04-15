@@ -19,9 +19,9 @@
   - [Part 2 Assessment](part2#part-2-final-assessment)
 
 - [**Part 3 -- E2E Testing in Practice**](part3)
-  - [13. Desktop E2E Architecture](part3#desktop-e2e----architecture-deep-dive)
+  - [13. Desktop E2E Architecture](part3#desktop-e2e-architecture-deep-dive)
   - [14. Writing First Desktop Test](part3#writing-your-first-desktop-e2e-test)
-  - [15. Mobile E2E Architecture](part3#mobile-e2e----architecture-deep-dive)
+  - [15. Mobile E2E Architecture](part3#mobile-e2e-architecture-deep-dive)
   - [16. Writing First Mobile Test](part3#writing-your-first-mobile-e2e-test)
   - [Part 3 Assessment](part3#part-3-final-assessment)
 
@@ -29,7 +29,7 @@
   - [17. GitHub Actions Workflows](part4#github-actions-workflows)
   - [18. Test Strategy & Best Practices](part4#test-strategy-amp-best-practices)
   - [19. Debugging Failures](part4#debugging-failures-like-a-pro)
-  - [20. Contributing Back](part4#contributing-back----writing-production-ready-tests)
+  - [20. Contributing Back](part4#contributing-back-writing-production-ready-tests)
   - [21. AI Agents & Automation](part4#ai-agents-amp-automation-rules)
   - [Part 4 Assessment](part4#part-4-final-assessment)
 
@@ -58,14 +58,14 @@
   - [Part 5 Assessment](part5#part-5-final-assessment)
 
 - [**Part 6 -- E2E Desktop in Detail**](part6)
-  - [43. Playwright from Zero](part6#playwright-from-zero----core-concepts)
-  - [44. Playwright Advanced](part6#playwright-advanced----fixtures-pom-amp-typescript-decorators)
-  - [45. Electron Testing](part6#electron----desktop-app-testing)
-  - [46. Speculos Mastery](part6#speculos----device-emulation-mastery)
-  - [47. Allure & Xray Reporting](part6#allure-amp-xray----test-reporting)
-  - [48. Codebase Deep Dive](part6#codebase-deep-dive----every-file-explained)
-  - [49. Daily Workflow](part6#your-daily-workflow----from-ticket-to-pr)
-  - [50. Ticket Walkthrough: QAA-1139](part6#real-ticket-walkthrough----qaa-1139-add-account-btc)
+  - [43. Playwright from Zero](part6#playwright-from-zero-core-concepts)
+  - [44. Playwright Advanced](part6#playwright-advanced-fixtures-pom-amp-typescript-decorators)
+  - [45. Electron Testing](part6#electron-desktop-app-testing)
+  - [46. Speculos Mastery](part6#speculos-device-emulation-mastery)
+  - [47. Allure & Xray Reporting](part6#allure-amp-xray-test-reporting)
+  - [48. Codebase Deep Dive](part6#codebase-deep-dive-every-file-explained)
+  - [49. Daily Workflow](part6#your-daily-workflow-from-ticket-to-pr)
+  - [50. Ticket Walkthrough: QAA-1139](part6#real-ticket-walkthrough-qaa-1139-add-account-btc)
   - [51. Exercises & Challenges](part6#exercises-amp-challenges)
   - [Part 6 Assessment](part6#part-6-final-assessment)
 

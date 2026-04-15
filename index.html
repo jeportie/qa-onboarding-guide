@@ -284,6 +284,32 @@
       background: url('images/Ledger-logo-long.svg') no-repeat center / contain;
     }
 
+    /* ── Sidebar Sub-Chapters (injected dynamically) ── */
+    .sidebar-sub-chapters {
+      padding-left: 14px;
+      margin: 4px 0 0 0;
+      list-style: none;
+    }
+    .sidebar-sub-chapters li {
+      line-height: 1.4;
+      margin: 1px 0;
+    }
+    .sidebar-sub-chapters a {
+      font-size: 0.82em;
+      color: #64748b !important;
+      text-decoration: none;
+      display: block;
+      padding: 2px 0;
+      transition: color 0.2s;
+    }
+    .sidebar-sub-chapters a:hover {
+      color: #6366f1 !important;
+    }
+    .sidebar-sub-chapters a.sub-active {
+      color: #6366f1 !important;
+      font-weight: 600;
+    }
+
     /* ── Sidebar Resize Handle ── */
     .sidebar-resize-handle {
       position: fixed;
@@ -455,6 +481,85 @@
       initQuizzes();
     }
 
+    // ── Sub-Chapter Injection ──
+    function injectSubChapters() {
+      // Remove previously injected sub-chapters
+      document.querySelectorAll('.sidebar-sub-chapters').forEach(function(el) { el.remove(); });
+
+      // Parse current route: #/partN?id=heading-slug
+      var hash = window.location.hash;
+      var idMatch = hash.match(/\?id=([^&]+)/);
+      if (!idMatch) return;
+
+      var headingId = decodeURIComponent(idMatch[1]);
+      var heading = document.getElementById(headingId);
+      if (!heading) return;
+
+      // If we navigated to an h3, find its parent h2
+      var h2Heading = null;
+      if (heading.tagName === 'H2') {
+        h2Heading = heading;
+      } else if (heading.tagName === 'H3') {
+        var prev = heading.previousElementSibling;
+        while (prev) {
+          if (prev.tagName === 'H2') { h2Heading = prev; break; }
+          prev = prev.previousElementSibling;
+        }
+      }
+      if (!h2Heading) return;
+
+      // Collect h3 headings from this h2 until the next h2
+      var subHeadings = [];
+      var el = h2Heading.nextElementSibling;
+      while (el) {
+        if (el.tagName === 'H2') break;
+        if (el.tagName === 'H3') {
+          subHeadings.push({ id: el.id, text: el.textContent.trim() });
+        }
+        el = el.nextElementSibling;
+      }
+      if (subHeadings.length === 0) return;
+
+      // Find the page from the hash (e.g., "part6")
+      var pageMatch = hash.match(/#\/([\w-]+)/);
+      var page = pageMatch ? pageMatch[1] : '';
+
+      // Find the sidebar link matching this h2
+      var h2Id = h2Heading.id;
+      var sidebarLinks = document.querySelectorAll('.sidebar-nav a');
+      var targetLink = null;
+      for (var i = 0; i < sidebarLinks.length; i++) {
+        var href = sidebarLinks[i].getAttribute('href');
+        if (href && href.indexOf('?id=' + h2Id) !== -1) {
+          targetLink = sidebarLinks[i];
+          break;
+        }
+      }
+      if (!targetLink) return;
+
+      // Build nested list
+      var ul = document.createElement('ul');
+      ul.className = 'sidebar-sub-chapters';
+      subHeadings.forEach(function(sub) {
+        var li = document.createElement('li');
+        var a = document.createElement('a');
+        a.href = '#/' + page + '?id=' + sub.id;
+        a.textContent = sub.text;
+        // Highlight if this is the currently navigated h3
+        if (sub.id === headingId) {
+          a.className = 'sub-active';
+        }
+        li.appendChild(a);
+        ul.appendChild(li);
+      });
+
+      // Append to the sidebar link's li
+      var parentLi = targetLink.closest('li');
+      if (parentLi) {
+        parentLi.appendChild(ul);
+      }
+    }
+
     // ── Sidebar Resize ──
     function initSidebarResize() {
       if (document.querySelector('.sidebar-resize-handle')) return;
@@ -518,9 +623,14 @@
         function(hook) {
           hook.ready(function() {
             initSidebarResize();
+            // Handle in-page navigation (same page, different heading)
+            window.addEventListener('hashchange', function() {
+              setTimeout(injectSubChapters, 50);
+            });
           });
           hook.doneEach(function() {
             initQuizzes();
+            setTimeout(injectSubChapters, 50);
           });
         }
       ]
