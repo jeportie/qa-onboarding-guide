@@ -1222,8 +1222,9 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 <ul>
 <li><a href="https://github.com/LedgerHQ/speculos">Speculos source code</a> — the device emulator</li>
 <li><a href="https://github.com/LedgerHQ/coin-apps">Coin-apps repository</a> — compiled .elf binaries for all devices</li>
-<li><a href="https://developers.ledger.com/docs/device-app/architecture/io/apdu">APDU Protocol documentation</a> — the communication protocol with Ledger devices</li>
-<li><a href="https://developers.ledger.com/docs/device-app/develop/ui/ledger-device-ui-kit">BAGL & NBGL documentation</a> — display framework reference</li>
+<li><a href="https://developers.ledger.com/docs/device-interaction/beginner/exchange_data">APDU — How to exchange data with a Ledger device</a> (Ledger developer docs)</li>
+<li><a href="https://docs.zondax.ch/ledger-apps/starkware/APDU">APDU — Protocol specification reference</a> (Zondax docs)</li>
+<li><a href="https://www.ledger.com/introducing-bolos-blockchain-open-ledger-operating-system">BOLOS / BAGL / NBGL — Introducing the Blockchain Open Ledger Operating System</a></li>
 </ul>
 </div>
 

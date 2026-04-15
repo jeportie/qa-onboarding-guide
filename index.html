@@ -274,6 +274,37 @@
       line-height: 1.6;
     }
 
+    /* ── Sidebar Collapsible Sections ── */
+    .sidebar-nav > ul > li > ul {
+      display: none;
+      overflow: hidden;
+      transition: all 0.25s ease;
+    }
+    .sidebar-nav > ul > li.open > ul {
+      display: block;
+    }
+    .sidebar-nav > ul > li > strong,
+    .sidebar-nav > ul > li > p > strong {
+      cursor: pointer;
+      display: block;
+      padding: 4px 0;
+      user-select: none;
+      position: relative;
+    }
+    .sidebar-nav > ul > li > strong::before,
+    .sidebar-nav > ul > li > p > strong::before {
+      content: '▸';
+      display: inline-block;
+      margin-right: 6px;
+      font-size: 0.75em;
+      transition: transform 0.2s;
+      color: #94a3b8;
+    }
+    .sidebar-nav > ul > li.open > strong::before,
+    .sidebar-nav > ul > li.open > p > strong::before {
+      transform: rotate(90deg);
+    }
+
     /* ── Sidebar Resize Handle ── */
     .sidebar-resize-handle {
       position: fixed;
@@ -492,6 +523,55 @@
       window.addEventListener('resize', positionHandle);
     }
 
+    // ── Sidebar Collapse ──
+    function initSidebarCollapse() {
+      var nav = document.querySelector('.sidebar-nav');
+      if (!nav) return;
+
+      var sections = nav.querySelectorAll(':scope > ul > li');
+      sections.forEach(function(li) {
+        var toggle = li.querySelector(':scope > strong') || li.querySelector(':scope > p > strong');
+        if (!toggle) return;
+
+        // Click to toggle
+        toggle.addEventListener('click', function(e) {
+          e.preventDefault();
+          li.classList.toggle('open');
+        });
+      });
+    }
+
+    function expandCurrentSection() {
+      var nav = document.querySelector('.sidebar-nav');
+      if (!nav) return;
+
+      var sections = nav.querySelectorAll(':scope > ul > li');
+      var currentPath = window.location.hash.split('?')[0] || '/';
+
+      sections.forEach(function(li) {
+        var links = li.querySelectorAll('a[href]');
+        var isActive = false;
+        links.forEach(function(a) {
+          var href = a.getAttribute('href') || '';
+          // Match if current hash starts with the link's page
+          if (currentPath.indexOf(href.split('#')[0]) !== -1 && href !== '/') {
+            isActive = true;
+          }
+        });
+
+        // Also check if any link inside is the active one (docsify adds .active class)
+        if (li.querySelector('a.active')) {
+          isActive = true;
+        }
+
+        if (isActive) {
+          li.classList.add('open');
+        } else {
+          li.classList.remove('open');
+        }
+      });
+    }
+
     // ── Docsify Configuration ──
     window.$docsify = {
       name: 'QA Onboarding Guide',
@@ -508,9 +588,11 @@
         function(hook) {
           hook.ready(function() {
             initSidebarResize();
+            initSidebarCollapse();
           });
           hook.doneEach(function() {
             initQuizzes();
+            expandCurrentSection();
           });
         }
       ]
