@@ -57,6 +57,18 @@
   - [ESLint & Oxlint](part5#eslint-amp-oxlint)
   - [Part 5 Assessment](part5#part-5-final-assessment)
 
+- **Part 6 -- E2E Desktop in Detail**
+  - [Playwright from Zero](part6#playwright-from-zero----core-concepts)
+  - [Playwright Advanced](part6#playwright-advanced----fixtures-pom-amp-typescript-decorators)
+  - [Electron Testing](part6#electron----desktop-app-testing)
+  - [Speculos Mastery](part6#speculos----device-emulation-mastery)
+  - [Allure & Xray Reporting](part6#allure-amp-xray----test-reporting)
+  - [Codebase Deep Dive](part6#codebase-deep-dive----every-file-explained)
+  - [Daily Workflow](part6#your-daily-workflow----from-ticket-to-pr)
+  - [Ticket Walkthrough: QAA-1139](part6#real-ticket-walkthrough----qaa-1139-add-account-btc)
+  - [Exercises & Challenges](part6#exercises-amp-challenges)
+  - [Part 6 Assessment](part6#part-6-final-assessment)
+
 - **Appendix**
   - [A: Command Reference](appendix#a-complete-command-reference)
   - [B: Environment Variables](appendix#b-environment-variables-reference)
