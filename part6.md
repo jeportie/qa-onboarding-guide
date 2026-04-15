@@ -2409,6 +2409,130 @@ Let's check what `B2CQA-786` specifically requires. The mobile test does:
 
 The existing desktop test does exactly this. **The simplest and correct approach is to add `B2CQA-786` to the existing BTC currency entry's xrayTicket field.**
 
+### 50.2b Hands-On: Run the Desktop Test BEFORE the Fix
+
+Before touching any code, run the existing desktop BTC add account test to see how it behaves today. This builds your mental model and gives you a baseline to compare after the fix.
+
+**Prerequisites** (one-time setup — skip if already done):
+```bash
+# Ensure Docker is running (Speculos needs it)
+docker info
+
+# Set environment variables in your shell (e.g. ~/.zshrc)
+export MOCK=0
+export COINAPPS="/path/to/coin-apps"        # your local coin-apps clone
+export SEED="your 24-word test seed"
+export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:master"
+export SPECULOS_DEVICE="nanoSP"
+
+# Build the desktop app for testing
+pnpm i
+pnpm build:lld:deps
+pnpm build:cli
+pnpm desktop build:testing
+pnpm e2e:desktop test:playwright:setup      # Install Playwright browsers
+```
+
+**Run the BTC test:**
+```bash
+cd e2e/desktop
+pnpm test:playwright -- --grep "Bitcoin.*Add account"
+```
+
+The test name is `[Bitcoin] Add account` inside the `Add Accounts` describe block. The `--grep` flag matches against the full test title.
+
+**What you should observe:**
+1. Playwright launches Electron (Ledger Live Desktop)
+2. The app starts with `skip-onboarding-with-last-seen-device` userdata — empty portfolio, no accounts
+3. The test clicks "Add Account" → modular drawer opens
+4. BTC is selected → Speculos scans and finds "Bitcoin 1"
+5. Account is added → portfolio shows balance and operations
+6. Navigation to Accounts → Bitcoin 1 → verifies details
+7. Test passes
+
+**Now check the Allure report to see what metadata is reported:**
+```bash
+# Generate and open the Allure report
+npx allure serve allure-results
+```
+
+This opens the report in your browser. Find the `[Bitcoin] Add account` test and look at:
+- **TMS Links section** — you will see `B2CQA-2499`, `B2CQA-2644`, `B2CQA-2672`, `B2CQA-2073` listed
+- **Notice:** `B2CQA-786` is **not** there — this is the gap we need to fix
+- **Tags** — `@NanoSP`, `@bitcoin`, `@family-bitcoin`, etc.
+- **Team** — `WALLET_XP`
+- **Steps** — Each `@step`-decorated page object method appears as a named step with timing
+
+> **Tip:** You can also use Playwright's built-in debug mode to step through the test interactively:
+> ```bash
+> PWDEBUG=1 pnpm test:playwright -- --grep "Bitcoin.*Add account"
+> ```
+> This opens the Playwright Inspector where you can pause, step, and inspect locators in real time.
+
+Press `Ctrl+C` in the terminal to stop the Allure server when you are done reviewing.
+
+### 50.2c Hands-On: Study the Mobile Reference Implementation
+
+The ticket says this test "currently exists only in `e2e/mobile/specs/addAccount/addAccountBTC.spec.ts`". Let's look at how the mobile version works to understand the reference implementation.
+
+**Read the mobile test:**
+```bash
+cat e2e/mobile/specs/addAccount/addAccountBTC.spec.ts
+```
+
+You will see:
+```typescript
+import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
+import { runAddAccountTest } from "./addAccount";
+
+runAddAccountTest(
+  Currency.BTC,
+  ["B2CQA-2499", "B2CQA-2644", "B2CQA-2672", "B2CQA-786"],
+  //                                            ^^^^^^^^^^^
+  // B2CQA-786 is here! This is the ticket we need to link on desktop too.
+  [
+    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+    "@smoke", "@bitcoin", "@family-bitcoin",
+  ],
+);
+```
+
+**Key observation:** The mobile test passes `B2CQA-786` in its `tmsLinks` array. Now read the helper to understand the flow:
+```bash
+cat e2e/mobile/specs/addAccount/addAccount.ts
+```
+
+The helper `runAddAccountTest()` does:
+1. Initializes the app with `userdata: "skip-onboarding"` — empty portfolio, no accounts
+2. Waits for the portfolio page to load
+3. Taps "Add Account" → "Import with your Ledger"
+4. Selects BTC via modular drawer (or legacy flow as fallback)
+5. Adds the account at index 0
+6. Verifies the account appears with balance, operations, and correct address index
+
+**Compare mobile vs desktop:**
+
+| Aspect | Mobile (`addAccount.ts`) | Desktop (`add.account.spec.ts`) |
+|---|---|---|
+| Framework | Detox + Jest | Playwright |
+| Userdata | `skip-onboarding` | `skip-onboarding-with-last-seen-device` |
+| Starting state | Empty portfolio | Empty portfolio |
+| Flow | Add account → verify | Add account → verify |
+| `B2CQA-786` linked? | Yes | **No** — this is the gap |
+
+Both tests cover the same scenario (first-time BTC add account from empty state). The only difference is the framework and the missing Xray link on desktop.
+
+**(Optional) Run the mobile test** if you have the mobile build environment set up:
+```bash
+# Terminal 1: Metro bundler
+pnpm mobile start
+
+# Terminal 2: Run the test (iOS example)
+pnpm mobile e2e:test -c ios.sim.debug -- --testNamePattern="add account.*BTC"
+```
+
+> **Note:** Mobile builds take 10-30 minutes and require Xcode/Android Studio. If you don't have the mobile environment ready, reading the code above is sufficient — the important takeaway is that `B2CQA-786` is in the mobile test's `tmsLinks` but missing from the desktop test's `xrayTicket`.
+
 ### 50.3 The Implementation
 
 Open `e2e/desktop/tests/specs/add.account.spec.ts`:
@@ -2525,24 +2649,92 @@ test.describe("Add Account - First Time BTC", () => {
 });
 ```
 
-### 50.5 Running and Validating
+### 50.5 Hands-On: Run the Fixed Test and Generate the Allure Report
+
+Now that you have made the one-line change (adding `B2CQA-786` to the BTC `xrayTicket`), run the test again to confirm it still passes and verify that the Allure report now includes the new ticket.
+
+#### Step 1: Run the test
 
 ```bash
-# Run the specific test
-pnpm e2e:desktop test:playwright -- --grep "BTC.*Add account"
-
-# Run 3 times for stability
-for i in 1 2 3; do pnpm e2e:desktop test:playwright -- --grep "BTC.*Add account"; done
-
-# Check the Allure report
-npx allure serve allure-results
+cd e2e/desktop
+pnpm test:playwright -- --grep "Bitcoin.*Add account"
 ```
 
-In the Allure report, verify:
-- Steps are clearly named
-- B2CQA-786 link is clickable
-- Team is WALLET_XP
-- Tags include @bitcoin, @NanoSP, etc.
+The test should pass exactly as before — you only changed metadata, not behavior.
+
+#### Step 2: Run multiple times for stability
+
+Before opening a PR, run the test at least 3 times to make sure it is stable:
+```bash
+pnpm test:playwright -- --grep "Bitcoin.*Add account" --repeat-each=3
+```
+
+All 3 runs should pass. If any run fails, investigate — it may be a flaky test or an environment issue (Docker not running, Speculos timeout, etc.).
+
+#### Step 3: Generate and open the Allure report
+
+Allure is the test reporting framework used across Ledger Live E2E tests. It produces an interactive HTML report from the `allure-results/` directory that Playwright populates after each run.
+
+**Option A — Serve directly (recommended for quick checks):**
+```bash
+npx allure serve allure-results
+```
+This generates a temporary report and opens it in your browser. Press `Ctrl+C` to stop the server when done.
+
+**Option B — Generate a persistent report:**
+```bash
+# Generate the report into ./allure-report/
+pnpm allure:generate
+
+# Open it manually
+open allure-report/index.html        # macOS
+# or: xdg-open allure-report/index.html  # Linux
+```
+
+#### Step 4: Navigate the Allure report
+
+Once the report is open in your browser:
+
+1. **Find the test:** Click on **Suites** in the left sidebar → expand **Add Accounts** → click **[Bitcoin] Add account**
+
+2. **Check the TMS Links:** In the test detail panel, look for the **Links** section. You should now see:
+   - `B2CQA-2499`
+   - `B2CQA-2644`
+   - `B2CQA-2672`
+   - `B2CQA-2073`
+   - `B2CQA-786` — **this is the new one you just added**
+
+   Each link is clickable and points to the Xray test case in Jira. Compare this with the report you generated in Section 50.2b — `B2CQA-786` was missing before your change, now it is present.
+
+3. **Check the test metadata:**
+   - **Tags:** `@NanoSP`, `@bitcoin`, `@family-bitcoin`, etc.
+   - **Owner/Team:** `WALLET_XP`
+   - **Duration:** How long the test took (typically 30-90 seconds)
+
+4. **Explore the test steps:** Click on the test to expand its step trace. Each `@step`-decorated page object method appears as a named step:
+   - `portfolio.clickAddAccountButton()`
+   - `modularSelector.selectAssetByTicker(BTC)`
+   - `scanAccountsDrawer.selectFirstAccount()`
+   - `portfolio.expectBalanceVisibility()`
+   - etc.
+
+   Each step shows its duration. If a step fails, the report shows the failure message, a screenshot, and (if configured) a video recording.
+
+5. **Explore the report tabs:**
+   - **Overview** — Summary with pass/fail counts, duration, and environment info
+   - **Suites** — Tests grouped by `test.describe()` blocks
+   - **Graphs** — Duration trends, status distribution
+   - **Timeline** — Gantt chart of parallel test execution
+
+#### Step 5: Typecheck
+
+Run the typecheck to make sure the metadata change did not introduce any issues:
+```bash
+cd ../..   # back to monorepo root
+pnpm e2e:desktop typecheck
+```
+
+This should pass cleanly — the `xrayTicket` field is a plain string, so adding a ticket ID cannot break types.
 
 ### 50.6 Git Workflow for This Ticket
 
