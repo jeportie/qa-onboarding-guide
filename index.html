@@ -274,35 +274,14 @@
       line-height: 1.6;
     }
 
-    /* ── Sidebar Collapsible Sections ── */
-    .sidebar-nav li > ul {
-      display: none;
-      overflow: hidden;
-      transition: all 0.25s ease;
-    }
-    .sidebar-nav li.open > ul {
+    /* ── Sidebar Logo ── */
+    .app-name-link::before {
+      content: '';
       display: block;
-    }
-    .sidebar-nav .toggle-icon {
-      display: inline-block;
-      width: 16px;
-      text-align: center;
-      cursor: pointer;
-      font-size: 0.7em;
-      color: #94a3b8;
-      transition: transform 0.2s;
-      user-select: none;
-      vertical-align: middle;
-    }
-    .sidebar-nav li.open > .toggle-icon,
-    .sidebar-nav li.open > p > .toggle-icon {
-      transform: rotate(90deg);
-    }
-    .sidebar-nav .generated-toc {
-      padding-left: 12px;
-    }
-    .sidebar-nav .generated-toc li {
-      font-size: 0.9em;
+      width: 120px;
+      height: 32px;
+      margin: 0 auto 12px auto;
+      background: url('images/Ledger-logo-long.svg') no-repeat center / contain;
     }
 
     /* ── Sidebar Resize Handle ── */
@@ -523,134 +502,12 @@
       window.addEventListener('resize', positionHandle);
     }
 
-    // ── Sidebar Collapse ──
-    function initSidebarCollapse() {
-      var nav = document.querySelector('.sidebar-nav');
-      if (!nav) return;
-
-      nav.querySelectorAll('li').forEach(function(li) {
-        var childUl = li.querySelector(':scope > ul');
-        if (!childUl) return;
-        // Don't re-initialize if toggle already exists
-        if (li.querySelector(':scope > .toggle-icon') ||
-            (li.querySelector(':scope > p') && li.querySelector(':scope > p > .toggle-icon'))) return;
-
-        var toggle = document.createElement('span');
-        toggle.className = 'toggle-icon';
-        toggle.innerHTML = '&#9656;';
-
-        toggle.addEventListener('click', function(e) {
-          e.preventDefault();
-          e.stopPropagation();
-          li.classList.toggle('open');
-        });
-
-        // Insert inside <p> if present (Docsify wraps link-list items in <p>), otherwise before first child
-        var p = li.querySelector(':scope > p');
-        if (p) {
-          p.insertBefore(toggle, p.firstChild);
-        } else {
-          li.insertBefore(toggle, li.firstChild);
-        }
-      });
-    }
-
-    function expandCurrentSection() {
-      var nav = document.querySelector('.sidebar-nav');
-      if (!nav) return;
-
-      // Close all sections
-      nav.querySelectorAll('li.open').forEach(function(li) {
-        li.classList.remove('open');
-      });
-
-      // Open the ancestor chain of the active link
-      var activeLink = nav.querySelector('a.active');
-      if (activeLink) {
-        var el = activeLink.closest('li');
-        while (el && nav.contains(el)) {
-          if (el.tagName === 'LI') {
-            el.classList.add('open');
-          }
-          el = el.parentElement;
-        }
-      }
-    }
-
-    // ── Generate per-chapter sub-headings in sidebar ──
-    function generateSubChapters() {
-      var content = document.querySelector('.markdown-section');
-      var nav = document.querySelector('.sidebar-nav');
-      if (!content || !nav) return;
-
-      // Clean up previous generated items
-      nav.querySelectorAll('ul.generated-toc').forEach(function(ul) {
-        var parentLi = ul.closest('li');
-        ul.remove();
-        // Remove orphaned toggle icons that were added for generated toc
-        if (parentLi && !parentLi.querySelector(':scope > ul')) {
-          var icon = parentLi.querySelector(':scope > .toggle-icon') ||
-                     (parentLi.querySelector(':scope > p') && parentLi.querySelector(':scope > p > .toggle-icon'));
-          if (icon) icon.remove();
-        }
-      });
-
-      // Determine current page from hash
-      var hash = window.location.hash || '#/';
-      var currentPage = hash.replace('#/', '').split('?')[0] || '';
-
-      // Build h2 → h3[] map from rendered content
-      var sections = [];
-      var currentSection = null;
-      content.querySelectorAll('h2, h3').forEach(function(h) {
-        if (h.tagName === 'H2') {
-          currentSection = { id: h.id, h3s: [] };
-          sections.push(currentSection);
-        } else if (h.tagName === 'H3' && currentSection) {
-          currentSection.h3s.push({ id: h.id, text: h.textContent });
-        }
-      });
-
-      // For each sidebar link on the current page, inject its h3s
-      nav.querySelectorAll('a[href]').forEach(function(link) {
-        var href = link.getAttribute('href') || '';
-        var hrefPage = href.replace('#/', '').split('?')[0];
-        if (hrefPage !== currentPage) return;
-
-        // Extract heading id from href (format: "#/page?id=heading-id")
-        var idMatch = href.match(/[?&]id=([^&]+)/);
-        if (!idMatch) return;
-        var headingId = decodeURIComponent(idMatch[1]);
-
-        var section = null;
-        for (var i = 0; i < sections.length; i++) {
-          if (sections[i].id === headingId) { section = sections[i]; break; }
-        }
-        if (!section || section.h3s.length === 0) return;
-
-        var li = link.closest('li');
-        if (!li) return;
-
-        var subUl = document.createElement('ul');
-        subUl.className = 'generated-toc';
-        section.h3s.forEach(function(h3) {
-          var subLi = document.createElement('li');
-          var subA = document.createElement('a');
-          subA.href = '#/' + currentPage + '?id=' + encodeURIComponent(h3.id);
-          subA.textContent = h3.text;
-          subLi.appendChild(subA);
-          subUl.appendChild(subLi);
-        });
-        li.appendChild(subUl);
-      });
-    }
-
     // ── Docsify Configuration ──
     window.$docsify = {
       name: 'QA Onboarding Guide',
       nameLink: '/',
       loadSidebar: true,
-      subMaxLevel: 0,
+      subMaxLevel: 3,
       auto2top: true,
       search: {
         placeholder: 'Search the guide...',
@@ -664,9 +521,6 @@
           });
           hook.doneEach(function() {
             initQuizzes();
-            generateSubChapters();
-            initSidebarCollapse();
-            expandCurrentSection();
           });
         }
       ]
