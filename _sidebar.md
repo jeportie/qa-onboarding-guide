@@ -1,6 +1,6 @@
 - [Home](/)
 
-- **Part 1 -- Foundations**
+- [**Part 1 -- Foundations**](part1)
   - [1. What Is Ledger Live?](part1#what-is-ledger-live)
   - [2. The Tech Stack](part1#the-tech-stack)
   - [3. E2E Test Architecture](part1#e2e-test-architecture)
@@ -8,7 +8,7 @@
   - [5. Setting Up Your Dev Environment](part1#setting-up-your-development-environment)
   - [Part 1 Assessment](part1#part-1-final-assessment)
 
-- **Part 2 -- Tools in Context**
+- [**Part 2 -- Tools in Context**](part2)
   - [6. Git Workflow, Hooks & Changesets](part2#git-workflow-hooks-amp-changesets)
   - [7. pnpm, Turbo & Build Pipeline](part2#pnpm-turbo-amp-build-pipeline)
   - [8. Playwright in Ledger Live](part2#playwright-in-ledger-live)
@@ -18,14 +18,14 @@
   - [12. Allure Reporting & Xray](part2#allure-reporting-amp-xray-integration)
   - [Part 2 Assessment](part2#part-2-final-assessment)
 
-- **Part 3 -- E2E Testing in Practice**
+- [**Part 3 -- E2E Testing in Practice**](part3)
   - [13. Desktop E2E Architecture](part3#desktop-e2e----architecture-deep-dive)
   - [14. Writing First Desktop Test](part3#writing-your-first-desktop-e2e-test)
   - [15. Mobile E2E Architecture](part3#mobile-e2e----architecture-deep-dive)
   - [16. Writing First Mobile Test](part3#writing-your-first-mobile-e2e-test)
   - [Part 3 Assessment](part3#part-3-final-assessment)
 
-- **Part 4 -- CI/CD & Mastery**
+- [**Part 4 -- CI/CD & Mastery**](part4)
   - [17. GitHub Actions Workflows](part4#github-actions-workflows)
   - [18. Test Strategy & Best Practices](part4#test-strategy-amp-best-practices)
   - [19. Debugging Failures](part4#debugging-failures-like-a-pro)
@@ -33,7 +33,7 @@
   - [21. AI Agents & Automation](part4#ai-agents-amp-automation-rules)
   - [Part 4 Assessment](part4#part-4-final-assessment)
 
-- **Part 5 -- Crash Courses**
+- [**Part 5 -- Crash Courses**](part5)
   - [22. TypeScript](part5#typescript)
   - [23. React](part5#react)
   - [24. React Native](part5#react-native)
@@ -57,7 +57,7 @@
   - [42. ESLint & Oxlint](part5#eslint-amp-oxlint)
   - [Part 5 Assessment](part5#part-5-final-assessment)
 
-- **Part 6 -- E2E Desktop in Detail**
+- [**Part 6 -- E2E Desktop in Detail**](part6)
   - [43. Playwright from Zero](part6#playwright-from-zero----core-concepts)
   - [44. Playwright Advanced](part6#playwright-advanced----fixtures-pom-amp-typescript-decorators)
   - [45. Electron Testing](part6#electron----desktop-app-testing)
@@ -69,7 +69,7 @@
   - [51. Exercises & Challenges](part6#exercises-amp-challenges)
   - [Part 6 Assessment](part6#part-6-final-assessment)
 
-- **Appendix**
+- [**Appendix**](appendix)
   - [A: Command Reference](appendix#a-complete-command-reference)
   - [B: Environment Variables](appendix#b-environment-variables-reference)
   - [C: Devices & Coins](appendix#c-supported-devices-amp-coins)

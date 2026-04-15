@@ -8,7 +8,7 @@
 </div>
 
 <div style="display: flex; justify-content: center; gap: 12px; margin: 24px 0; flex-wrap: wrap;">
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">42 Chapters</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">51 Chapters</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">23 Interactive Quizzes</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">21 Crash Courses</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">5 Appendices</span>
@@ -35,7 +35,7 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 
 <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; border-top: 3px solid #8b5cf6;">
   <strong style="color: #8b5cf6;">Structure</strong><br>
-  <span style="color: #475569; font-size: 0.92em;">Five progressive parts, from foundations to mastery, plus crash courses and appendices.</span>
+  <span style="color: #475569; font-size: 0.92em;">Six progressive parts, from foundations to mastery, plus crash courses and appendices.</span>
 </div>
 
 <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; border-top: 3px solid #22c55e;">
@@ -61,6 +61,7 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 | **3** | [E2E Testing in Practice](part3.md) | Ch 13-16 | Desktop & mobile E2E architecture deep dives + your first tests |
 | **4** | [CI/CD & Mastery](part4.md) | Ch 17-21 | GitHub Actions, test strategy, debugging, contributing, AI agents |
 | **5** | [Crash Courses](part5.md) | Ch 22-42 | Quick references for all 21 technologies in the stack |
+| **6** | [E2E Desktop in Detail](part6.md) | Ch 43-51 | Playwright deep dive, Electron, Speculos mastery, Allure/Xray, codebase walkthrough, daily workflow, real ticket |
 | **A** | [Appendix](appendix.md) | A-E | Commands, env vars, devices, troubleshooting FAQ, glossary |
 
 ---

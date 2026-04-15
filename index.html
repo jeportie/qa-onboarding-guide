@@ -275,34 +275,34 @@
     }
 
     /* ── Sidebar Collapsible Sections ── */
-    .sidebar-nav > ul > li > ul {
+    .sidebar-nav li > ul {
       display: none;
       overflow: hidden;
       transition: all 0.25s ease;
     }
-    .sidebar-nav > ul > li.open > ul {
+    .sidebar-nav li.open > ul {
       display: block;
     }
-    .sidebar-nav > ul > li > strong,
-    .sidebar-nav > ul > li > p > strong {
-      cursor: pointer;
-      display: block;
-      padding: 4px 0;
-      user-select: none;
-      position: relative;
-    }
-    .sidebar-nav > ul > li > strong::before,
-    .sidebar-nav > ul > li > p > strong::before {
-      content: '▸';
+    .sidebar-nav .toggle-icon {
       display: inline-block;
-      margin-right: 6px;
-      font-size: 0.75em;
-      transition: transform 0.2s;
+      width: 16px;
+      text-align: center;
+      cursor: pointer;
+      font-size: 0.7em;
       color: #94a3b8;
+      transition: transform 0.2s;
+      user-select: none;
+      vertical-align: middle;
     }
-    .sidebar-nav > ul > li.open > strong::before,
-    .sidebar-nav > ul > li.open > p > strong::before {
+    .sidebar-nav li.open > .toggle-icon,
+    .sidebar-nav li.open > p > .toggle-icon {
       transform: rotate(90deg);
+    }
+    .sidebar-nav .generated-toc {
+      padding-left: 12px;
+    }
+    .sidebar-nav .generated-toc li {
+      font-size: 0.9em;
     }
 
     /* ── Sidebar Resize Handle ── */
@@ -528,16 +528,30 @@
       var nav = document.querySelector('.sidebar-nav');
       if (!nav) return;
 
-      var sections = nav.querySelectorAll(':scope > ul > li');
-      sections.forEach(function(li) {
-        var toggle = li.querySelector(':scope > strong') || li.querySelector(':scope > p > strong');
-        if (!toggle) return;
+      nav.querySelectorAll('li').forEach(function(li) {
+        var childUl = li.querySelector(':scope > ul');
+        if (!childUl) return;
+        // Don't re-initialize if toggle already exists
+        if (li.querySelector(':scope > .toggle-icon') ||
+            (li.querySelector(':scope > p') && li.querySelector(':scope > p > .toggle-icon'))) return;
 
-        // Click to toggle
+        var toggle = document.createElement('span');
+        toggle.className = 'toggle-icon';
+        toggle.innerHTML = '&#9656;';
+
         toggle.addEventListener('click', function(e) {
           e.preventDefault();
+          e.stopPropagation();
           li.classList.toggle('open');
         });
+
+        // Insert inside <p> if present (Docsify wraps link-list items in <p>), otherwise before first child
+        var p = li.querySelector(':scope > p');
+        if (p) {
+          p.insertBefore(toggle, p.firstChild);
+        } else {
+          li.insertBefore(toggle, li.firstChild);
+        }
       });
     }
 
@@ -545,30 +559,89 @@
       var nav = document.querySelector('.sidebar-nav');
       if (!nav) return;
 
-      var sections = nav.querySelectorAll(':scope > ul > li');
-      var currentPath = window.location.hash.split('?')[0] || '/';
+      // Close all sections
+      nav.querySelectorAll('li.open').forEach(function(li) {
+        li.classList.remove('open');
+      });
 
-      sections.forEach(function(li) {
-        var links = li.querySelectorAll('a[href]');
-        var isActive = false;
-        links.forEach(function(a) {
-          var href = a.getAttribute('href') || '';
-          // Match if current hash starts with the link's page
-          if (currentPath.indexOf(href.split('#')[0]) !== -1 && href !== '/') {
-            isActive = true;
+      // Open the ancestor chain of the active link
+      var activeLink = nav.querySelector('a.active');
+      if (activeLink) {
+        var el = activeLink.closest('li');
+        while (el && nav.contains(el)) {
+          if (el.tagName === 'LI') {
+            el.classList.add('open');
           }
+          el = el.parentElement;
+        }
+      }
+    }
+
+    // ── Generate per-chapter sub-headings in sidebar ──
+    function generateSubChapters() {
+      var content = document.querySelector('.markdown-section');
+      var nav = document.querySelector('.sidebar-nav');
+      if (!content || !nav) return;
+
+      // Clean up previous generated items
+      nav.querySelectorAll('ul.generated-toc').forEach(function(ul) {
+        var parentLi = ul.closest('li');
+        ul.remove();
+        // Remove orphaned toggle icons that were added for generated toc
+        if (parentLi && !parentLi.querySelector(':scope > ul')) {
+          var icon = parentLi.querySelector(':scope > .toggle-icon') ||
+                     (parentLi.querySelector(':scope > p') && parentLi.querySelector(':scope > p > .toggle-icon'));
+          if (icon) icon.remove();
+        }
+      });
+
+      // Determine current page from hash
+      var hash = window.location.hash || '#/';
+      var currentPage = hash.replace('#/', '').split('?')[0] || '';
+
+      // Build h2 → h3[] map from rendered content
+      var sections = [];
+      var currentSection = null;
+      content.querySelectorAll('h2, h3').forEach(function(h) {
+        if (h.tagName === 'H2') {
+          currentSection = { id: h.id, h3s: [] };
+          sections.push(currentSection);
+        } else if (h.tagName === 'H3' && currentSection) {
+          currentSection.h3s.push({ id: h.id, text: h.textContent });
+        }
+      });
+
+      // For each sidebar link on the current page, inject its h3s
+      nav.querySelectorAll('a[href]').forEach(function(link) {
+        var href = link.getAttribute('href') || '';
+        var hrefPage = href.replace('#/', '').split('?')[0];
+        if (hrefPage !== currentPage) return;
+
+        // Extract heading id from href (format: "#/page?id=heading-id")
+        var idMatch = href.match(/[?&]id=([^&]+)/);
+        if (!idMatch) return;
+        var headingId = decodeURIComponent(idMatch[1]);
+
+        var section = null;
+        for (var i = 0; i < sections.length; i++) {
+          if (sections[i].id === headingId) { section = sections[i]; break; }
+        }
+        if (!section || section.h3s.length === 0) return;
+
+        var li = link.closest('li');
+        if (!li) return;
+
+        var subUl = document.createElement('ul');
+        subUl.className = 'generated-toc';
+        section.h3s.forEach(function(h3) {
+          var subLi = document.createElement('li');
+          var subA = document.createElement('a');
+          subA.href = '#/' + currentPage + '?id=' + encodeURIComponent(h3.id);
+          subA.textContent = h3.text;
+          subLi.appendChild(subA);
+          subUl.appendChild(subLi);
         });
-
-        // Also check if any link inside is the active one (docsify adds .active class)
-        if (li.querySelector('a.active')) {
-          isActive = true;
-        }
-
-        if (isActive) {
-          li.classList.add('open');
-        } else {
-          li.classList.remove('open');
-        }
+        li.appendChild(subUl);
       });
     }
 
@@ -577,7 +650,7 @@
       name: 'QA Onboarding Guide',
       nameLink: '/',
       loadSidebar: true,
-      subMaxLevel: 3,
+      subMaxLevel: 0,
       auto2top: true,
       search: {
         placeholder: 'Search the guide...',
@@ -588,10 +661,11 @@
         function(hook) {
           hook.ready(function() {
             initSidebarResize();
-            initSidebarCollapse();
           });
           hook.doneEach(function() {
             initQuizzes();
+            generateSubChapters();
+            initSidebarCollapse();
             expandCurrentSection();
           });
         }
