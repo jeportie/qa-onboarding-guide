@@ -8,8 +8,8 @@
 </div>
 
 <div style="display: flex; justify-content: center; gap: 12px; margin: 24px 0; flex-wrap: wrap;">
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">30 Chapters</span>
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">23 Interactive Quizzes</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">31 Chapters</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">24 Interactive Quizzes</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">6 Appendices</span>
 </div>
 
@@ -59,7 +59,7 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 | **2** | [Tools in Context](part2.md) | Ch 6-12 | Git workflow, pnpm/Turbo, Playwright, Detox, Speculos, Firebase, Allure |
 | **3** | [E2E Testing in Practice](part3.md) | Ch 13-16 | Desktop & mobile E2E architecture deep dives + your first tests |
 | **4** | [CI/CD & Mastery](part4.md) | Ch 17-21 | GitHub Actions, test strategy, debugging, contributing, AI agents |
-| **5** | [E2E Desktop in Detail](part5.md) | Ch 22-30 | Playwright deep dive, Electron, Speculos mastery, Allure/Xray, codebase walkthrough, daily workflow, real ticket |
+| **5** | [E2E Desktop in Detail](part5.md) | Ch 22-31 | Playwright deep dive, Electron, Speculos mastery, Allure/Xray, codebase walkthrough, daily workflow, real tickets |
 | **A** | [Appendix](appendix.md) | A-F | Commands, env vars, Ledger Live stack references, devices, troubleshooting FAQ, glossary |
 
 ---

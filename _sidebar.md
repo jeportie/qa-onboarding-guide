@@ -42,7 +42,8 @@
   - [27. Codebase Deep Dive](part5#codebase-deep-dive-every-file-explained)
   - [28. Daily Workflow](part5#your-daily-workflow-from-ticket-to-pr)
   - [29. Ticket Walkthrough: QAA-1139](part5#real-ticket-walkthrough-qaa-1139-add-account-btc)
-  - [30. Exercises & Challenges](part5#exercises-amp-challenges)
+  - [30. Ticket Walkthrough: QAA-1141](part5#real-ticket-walkthrough-qaa-1141-market-filter-starred)
+  - [31. Exercises & Challenges](part5#exercises-amp-challenges)
   - [Part 5 Assessment](part5#part-5-final-assessment)
 
 - [**Appendix**](appendix)

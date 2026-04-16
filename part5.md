@@ -2398,7 +2398,7 @@ This command will ask for your ticket URL, description, change type, scope, and 
 ## Real Ticket Walkthrough -- QAA-1139 (Add Account BTC)
 
 <div class="chapter-intro">
-This is your capstone chapter. Everything you learned in Chapters 43-49 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
+This is your capstone chapter. Everything you learned in Chapters 22-28 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
 </div>
 
 ### 29.1 Understanding the Ticket
@@ -2778,13 +2778,583 @@ test.describe("Add Account - First Time BTC", () => {
 
 ---
 
+## Real Ticket Walkthrough -- QAA-1141 (Market Filter Starred)
+
+<div class="chapter-intro">
+This is your second real ticket walkthrough. Where Chapter 29 walked through a simple <strong>Add Account</strong> ticket, this one covers a different feature area — the <strong>Market page</strong> — and introduces new concepts: <strong>Wallet 4.0 feature flags</strong>, <strong>cross-platform coverage gaps</strong>, and <strong>the filter dropdown pattern</strong>. The workflow is the same; the context is new.
+</div>
+
+### 30.1 Understanding the Ticket
+
+**Jira ticket:** QAA-1141 (child of QAA-1145 "[LWD-LWM] — coverage gap")
+**Xray test case:** B2CQA-1879
+**Description:** "Market — filter starred asset" — verify that a user can star a coin on the market page and filter the list to show only starred assets
+
+**What this means:**
+1. The user navigates to the Market page
+2. Stars a coin (e.g., ETH or BTC)
+3. Activates the "starred" filter
+4. The list shows only starred coins
+
+**Context:** This test currently exists in `e2e/mobile/specs/market.spec.ts` but the Jira platform field indicates it should also be covered on Desktop (Windows/macOS/Linux). This is a **cross-platform coverage gap** — the scenario is automated on mobile but has no corresponding Xray link on desktop.
+
+#### What Is a Cross-Platform Coverage Gap?
+
+The QAA-1145 epic ("[LWD-LWM] — coverage gap") tracks scenarios that are automated on one platform (e.g., LLM — Ledger Live Mobile) but missing on another (e.g., LLD — Ledger Live Desktop). These gaps are discovered by comparing the Xray coverage dashboard across platforms:
+
+| Platform | B2CQA-1879 linked? | Test exists? |
+|----------|-------------------|-------------|
+| **LLM** (Mobile) | Yes — in `e2e/mobile/specs/market.spec.ts` | Yes |
+| **LLD** (Desktop) | **No** — not in any desktop test's TMS annotation | **Possibly** — need to check |
+
+Your job is to determine whether the desktop test already covers the scenario (in which case you just add the Xray link) or whether you need to write a new test.
+
+### 30.2 Analyzing Existing Coverage
+
+#### The Mobile Test (Reference)
+
+Open `e2e/mobile/specs/market.spec.ts` — this is the test we need to replicate on desktop:
+
+```typescript
+const tags: string[] = [
+  "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+  "@ethereum", "@family-evm",
+];
+
+describe("Market page for user with no device", () => {
+  const nanoApp = AppInfos.ETHEREUM;
+  const ticker = "ETH";
+
+  beforeAll(async () => {
+    await app.init({
+      speculosApp: nanoApp,
+      cliCommands: [
+        async (userdataPath?: string) => {
+          return CLI.liveData({
+            currency: nanoApp.name,
+            index: 0,
+            appjson: userdataPath,
+            add: true,
+          });
+        },
+      ],
+    });
+    await app.portfolio.waitForPortfolioPageToLoad();
+  });
+
+  $TmsLink("B2CQA-1879");
+  tags.forEach(tag => $Tag(tag));
+  it("should filter starred asset in the list", async () => {
+    await app.walletTabNavigator.navigateToMarket();
+    await app.market.searchAsset(ticker);
+    await app.market.expectMarketRowTitle(ticker);
+    await app.market.openAssetPage(ticker);
+    await app.market.starFavoriteCoin();
+    await app.market.backToAssetList();
+    await app.market.filterStaredAsset();
+    await app.market.expectMarketRowTitle(ticker);
+  });
+});
+```
+
+**What the mobile test does, step by step:**
+1. Initializes the app with an ETH Speculos app and pre-populated account data
+2. Navigates to the Market page
+3. Searches for "ETH"
+4. Opens the ETH asset page
+5. Taps the star button to mark ETH as a favorite
+6. Goes back to the market list
+7. Taps the "starred" filter toggle
+8. Verifies ETH is still visible (it should be — it is starred)
+
+**Key observation:** The mobile test uses `$TmsLink("B2CQA-1879")` (Jest/Detox syntax). On desktop, the equivalent is the `annotation.description` field in the Playwright test options.
+
+#### The Desktop Test (Already Exists!)
+
+Now search the desktop codebase:
+
+```bash
+grep -r "star" e2e/desktop/tests/specs/market.spec.ts
+```
+
+Open `e2e/desktop/tests/specs/market.spec.ts`:
+
+```typescript
+import { test } from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+
+test.describe("Market", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,
+    userdata: "speculos-tests-app",
+    featureFlags: LWD_WALLET_40_FF_ENABLED,
+  });
+
+  test(
+    "Market list content",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-4316",
+      },
+    },
+    async ({ app }) => {
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+      await app.marketBanner.clickExploreMarketHeader();
+      await app.market.validateMarketList();
+    },
+  );
+
+  test(
+    "Filters behavior",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-4315",           // <-- Only B2CQA-4315 here
+      },
+    },
+    async ({ app }) => {
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+      await app.marketBanner.clickExploreMarketHeader();
+      await app.market.validateMarketList();
+      await app.market.starCoin(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
+      await app.market.expectFilterDropdownToBeVisible();
+      await app.market.selectStarredAssetsFilter();
+      await app.market.expectCoinToBeVisible(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
+      await app.market.expectCoinToNotBeVisible(Account.ETH_1.currency.ticker);
+    },
+  );
+});
+```
+
+**What the desktop "Filters behavior" test does:**
+1. Navigates to the Market page via the market banner header
+2. Waits for the market list to load (BTC and ETH rows visible)
+3. Stars BTC
+4. Opens the filter dropdown
+5. Selects "Starred Assets"
+6. Verifies BTC **is** visible
+7. Verifies ETH is **not** visible (it was not starred)
+
+**Conclusion:** The desktop test covers **exactly** the same scenario as B2CQA-1879: star a coin → filter by starred → verify the list. The difference is cosmetic (mobile uses ETH, desktop uses BTC; mobile opens the asset page to star, desktop stars directly from the list). The functional behavior being tested — "filter starred asset" — is identical.
+
+We do **not** need a new test. We need to add `B2CQA-1879` to the existing annotation so Xray knows the desktop test covers this case.
+
+#### Mobile vs. Desktop: Key Differences
+
+| Aspect | Mobile | Desktop |
+|--------|--------|---------|
+| **Framework** | Detox + Jest | Playwright + Electron |
+| **TMS linking** | `$TmsLink("B2CQA-1879")` | `annotation: { type: "TMS", description: "B2CQA-1879" }` |
+| **Navigation** | `walletTabNavigator.navigateToMarket()` | `marketBanner.clickExploreMarketHeader()` |
+| **Starring** | Open asset page → tap star button | Click star icon directly on market row |
+| **Filtering** | `filterStaredAsset()` (toggle button) | `selectStarredAssetsFilter()` (dropdown select) |
+| **Coin used** | ETH | BTC |
+| **Assertion** | Verify starred coin row visible | Verify starred coin visible AND non-starred coin NOT visible |
+
+> **Note:** The desktop test is actually **more thorough** — it verifies both that the starred coin is visible AND that a non-starred coin is hidden. The mobile test only checks the positive case.
+
+### 30.3 Understanding the Desktop Market Architecture
+
+Before implementing, let us understand the key architectural elements this test uses. These are different from the Add Account flow in Chapter 29.
+
+#### Wallet 4.0 Feature Flags
+
+The desktop market test uses a feature flag:
+
+```typescript
+import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+
+test.use({
+  featureFlags: LWD_WALLET_40_FF_ENABLED,
+});
+```
+
+Open `e2e/desktop/tests/utils/featureFlagUtils.ts` to see what this enables:
+
+```typescript
+export const LWD_WALLET_40_FF_ENABLED: OptionalFeatureMap = {
+  lwdWallet40: {
+    enabled: true,
+    params: {
+      marketBanner: true,      // Shows market banner on portfolio page
+      graphRework: true,       // New graph rendering
+      quickActionCtas: true,   // Quick action buttons
+      mainNavigation: true,    // New navigation layout
+      assetSection: true,      // New asset section
+    },
+  },
+};
+```
+
+**Why this matters:** Wallet 4.0 changes the UI significantly. The market page is now accessed via a **Market Banner** on the portfolio page (clicking "Explore Market") rather than through the old sidebar navigation. The test must enable this feature flag so the banner and new UI are present.
+
+**What happens if you forget the feature flag?** The test will fail because:
+- `app.marketBanner.clickExploreMarketHeader()` looks for a `market-banner-button` element that only exists when `lwdWallet40.marketBanner` is `true`
+- The filter dropdown uses a different UI pattern in the Wallet 4.0 market page
+
+#### The `speculos-tests-app` Userdata
+
+Unlike the Add Account test (Chapter 29) which used `skip-onboarding-with-last-seen-device` (empty portfolio), the market test uses `speculos-tests-app`. This userdata file contains:
+- Onboarding already completed
+- A pre-configured app state suitable for Speculos-based tests
+- Pre-populated accounts (the test references `Account.BTC_NATIVE_SEGWIT_1` and `Account.ETH_1`)
+
+The market filter test does not interact with the blockchain (no send, receive, or device signing), so Speculos is not actively used during the test. The userdata simply provides the initial app state.
+
+#### Page Objects: MarketPage
+
+The `MarketPage` (`e2e/desktop/tests/page/market.page.ts`) encapsulates all market list interactions:
+
+```typescript
+export class MarketPage extends AppPage {
+  // Elements
+  private searchInput = this.page.getByTestId("market-search-input");
+  private coinRow = (ticker: string) => this.page.getByTestId(`market-${ticker}-row`);
+  private filterDropdown = this.page.getByText("Show").first();
+  private starButton = (ticker: string) => this.page.getByTestId(`market-${ticker}-star-button`);
+  private starredOptionFilter = this.page.getByRole("option", { name: "Starred Assets" });
+
+  // Key methods used in our test:
+  async starCoin(ticker: string) { ... }                // Click star icon on a row
+  async expectFilterDropdownToBeVisible() { ... }       // Assert dropdown exists
+  async selectStarredAssetsFilter() { ... }             // Open dropdown → click "Starred Assets"
+  async expectCoinToBeVisible(ticker: string) { ... }   // Assert a coin row is visible
+  async expectCoinToNotBeVisible(ticker: string) { ... } // Assert a coin row is NOT visible
+}
+```
+
+**Important selector detail:** The filter dropdown uses `this.page.getByText("Show").first()` — a text-based selector because the react-select component does not forward `data-testid`. The option uses `getByRole("option", { name: "Starred Assets" })` — a role-based selector. This is a real-world compromise you will encounter: sometimes `data-testid` is not available and you must use alternative selectors.
+
+#### Page Objects: MarketBannerPage
+
+The `MarketBannerPage` (`e2e/desktop/tests/page/marketBanner.page.ts`) handles the Wallet 4.0 banner on the portfolio page:
+
+```typescript
+export class MarketBannerPage extends AppPage {
+  private marketBannerHeader = this.page.getByTestId("market-banner-button");
+
+  async clickExploreMarketHeader() {
+    await this.marketBannerHeader.click();
+  }
+}
+```
+
+This page object navigates from the portfolio to the market page by clicking the banner. It replaces the old `layout.goToMarket()` method used in the legacy market spec.
+
+#### Page Object Registration
+
+Both page objects are registered in `e2e/desktop/tests/page/index.ts`:
+
+```typescript
+import { MarketPage } from "./market.page";
+import { MarketBannerPage } from "./marketBanner.page";
+
+export class Application extends PageHolder {
+  public market = new MarketPage(this.page);           // → app.market.*
+  public marketBanner = new MarketBannerPage(this.page); // → app.marketBanner.*
+  // ...
+}
+```
+
+This is why the test can call `app.market.starCoin(...)` and `app.marketBanner.clickExploreMarketHeader()` — the Application hub wires everything together.
+
+### 30.4 Create a Branch
+
+Following the branch naming convention from Chapter 6:
+
+```bash
+git checkout develop
+git pull
+git checkout -b test/qaa-1141
+```
+
+The `test/` prefix is appropriate because this ticket adds test coverage metadata (an Xray link).
+
+### 30.5 Run the Test in Isolation
+
+Before changing anything, run the existing test to build your mental model and create a baseline.
+
+**Run the market test file:**
+```bash
+cd e2e/desktop
+pnpm test:playwright market.spec.ts
+```
+
+To isolate the "Filters behavior" test specifically:
+```bash
+pnpm test:playwright -- --grep "Filters behavior"
+```
+
+> **Note:** Unlike the Add Account test in Chapter 29, the market test does **not** require an active Speculos instance. It uses the `speculos-tests-app` userdata for initial state but does not perform any device interactions (no signing, no address verification). Docker must be running (the fixture still initializes Speculos as part of the standard setup), but the test itself only interacts with the market UI.
+
+**What you should observe:**
+1. Playwright launches Electron (Ledger Live Desktop) with Wallet 4.0 enabled
+2. The portfolio page shows the market banner
+3. The test clicks "Explore Market" on the banner → navigates to the market page
+4. The market list loads with BTC and ETH visible
+5. The test clicks the star icon next to BTC → BTC is now starred
+6. The test opens the "Show" dropdown and selects "Starred Assets"
+7. Only BTC remains visible; ETH disappears from the list
+8. Test passes
+
+### 30.6 Implement the Change
+
+Open `e2e/desktop/tests/specs/market.spec.ts` and add `B2CQA-1879` to the "Filters behavior" test's TMS annotation:
+
+```typescript
+  test(
+    "Filters behavior",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-4315, B2CQA-1879",
+        //                       ^^^^^^^^^^^^^^
+        //                  Added B2CQA-1879 here
+      },
+    },
+```
+
+That is the only code change. The `description` field is a comma-separated string — the framework's `addTmsLink()` helper splits it and registers each ID with Allure. After this change, `B2CQA-1879` will appear in the Allure report alongside `B2CQA-4315` and flow to Xray on the next CI run.
+
+#### How It Works Under the Hood
+
+The annotation flows through the system like this:
+
+1. **Test runs** → inside the test body, `addTmsLink(getDescription(test.info().annotations, "TMS").split(", "))` reads the annotation, splits `"B2CQA-4315, B2CQA-1879"` into `["B2CQA-4315", "B2CQA-1879"]`, and calls `addTmsLink()` for each
+2. **Allure collects** → each ID appears as a TMS link in the Allure report
+3. **CI uploads** → Allure results are uploaded to the reporting server
+4. **Xray reads** → Xray imports the results and updates the execution status of both `B2CQA-4315` and `B2CQA-1879`
+5. **Coverage dashboard** → `B2CQA-1879` now shows as "Automated" on LLD
+
+> **Comparison with Chapter 29:** In the Add Account test (Chapter 29), the TMS IDs were in an `xrayTicket` field on a data-driven currency object: `xrayTicket: "B2CQA-2499, B2CQA-2644, ..."`. Here, the IDs are in the Playwright `annotation.description` field. Both approaches end up calling `addTmsLink()` — they are just two patterns for attaching Xray IDs to tests. The annotation pattern is more common in newer tests; the `xrayTicket` pattern is used in data-driven tests with many currencies.
+
+### 30.7 Rerun the Tests and Verify Allure
+
+Run the test again to confirm nothing broke:
+
+```bash
+pnpm test:playwright market.spec.ts
+```
+
+Run it at least 3 times for stability:
+```bash
+pnpm test:playwright -- --grep "Filters behavior" --repeat-each=3
+```
+
+All 3 runs should pass. You only changed metadata, so failures indicate an existing issue (environment, Docker, network timing), not a regression from your change.
+
+**Verify the Allure report:**
+
+```bash
+npx allure serve allure-results
+```
+
+Navigate to **Suites** → **Market** → **Filters behavior** and check the **Links** section. You should see:
+- `B2CQA-4315` — the existing link
+- `B2CQA-1879` — **the new one you just added**
+
+Each link is clickable and points to the Xray test case in Jira. If you ran the test before your change (in step 30.5), compare the reports — `B2CQA-1879` was missing before and is now present.
+
+Press `Ctrl+C` to stop the Allure server when done.
+
+### 30.8 Commit and Create PR
+
+Stage and commit following the Conventional Commits format:
+
+```bash
+git add e2e/desktop/tests/specs/market.spec.ts
+git commit -m "test(e2e): link B2CQA-1879 to market filter starred test on desktop"
+```
+
+The commit type is `test` (adding test coverage), the scope is `e2e`, and the description explains what was done.
+
+Then use the Claude Code command to create the PR:
+
+```
+/create-pr
+```
+
+Claude Code will ask you for:
+
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1141`
+2. **Ticket description** — "Link Xray test case B2CQA-1879 to existing market filter starred test on desktop"
+3. **Change type** — `test`
+4. **Change scope** — `e2e/desktop`
+5. **Test coverage** — `yes` (the change itself is test metadata)
+6. **QA focus areas** — "Market page filter starred, Allure TMS links"
+7. **UI changes** — `no`
+
+### 30.9 Mark Ready, Merge, and Update Xray
+
+After CI passes and your PR is reviewed:
+
+1. In GitHub, click **"Ready for review"** to publish the PR
+2. Once approved, click **"Merge pull request"** to merge into `develop`
+3. **Update Xray:**
+   - Search for `B2CQA-1879` in Jira
+   - Set the **Status** flag to **Automated**
+   - In the **Automated In** field, add **LLD** (Ledger Live Desktop) — do not remove LLM, since both platforms now cover it
+4. Move `QAA-1141` to **Done** in Jira and add a comment: "Linked B2CQA-1879 to existing desktop market filter test in PR #XXXX"
+5. The next CI run will automatically upload Allure results to Xray, updating `B2CQA-1879` with the desktop test execution status
+
+> **Important:** When updating Xray's **Automated In** field, you are adding LLD alongside the existing LLM — not replacing it. This test case is now automated on **both** platforms.
+
+### 30.10 Reference: Writing a New Market Filter Test from Scratch
+
+For this ticket, we only needed to add a ticket ID to an existing test. But for cases where no desktop market filter test existed, here is the full template with all patterns you would need:
+
+```typescript
+import { test } from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+
+test.describe("Market - Starred Filter", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,
+    userdata: "speculos-tests-app",               // Pre-populated app state
+    featureFlags: LWD_WALLET_40_FF_ENABLED,        // Wallet 4.0 UI (market banner)
+  });
+
+  test(
+    "Filter starred asset in market list",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-1879",
+      },
+    },
+    async ({ app }) => {
+      // Link to Xray
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+      // Step 1: Navigate to the Market page via Wallet 4.0 banner
+      await app.marketBanner.clickExploreMarketHeader();
+
+      // Step 2: Wait for the market list to load
+      await app.market.validateMarketList();
+
+      // Step 3: Star BTC from the market list
+      await app.market.starCoin(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
+
+      // Step 4: Open filter dropdown and select "Starred Assets"
+      await app.market.expectFilterDropdownToBeVisible();
+      await app.market.selectStarredAssetsFilter();
+
+      // Step 5: Verify only starred coin is visible
+      await app.market.expectCoinToBeVisible(
+        Account.BTC_NATIVE_SEGWIT_1.currency.ticker,
+      );
+      await app.market.expectCoinToNotBeVisible(
+        Account.ETH_1.currency.ticker,
+      );
+    },
+  );
+});
+```
+
+**Key decisions in this template:**
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| **Userdata** | `speculos-tests-app` | Market tests need pre-populated state, not an empty portfolio |
+| **Feature flags** | `LWD_WALLET_40_FF_ENABLED` | Required for market banner navigation and new filter UI |
+| **Navigation** | `marketBanner.clickExploreMarketHeader()` | Wallet 4.0 pattern — no sidebar navigation |
+| **Coin to star** | BTC via `Account.BTC_NATIVE_SEGWIT_1` | Uses the shared `Account` enum for consistency |
+| **Negative assertion** | `expectCoinToNotBeVisible(ETH)` | Proves the filter actually hides non-starred coins |
+| **No Speculos interaction** | No `speculosApp` in `test.use()` | This test does not interact with the device |
+
+### 30.11 Key Concepts Summary
+
+This walkthrough introduced several concepts not covered in Chapter 29:
+
+| Concept | What You Learned |
+|---------|-----------------|
+| **Cross-platform coverage gaps** | How to identify when a test exists on mobile but not desktop (or vice versa) by checking Xray links |
+| **Wallet 4.0 feature flags** | The `LWD_WALLET_40_FF_ENABLED` flag and how it changes the UI (market banner, navigation, filter patterns) |
+| **TMS annotation pattern** | Using `annotation: { type: "TMS", description: "..." }` instead of `xrayTicket` strings |
+| **Text and role selectors** | When `data-testid` is unavailable (react-select), use `getByText()` or `getByRole()` as fallbacks |
+| **Negative assertions** | `expectCoinToNotBeVisible()` — proving something is absent is as important as proving something is present |
+| **Automated In (multi-platform)** | When updating Xray, add the new platform alongside the existing one — do not replace |
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Cross-platform coverage gaps are common in Ledger Live because mobile and desktop share the same Xray test cases but have independent test suites. The investigation workflow is always: read the Jira ticket → find the mobile test → search for an equivalent desktop test → if it exists, add the Xray link; if not, write a new test using the mobile test as a behavioral reference. Always verify with Allure before submitting.
+</div>
+
+### 30.12 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Market Filter Starred Walkthrough</h3>
+<p class="quiz-subtitle">4 questions · 75% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> Why does the desktop market test use <code>LWD_WALLET_40_FF_ENABLED</code> as a feature flag?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It is required for Speculos to start</button>
+<button class="quiz-choice" data-value="B">B) It enables the legacy market page layout</button>
+<button class="quiz-choice" data-value="C">C) It enables the Wallet 4.0 UI which provides the market banner navigation and the new filter dropdown pattern</button>
+<button class="quiz-choice" data-value="D">D) It disables the market page for testing purposes</button>
+</div>
+<p class="quiz-explanation">The <code>lwdWallet40</code> feature flag enables the Wallet 4.0 UI. With <code>marketBanner: true</code>, the portfolio page shows the "Explore Market" banner used for navigation. Without this flag, the market banner does not exist and <code>app.marketBanner.clickExploreMarketHeader()</code> would fail.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> The mobile market test uses <code>$TmsLink("B2CQA-1879")</code>. What is the desktop equivalent?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>test.use({ tmsLink: "B2CQA-1879" })</code></button>
+<button class="quiz-choice" data-value="B">B) <code>annotation: { type: "TMS", description: "B2CQA-1879" }</code> in the test options, combined with <code>addTmsLink()</code> in the test body</button>
+<button class="quiz-choice" data-value="C">C) <code>xrayTicket: "B2CQA-1879"</code> in the test data</button>
+<button class="quiz-choice" data-value="D">D) There is no desktop equivalent — Xray only works with mobile</button>
+</div>
+<p class="quiz-explanation">Desktop tests use Playwright's annotation system: the <code>annotation.description</code> field stores the B2CQA IDs, and <code>addTmsLink(getDescription(test.info().annotations, "TMS").split(", "))</code> registers them with Allure. This is different from the Jest/Detox <code>$TmsLink()</code> helper used on mobile, but both achieve the same result: linking the test to Xray.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> The desktop market page object uses <code>this.page.getByText("Show").first()</code> for the filter dropdown instead of <code>getByTestId()</code>. Why?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The react-select component does not forward <code>data-testid</code>, so a text-based selector is used as a pragmatic fallback</button>
+<button class="quiz-choice" data-value="B">B) Text selectors are always preferred over test IDs in Playwright</button>
+<button class="quiz-choice" data-value="C">C) The filter dropdown was recently added and nobody set up a test ID yet</button>
+<button class="quiz-choice" data-value="D">D) <code>getByTestId()</code> does not work in Electron apps</button>
+</div>
+<p class="quiz-explanation">Some third-party React components (like react-select) do not forward <code>data-testid</code> attributes to the rendered DOM. In these cases, the best alternative is to use <code>getByText()</code> or <code>getByRole()</code> selectors. The comment in the page object explains this explicitly: "using text selector because react-select doesn't forward data-testid".</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> After merging the PR, what should you set in Xray for B2CQA-1879's "Automated In" field?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Replace LLM with LLD</button>
+<button class="quiz-choice" data-value="B">B) Remove LLM since desktop now covers it</button>
+<button class="quiz-choice" data-value="C">C) Set it to LLD only</button>
+<button class="quiz-choice" data-value="D">D) Add LLD alongside the existing LLM — both platforms now automate this test case</button>
+</div>
+<p class="quiz-explanation">B2CQA-1879 was already automated on LLM (mobile). By adding the Xray link to the desktop test, it is now automated on both platforms. The "Automated In" field should reflect both: LLM and LLD. Never remove an existing platform when adding a new one.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
 ## Exercises & Challenges
 
 <div class="chapter-intro">
 Reading is not enough — you need to practice. These exercises progress from read-only analysis to hands-on code writing. Each has a clear objective, estimated time, and verification method. Complete them in order.
 </div>
 
-### 30.1 Exercise 1: Trace the Fixture Lifecycle (30 min)
+### 31.1 Exercise 1: Trace the Fixture Lifecycle (30 min)
 
 **Objective:** Understand how fixtures wire together.
 
@@ -2812,7 +3382,7 @@ speculosApp → speculos ←── cliCommands
 
 **Verification:** Compare your diagram against the fixture code. Every arrow should correspond to a fixture name appearing in another fixture's parameter list.
 
-### 30.2 Exercise 2: Add an Assertion to a Page Object (30 min)
+### 31.2 Exercise 2: Add an Assertion to a Page Object (30 min)
 
 **Objective:** Practice the `@step` decorator and page object pattern.
 
@@ -2834,7 +3404,7 @@ async expectNoAccountsMessage() {
 
 **Verification:** The method should follow the exact same pattern as `checkAddAccountButtonVisibility()` in the same file.
 
-### 30.3 Exercise 3: Read and Explain a Test (45 min)
+### 31.3 Exercise 3: Read and Explain a Test (45 min)
 
 **Objective:** Prove you can read any test in the codebase.
 
@@ -2851,7 +3421,7 @@ async expectNoAccountsMessage() {
 
 **Verification:** Your explanation should match the test's actual behavior. Run the test to confirm: `pnpm e2e:desktop test:playwright settings.spec.ts`
 
-### 30.4 Exercise 4: Debug a Broken Test (45 min)
+### 31.4 Exercise 4: Debug a Broken Test (45 min)
 
 **Objective:** Practice identifying and fixing common test bugs.
 
@@ -2892,7 +3462,7 @@ test.describe("Broken Test", () => {
 
 **Verification:** Fix all 5 bugs and compare against the template in Chapter 28.6.
 
-### 30.5 Exercise 5: Write a Test from Scratch (60 min)
+### 31.5 Exercise 5: Write a Test from Scratch (60 min)
 
 **Objective:** Write a complete test for an existing flow.
 
@@ -2910,19 +3480,19 @@ test.describe("Broken Test", () => {
 - Look at how the existing rename test sets up its userdata
 - Check `app.account` for rename-related methods
 
-### 30.6 Exercise 6: Extend the Add Account Test (45 min)
+### 31.6 Exercise 6: Extend the Add Account Test (45 min)
 
 **Objective:** Add new assertions to an existing test.
 
 **Instructions:**
-1. After successfully understanding the add account test (Ch 50), add these verifications:
+1. After successfully understanding the add account test (Ch 29), add these verifications:
    - After adding the account, check that the operation history shows at least one operation
    - Verify the account name matches "Bitcoin 1"
    - Click on the last operation and verify the operation drawer opens with correct info
 
 **Hint:** The existing test already does most of this. Study the assertions at the bottom of the `add.account.spec.ts` test and understand what each one verifies.
 
-### 30.7 Challenge: Write a Complete Send BTC Test (90 min)
+### 31.7 Challenge: Write a Complete Send BTC Test (90 min)
 
 **Objective:** Write a full E2E test with no guidance.
 
@@ -2934,11 +3504,11 @@ test.describe("Broken Test", () => {
 5. Verifies the "Transaction sent" toaster appears
 6. Verifies the transaction appears in the operation list
 
-**No hints.** Use everything you learned in Chapters 43-50. Refer to:
+**No hints.** Use everything you learned in Chapters 22-30. Refer to:
 - `send.tx.spec.ts` for existing send test patterns
 - `send.modal.ts` for page object methods
 - `speculos.page.ts` for device signing
-- The daily workflow checklist (Ch 49)
+- The daily workflow checklist (Ch 28)
 
 <div class="chapter-outro">
 <strong>Key takeaway:</strong> These exercises progress from reading to writing. Complete Exercises 1-4 first — they build the analytical skills you need. Then tackle 5-6, which require code changes. The Challenge is your graduation test: if you can write a complete Send BTC test from zero, you are ready to work independently on E2E tickets.
