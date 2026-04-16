@@ -707,6 +707,16 @@ export COINAPPS=~/coin-apps
 cd ~/coin-apps && git pull
 ```
 
+**Q: `OCI runtime create failed` — Docker out of disk space**
+A: Docker images, containers, and volumes accumulate over time. Free disk space:
+```bash
+docker system prune -a
+```
+This removes unused images, stopped containers, and dangling volumes. You will need to re-pull the Speculos image afterwards: `docker pull ghcr.io/ledgerhq/speculos:latest`.
+
+**Q: `APDU error 6985` — user rejected on device**
+A: The test sent a transaction but didn't simulate pressing "Approve" on the Speculos device. Make sure your test includes the navigation step to approve the operation on the emulated device screen before expecting a result.
+
 ### Build Issues
 
 **Q: `pnpm desktop build:testing` fails**
@@ -760,6 +770,30 @@ git rebase --continue
 **Q: Node Action Cache Error in CI**
 A: Known CI issue (from wiki: Common CI Troubleshooting). The node_modules cache may be corrupted. Re-run the CI job -- it usually resolves on retry. If persistent, ask a maintainer to purge the GitHub Actions cache.
 
+**Q: CocoaPods lockfile out of sync (cow ASCII art error during `pnpm i`)**
+A: This means the iOS CocoaPods cache is stale. Clear it and regenerate:
+```bash
+rm -rf ~/.cocoapods/
+cd apps/ledger-live-mobile/ios/
+bundle install
+cd ../../..
+pnpm mobile pod
+```
+Then retry `pnpm i`. See also Chapter 5.6 and Chapter 28.3.
+
+**Q: `TypeError: Invalid Version: DS_Store` in coin-apps directory**
+A: macOS `.DS_Store` files in the coin-apps folder confuse version parsing. Remove them:
+```bash
+find $COINAPPS -name ".DS_Store" -type f -delete
+```
+
+**Q: Node version mismatch — wrong Node.js version**
+A: The monorepo requires a specific Node.js version managed by `proto`. Run this in the repo root:
+```bash
+proto use
+```
+This reads `.prototools` and switches to the correct Node.js version automatically.
+
 ### Test Issues
 
 **Q: All tests timeout immediately**
@@ -806,6 +840,38 @@ grep -r "old-test-id" apps/ledger-live-desktop/src/
 # Then update the page object with the new ID
 ```
 
+**Q: `Error: Element is not attached to the DOM` (stale element)**
+A: The element was removed and re-rendered between the time Playwright found it and tried to interact with it. This happens in dynamic UIs where React re-renders components. Use a fresh locator and wait for stability:
+```typescript
+await page.getByTestId("my-element").waitFor({ state: "visible" });
+await page.getByTestId("my-element").click();
+```
+
+**Q: Locale mismatch — assertion fails with `"1,5 BTC"` vs `"1.5 BTC"`**
+A: The test machine has a different locale than CI. Decimal separators and number formatting depend on the system locale. Set the locale explicitly in your Playwright config:
+```typescript
+use: {
+  locale: "en-US",
+}
+```
+
+**Q: Click lands on the wrong element (layout shift)**
+A: An animation or lazy-loaded element shifted the layout between the time Playwright found the target and clicked. Wait for the page to stabilize before interacting:
+```typescript
+// Wait for the animation/transition to finish
+await page.getByTestId("container").waitFor({ state: "visible" });
+await page.waitForTimeout(300); // only if animation has no stable signal
+await page.getByTestId("target-button").click();
+```
+Better: wait for the specific element that triggers the shift to finish rendering.
+
+**Q: Test passes but Allure report shows wrong steps or missing TMS links**
+A: Check these common causes:
+1. **Missing `@step()` decorator** — page object methods need the `@step` annotation to appear in Allure
+2. **Wrong `xrayTicket` string** — verify the comma-separated B2CQA ticket IDs in `addTmsLink()` match the expected Xray test cases
+3. **Missing team tag** — ensure `test.info().annotations` includes the correct team tag
+4. Run the test and open the report with `npx allure serve allure-results` to inspect step traces and links.
+
 ### Mobile-Specific Issues
 
 **Q: Metro bundler won't start**
@@ -846,6 +912,13 @@ A: Known issue -- Android debug builds are broken locally due to a Detox/Espress
 ```bash
 pnpm mobile e2e:build -c android.emu.release
 ```
+
+**Q: Android emulator not found — name mismatch**
+A: Detox expects the AVD to be named exactly `Android_Emulator`. Check your AVD name:
+```bash
+emulator -list-avds
+```
+If the name doesn't match, rename it in Android Studio (Device Manager → Edit → rename) or create a new AVD with the exact name `Android_Emulator`.
 
 ---
 

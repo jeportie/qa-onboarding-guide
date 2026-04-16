@@ -1523,7 +1523,7 @@ Open `http://localhost:<port>` in your browser while the test is running (replac
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Speculos runs Ledger device apps in Docker containers, each on a unique port for parallel execution. The fixture system orchestrates the entire lifecycle: launch container, populate data via CLI, hand the device to the test, clean up after. When debugging, check Docker first (<code>docker ps</code>), then environment variables, then coin-apps freshness.
+<strong>Key takeaway:</strong> Speculos runs Ledger device apps in Docker containers, each on a unique port for parallel execution. The fixture system orchestrates the entire lifecycle: launch container, populate data via CLI, hand the device to the test, clean up after. When debugging, check Docker first (<code>docker ps</code>), then environment variables, then coin-apps freshness. See <strong>Appendix E: Troubleshooting FAQ</strong> for a complete list of common issues and fixes.
 </div>
 
 ### 25.9 Quiz

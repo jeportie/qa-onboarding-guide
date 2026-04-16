@@ -811,6 +811,8 @@ If everything is working, you should see:
 | iOS pod install fails | `cd apps/ledger-live-mobile && pnpm mobile pod` |
 | Android emulator not found | Ensure AVD is named exactly `Android_Emulator` |
 
+> See **Appendix E: Troubleshooting FAQ** for an expanded version of this table with detailed solutions.
+
 <div class="chapter-outro">
 If your first test runs — even if it fails — your setup is correct. Most failures at this stage are environment issues, not code problems. If you are stuck, check the <a href="https://github.com/LedgerHQ/ledger-live/wiki/Issues,-Workarounds-and-Tricks">Issues, Workarounds and Tricks</a> wiki page or ask in the QAA Slack channel.
 </div>
