@@ -527,7 +527,7 @@ Error: Element is not attached to the DOM
 ```bash
 PWDEBUG=1 pnpm e2e:desktop test:playwright your-test.spec.ts
 ```
-Opens a browser with an inspector panel — step through actions, inspect locators live, see resolved elements. See Part 6, Chapter 43.8 for a detailed walkthrough with screenshots.
+Opens a browser with an inspector panel — step through actions, inspect locators live, see resolved elements. See Part 5, Chapter 22.8 for a detailed walkthrough with screenshots.
 
 **Playwright Trace Viewer:**
 ```bash

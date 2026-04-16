@@ -261,7 +261,358 @@ pnpm dev:lld -- --inspect
 
 ---
 
-## C: Supported Devices & Coins
+## C: Ledger Live Stack
+
+Quick references for the 21 technologies in the Ledger Live stack. Each entry covers what the technology is, its core concepts, how it is used in Ledger Live, and links to documentation. Use these as a reference when you encounter a technology in the codebase.
+
+### TypeScript
+
+TypeScript is a **statically-typed superset of JavaScript** developed by **Microsoft** (Anders Hejlsberg). Every valid JS file is also valid TS. In Ledger Live, TypeScript is used everywhere — desktop, mobile, libraries, and E2E tests.
+
+**Core concepts**: Type annotations, interfaces, type aliases, generics, enums, union/intersection types, type guards, utility types (`Partial<T>`, `Pick<T,K>`, `Omit<T,K>`, `Record<K,V>`).
+
+**In Ledger Live**: All packages use strict TypeScript. The `Account` interface, `CryptoCurrency` type, and `Transaction` type are foundational types defined in `libs/ledger-live-common/`.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://www.typescriptlang.org/docs/">TypeScript Handbook</a> — official documentation by Microsoft</li>
+<li><a href="https://www.typescriptlang.org/play">TypeScript Playground</a> — interactive browser-based editor</li>
+<li><a href="https://github.com/type-challenges/type-challenges">Type Challenges</a> — interactive type-level programming exercises</li>
+<li><a href="https://www.totaltypescript.com/">Total TypeScript</a> — Matt Pocock's advanced TypeScript tutorials</li>
+</ul>
+</div>
+
+### React
+
+React is a **UI library** for building component-based interfaces, created by **Meta** (Jordan Walke). It uses a virtual DOM for efficient rendering.
+
+**Core concepts**: Components (function), JSX, props, state (`useState`), effects (`useEffect`), context (`useContext`), custom hooks, memoization (`useMemo`, `useCallback`, `React.memo`).
+
+**In Ledger Live Desktop**: The entire UI is React components. State is managed with Redux Toolkit. Navigation uses React Router. Styling uses styled-components.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://react.dev/">React documentation</a> — official docs (new site)</li>
+<li><a href="https://react.dev/learn">React Learn</a> — interactive tutorial</li>
+<li><a href="https://www.debugbear.com/blog/measuring-react-app-performance">Measuring React Performance</a></li>
+</ul>
+</div>
+
+### React Native
+
+React Native is a framework for building **native mobile apps** using React, created by **Meta**. It renders to native iOS/Android components, not a WebView.
+
+**Core concepts**: `View`, `Text`, `ScrollView`, `FlatList`, `TouchableOpacity`, `StyleSheet`, platform-specific code (`.ios.ts`/`.android.ts`), native modules, Metro bundler.
+
+**In Ledger Live Mobile**: The entire LLM app. Uses React Navigation for screen transitions, styled-components for styling, and Redux for state.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://reactnative.dev/">React Native documentation</a></li>
+<li><a href="https://reactnative.dev/docs/debugging">React Native Debugging</a></li>
+<li><a href="https://expo.dev/snacks">Expo Snack</a> — browser-based React Native playground</li>
+</ul>
+</div>
+
+### Electron
+
+Electron is a framework for building **cross-platform desktop apps** with web technologies, created by **GitHub** (Cheng Zhao). It combines Chromium (renderer) + Node.js (main process).
+
+**Core concepts**: Main process, renderer process, preload scripts, IPC (inter-process communication), `BrowserWindow`, context isolation, `webPreferences`.
+
+**In Ledger Live Desktop**: The entire LLD app. Main process handles native features (file system, USB, tray icon). Renderer process runs the React UI. Preload scripts bridge the two with IPC.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://www.electronjs.org/docs/latest/">Electron documentation</a></li>
+<li><a href="https://www.electronjs.org/docs/latest/tutorial/quick-start">Electron Quick Start</a></li>
+<li><a href="https://playwright.dev/docs/api/class-electron">Playwright Electron API</a> — how Playwright tests Electron apps</li>
+</ul>
+</div>
+
+### Redux Toolkit
+
+Redux Toolkit (RTK) is the official **state management** library for Redux, created by **Mark Erikson**. It simplifies Redux with `createSlice`, `createAsyncThunk`, and `configureStore`.
+
+**Core concepts**: Store, slices, reducers, actions, selectors, `createSlice`, `createAsyncThunk`, middleware, RTK Query.
+
+**In Ledger Live**: Global app state — accounts, settings, feature flags, countervalues. Each domain has its own slice in `src/renderer/reducers/` (desktop) or `src/reducers/` (mobile).
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://redux-toolkit.js.org/">Redux Toolkit documentation</a></li>
+<li><a href="https://redux.js.org/tutorials/essentials/part-1-overview-concepts">Redux Essentials Tutorial</a></li>
+</ul>
+</div>
+
+### React Router
+
+React Router is a **routing library** for React web apps, created by **Remix** (Ryan Florence, Michael Jackson).
+
+**Core concepts**: `<BrowserRouter>`, `<Routes>`, `<Route>`, `<Link>`, `useNavigate`, `useParams`, `useLocation`, nested routes, route guards.
+
+**In Ledger Live Desktop**: URL-based navigation between screens (portfolio, accounts, settings, etc.). Deep links use React Router paths.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://reactrouter.com/en/main">React Router documentation</a></li>
+</ul>
+</div>
+
+### React Navigation
+
+React Navigation is the standard **navigation library** for React Native, created by the **React Navigation team** (Satyajit Sahoo, Michał Osadnik).
+
+**Core concepts**: Stack navigator, tab navigator, drawer navigator, `navigation.navigate()`, `useNavigation`, screen options, deep linking, nested navigators.
+
+**In Ledger Live Mobile**: All screen transitions. Tab bar (Portfolio, Market, Transfer, Discover), stack-based flows (send, receive, swap), and modal sheets.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://reactnavigation.org/">React Navigation documentation</a></li>
+<li><a href="https://reactnavigation.org/docs/getting-started">Getting Started guide</a></li>
+</ul>
+</div>
+
+### i18next
+
+i18next is an **internationalization framework** for JavaScript, created by **Jan Mühlemann**. It provides translation management with interpolation, plurals, and context.
+
+**Core concepts**: Translation keys, namespaces, interpolation (`{{name}}`), plurals, `useTranslation` hook, language detection, fallback languages.
+
+**In Ledger Live**: All user-facing strings are translated. Translation files live in `apps/ledger-live-desktop/src/renderer/i18n/` and `apps/ledger-live-mobile/src/locales/`. The `t()` function is used everywhere.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://www.i18next.com/">i18next documentation</a></li>
+<li><a href="https://react.i18next.com/">react-i18next documentation</a></li>
+</ul>
+</div>
+
+### Styled-Components
+
+Styled-components is a **CSS-in-JS library** that uses tagged template literals to style React components, created by **Max Stoiber** and **Glen Maddern**.
+
+**Core concepts**: `styled.div`, template literals, props-based styling, themes, `ThemeProvider`, `css` helper, extending styles.
+
+**In Ledger Live**: Both LLD and LLM use styled-components for all UI styling. The design system uses a shared theme with colors, fonts, and spacing.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://styled-components.com/docs">Styled-components documentation</a></li>
+</ul>
+</div>
+
+### Tailwind CSS
+
+Tailwind CSS is a **utility-first CSS framework** created by **Adam Wathan**. It provides pre-built utility classes instead of writing custom CSS.
+
+**Core concepts**: Utility classes (`flex`, `p-4`, `text-lg`, `bg-blue-500`), responsive design (`md:`, `lg:`), dark mode, `@apply`, configuration (`tailwind.config.js`).
+
+**In Ledger Live**: Used in newer parts of the codebase (web tools, some shared components). Coexists with styled-components.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://tailwindcss.com/docs">Tailwind CSS documentation</a></li>
+<li><a href="https://play.tailwindcss.com/">Tailwind Play</a> — interactive browser playground</li>
+</ul>
+</div>
+
+### Playwright
+
+Playwright is a **browser automation framework** for E2E testing, created by **Microsoft** (Andrey Lushnikov, Dmitry Gozman — former Puppeteer team).
+
+**Core concepts**: `test`, `expect`, locators (`getByTestId`, `getByRole`, `getByText`), fixtures, auto-wait, screenshots, video, traces, parallel execution, sharding, Electron support.
+
+**In Ledger Live**: Desktop E2E suite. Custom fixtures extend Playwright with Speculos, Electron lifecycle, page objects, and feature flag management.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://playwright.dev/docs/intro">Playwright documentation</a></li>
+<li><a href="https://playwright.dev/docs/codegen">Playwright Codegen</a> — record interactions to generate test code</li>
+<li><a href="https://try.playwright.tech/">Try Playwright</a> — interactive browser playground</li>
+<li><a href="https://playwright.dev/docs/api/class-electron">Playwright Electron API</a></li>
+</ul>
+</div>
+
+### Detox
+
+Detox is a **gray-box E2E testing framework** for React Native, created by **Wix Engineering** (Rotem Mizrachi-Meidan). It provides native-level interaction with automatic synchronization.
+
+**Core concepts**: `element(by.id())`, `by.text()`, `.tap()`, `.typeText()`, `.scroll()`, `waitFor().withTimeout()`, `device.launchApp()`, `device.reloadReactNative()`, synchronization.
+
+**In Ledger Live**: Mobile E2E suite. Uses Jest as test runner. Global `app` singleton, WebSocket bridge, helper wrappers.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://wix.github.io/Detox/">Detox documentation</a></li>
+<li><a href="https://wix.github.io/Detox/docs/api/matchers">Detox Matchers API</a></li>
+<li><a href="https://wix.github.io/Detox/docs/api/actions-on-element">Detox Actions API</a></li>
+</ul>
+</div>
+
+### Jest
+
+Jest is a **JavaScript testing framework** created by **Meta** (Christoph Nakazawa). It includes test runner, assertion library, mocking, and code coverage.
+
+**Core concepts**: `describe`, `it`/`test`, `expect`, matchers (`.toBe`, `.toEqual`, `.toContain`), `beforeEach`/`afterEach`, mocking (`jest.fn()`, `jest.mock()`, `jest.spyOn()`), snapshots, `--coverage`.
+
+**In Ledger Live**: Unit and integration tests throughout. Mobile E2E uses Jest as the Detox test runner.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://jestjs.io/docs/getting-started">Jest documentation</a></li>
+<li><a href="https://jestjs.io/docs/mock-functions">Jest Mock Functions</a></li>
+</ul>
+</div>
+
+### MSW
+
+MSW (Mock Service Worker) is an **API mocking library** that intercepts HTTP requests at the network level, created by **Artem Zakharchenko**.
+
+**Core concepts**: Request handlers (`http.get`, `http.post`), `setupServer` (Node), `setupWorker` (browser), response resolvers, request matching, runtime request handlers.
+
+**In Ledger Live**: Integration tests mock API calls (countervalues, explorers, feature flags) without changing application code. MSW intercepts at the network level, so the app code doesn't know it's being mocked.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://mswjs.io/docs/">MSW documentation</a></li>
+<li><a href="https://mswjs.io/docs/getting-started">MSW Getting Started</a></li>
+</ul>
+</div>
+
+### Allure
+
+Allure is a **test reporting framework** created by **Qameta Software**. It generates interactive HTML reports from test results.
+
+**Core concepts**: Steps, attachments (screenshots, videos), annotations (severity, feature, story, owner), TMS links, history, categories, environment info.
+
+**In Ledger Live**: Both desktop and mobile E2E suites use Allure. The `@step` decorator creates the step trace. TMS annotations link to Jira/Xray.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://allurereport.org/docs/">Allure Report documentation</a></li>
+<li><a href="https://allurereport.org/docs/playwright/">Allure Playwright integration</a></li>
+<li><a href="https://allurereport.org/docs/jest/">Allure Jest integration</a></li>
+</ul>
+</div>
+
+### Testing Library
+
+Testing Library is a family of **testing utilities** that encourage testing from the user's perspective, created by **Kent C. Dodds**.
+
+**Core concepts**: `render`, `screen`, queries (`getByRole`, `getByText`, `getByTestId`), `userEvent`, `waitFor`, query priority (role → label → text → testId).
+
+**In Ledger Live**: Integration tests for React components. Used alongside Jest and MSW. Query priority matches Playwright's locator strategy.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://testing-library.com/docs/">Testing Library documentation</a></li>
+<li><a href="https://testing-library.com/docs/react-testing-library/intro">React Testing Library</a></li>
+<li><a href="https://testing-playground.com/">Testing Playground</a> — interactive query helper</li>
+</ul>
+</div>
+
+### pnpm
+
+pnpm is a **fast, disk-space efficient package manager** created by **Zoltan Kochan**. It uses a content-addressable store with symlinks.
+
+**Core concepts**: Content-addressable store, symlinks, `--filter`, workspaces, `.pnpmfile.cjs`, `pnpm-workspace.yaml`, `--frozen-lockfile`, aliases.
+
+**In Ledger Live**: The package manager for the entire monorepo.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://pnpm.io/">pnpm documentation</a></li>
+<li><a href="https://pnpm.io/filtering">pnpm filtering</a></li>
+<li><a href="https://pnpm.io/workspaces">pnpm workspaces</a></li>
+</ul>
+</div>
+
+### Turborepo
+
+Turborepo is a **build system for monorepos** created by **Jared Palmer** (now maintained by **Vercel**). It orchestrates task execution with caching and parallel builds.
+
+**Core concepts**: Task graph, `turbo.json`, pipeline definition, caching (local + remote), `--filter`, task dependencies (`dependsOn`), dry runs.
+
+**In Ledger Live**: Orchestrates all build tasks. When you run `pnpm build:lld`, Turbo resolves the dependency graph, builds libraries in the correct order, and caches results.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://turbo.build/repo/docs">Turborepo documentation</a></li>
+<li><a href="https://turbo.build/repo/docs/crafting-your-repository/caching">Turbo caching</a></li>
+</ul>
+</div>
+
+### Rspack
+
+Rspack is a **high-performance JavaScript bundler** written in Rust, created by **ByteDance**. It is webpack-compatible but significantly faster.
+
+**Core concepts**: Entry points, loaders, plugins, code splitting, tree shaking, hot module replacement (HMR), webpack compatibility layer.
+
+**In Ledger Live Desktop**: Replaced webpack as the bundler. Configuration is in `apps/ledger-live-desktop/rspack.config.ts`. The webpack-compatible API means most existing loaders and plugins work without changes.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://rspack.dev/">Rspack documentation</a></li>
+<li><a href="https://rspack.dev/guide/start/quick-start">Rspack Quick Start</a></li>
+</ul>
+</div>
+
+### Metro
+
+Metro is the **JavaScript bundler for React Native**, created by **Meta**. It bundles JS code and assets for iOS and Android.
+
+**Core concepts**: `metro.config.js`, resolver, transformer, serializer, file map, symlink resolution, cache.
+
+**In Ledger Live Mobile**: Bundles the LLM app. Custom configuration handles pnpm workspace symlinks (using `@rnx-kit/metro-resolver-symlinks`) and forced dependency resolution for deduplication.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://metrobundler.dev/">Metro documentation</a></li>
+<li><a href="https://github.com/microsoft/rnx-kit/tree/main/packages/metro-resolver-symlinks">@rnx-kit/metro-resolver-symlinks</a> — the symlink resolver used by LLM</li>
+</ul>
+</div>
+
+### ESLint & Oxlint
+
+ESLint is a **JavaScript/TypeScript linter** created by **Nicholas Zakas**. Oxlint is a newer, faster alternative written in Rust by the **oxc** project.
+
+**Core concepts**: Rules, plugins, configurations, `--fix`, `.eslintrc`, flat config, custom rules.
+
+**In Ledger Live**: ESLint enforces code quality across the monorepo. Oxlint is being evaluated/adopted for faster linting. Both catch bugs, enforce conventions, and maintain consistency.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://eslint.org/docs/latest/">ESLint documentation</a></li>
+<li><a href="https://oxc.rs/docs/guide/usage/linter.html">Oxlint documentation</a></li>
+</ul>
+</div>
+
+---
+
+## D: Supported Devices & Coins
 
 ### Device Models
 
@@ -316,7 +667,7 @@ pnpm dev:lld -- --inspect
 
 ---
 
-## D: Troubleshooting FAQ
+## E: Troubleshooting FAQ
 
 ### Docker & Speculos
 
@@ -498,7 +849,7 @@ pnpm mobile e2e:build -c android.emu.release
 
 ---
 
-## E: Glossary
+## F: Glossary
 
 | Term | Definition |
 |------|------------|

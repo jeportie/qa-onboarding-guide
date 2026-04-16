@@ -746,6 +746,20 @@ pnpm mobile e2e:build -c ios.sim.debug
 pnpm mobile e2e:build -c android.emu.debug
 ```
 
+**Troubleshooting: CocoaPods lockfile out of sync**
+
+If `pnpm i` fails with a cow ASCII art error saying *"CocoaPods lockfile is probably out of sync"*, run:
+
+```bash
+rm -rf ~/.cocoapods/
+cd apps/ledger-live-mobile/ios/
+bundle install
+cd ../../..
+pnpm mobile pod
+```
+
+Then retry `pnpm i`. This clears stale CocoaPods cache, reinstalls the Ruby bundler dependencies, and regenerates the `Podfile.lock`.
+
 **Android emulator setup:**
 1. Open Android Studio → Tools → AVD Manager
 2. Create Virtual Device → Pixel 7 → API 34
