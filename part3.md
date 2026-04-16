@@ -435,7 +435,7 @@ test.describe("YOUR FEATURE NAME", () => {
 
 1. **Set up environment**: Export `MOCK=0`, `SPECULOS_DEVICE`, `COINAPPS`
 2. **Build the app**: `pnpm build:lld:deps && pnpm desktop build:testing`
-3. **Write and run your test**: `pnpm e2e:desktop test:playwright -- --grep "your test"`
+3. **Write and run your test**: `pnpm e2e:desktop test:playwright your-test.spec.ts`
 4. **Debug and iterate**: Use `--ui` mode, check Allure report, fix and re-run
 
 <div class="resource-box">

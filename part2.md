@@ -61,19 +61,19 @@ pnpm changeset pre enter experimental-bitcoin
 ### 6.2 Branch Naming Convention
 
 ```bash
-# Pattern: <type>/<short-description-in-kebab-case>
-git checkout -b feat/add-send-test-solana
-git checkout -b bugfix/fix-settings-locale-test
-git checkout -b support/refactor-page-objects
-git checkout -b chore/update-playwright
+# Pattern: <prefix>/qaa-<jira-ticket-number>
+git checkout -b feat/qaa-1139
+git checkout -b bugfix/qaa-2045
+git checkout -b support/qaa-987
+git checkout -b chore/qaa-1500
 ```
 
 | Prefix | Use For | Example |
 |--------|---------|---------|
-| `feat/` | New features or tests | `feat/add-receive-test-polkadot` |
-| `bugfix/` | Bug fixes | `bugfix/fix-swap-test-timeout` |
-| `support/` | Refactors, test improvements | `support/extract-common-helpers` |
-| `chore/` | Tooling, configs, dependencies | `chore/update-playwright-1.54` |
+| `feat/` | New features or tests | `feat/qaa-1139` |
+| `bugfix/` | Bug fixes | `bugfix/qaa-2045` |
+| `support/` | Refactors, test improvements | `support/qaa-987` |
+| `chore/` | Tooling, configs, dependencies | `chore/qaa-1500` |
 
 ### 6.3 Commit Message Format (Conventional Commits)
 
@@ -660,9 +660,9 @@ pnpm desktop build:testing
 #### Step 3: Run Your Test
 
 ```bash
-pnpm e2e:desktop test:playwright -- --grep "my test name"
-# Or run a specific spec file:
 pnpm e2e:desktop test:playwright send.spec.ts
+# Or filter by test name pattern (alternative):
+pnpm e2e:desktop test:playwright -- --grep "my test name"
 ```
 
 #### Step 4: Debug Failures

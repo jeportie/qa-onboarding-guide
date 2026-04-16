@@ -491,7 +491,39 @@ pnpm e2e:desktop test:playwright -- --shard=1/3
 <strong>Key takeaway:</strong> Playwright gives you locators that find elements, actions that interact with them, and assertions that verify state — all with built-in auto-waiting. You never write <code>sleep()</code>. The configuration in <code>playwright.config.ts</code> controls timeouts, retries, parallelism, and reporting. Master these fundamentals and you can read any test in the codebase.
 </div>
 
-### 43.8 Quiz
+### 43.8 Visual Debugging with PWDEBUG
+
+When a test fails or you want to understand the test flow step by step, Playwright's **debug mode** is your best tool. Setting the `PWDEBUG=1` environment variable launches the **Playwright Inspector** — a GUI that pauses at each action and lets you step through the test interactively.
+
+**Launch a test in debug mode:**
+```bash
+PWDEBUG=1 pnpm e2e:desktop test:playwright e2e/desktop/tests/specs/add.account.spec.ts
+```
+
+This opens two windows: the **Electron app** (Ledger Live) and the **Playwright Inspector**:
+
+![Playwright Inspector](images/Playwright_Inspector.png)
+
+**The Inspector UI:**
+
+- **Left panel (Actions list)** — every `await` action from your test, listed in order. The currently executing action is highlighted. Completed actions show a green checkmark.
+- **Right panel (Browser)** — the live Electron app. You can see exactly what the user would see at each step.
+- **Locator input** — type a locator (e.g., `getByTestId("portfolio-empty-state-add-account-button")`) to see it highlighted live in the app.
+- **Step / Resume buttons** — click "Step over" to execute one action at a time, or "Resume" to run until the next breakpoint or failure.
+- **Locator picker** — click the crosshair icon, then click any element in the app to see its best locator suggestion. Invaluable for writing new tests.
+
+**When to use PWDEBUG:**
+- **Debugging a failure** — step to the failing action and inspect the DOM state
+- **Understanding a test flow** — watch what the app does at each step, especially useful when learning a new spec file
+- **Verifying locators** — use the locator picker to confirm your selectors match the right elements
+- **Writing new tests** — pause after each action to decide what the next step should be
+
+> **Tip:** You can also combine PWDEBUG with a single worker for easier debugging:
+> ```bash
+> PWDEBUG=1 pnpm e2e:desktop test:playwright add.account.spec.ts -- --workers=1
+> ```
+
+### 43.9 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz — Playwright Core Concepts</h3>
@@ -2198,14 +2230,17 @@ test.describe("YOUR FEATURE", () => {
 ### 49.7 Step 7: Run Locally
 
 ```bash
-# Run your specific test
+# Run your specific test file
+pnpm e2e:desktop test:playwright your.spec.ts
+
+# Or filter by test name (alternative):
 pnpm e2e:desktop test:playwright -- --grep "YOUR TEST DESCRIPTION"
 
-# Run with debug mode (step-by-step)
-PWDEBUG=1 pnpm e2e:desktop test:playwright -- --grep "YOUR TEST"
+# Run with debug mode (step-by-step) — see Chapter 43.8
+PWDEBUG=1 pnpm e2e:desktop test:playwright your.spec.ts
 
 # Run with single worker (easier to debug)
-pnpm e2e:desktop test:playwright -- --grep "YOUR TEST" --workers=1
+pnpm e2e:desktop test:playwright your.spec.ts -- --workers=1
 ```
 
 ### 49.8 Step 8: Verify Stability
@@ -2216,7 +2251,7 @@ pnpm e2e:desktop test:playwright -- --grep "YOUR TEST" --workers=1
 # Run 3 times
 for i in 1 2 3; do
   echo "--- Run $i ---"
-  pnpm e2e:desktop test:playwright -- --grep "YOUR TEST"
+  pnpm e2e:desktop test:playwright your.spec.ts
 done
 ```
 
@@ -2243,31 +2278,25 @@ Verify:
 ### 49.10 Step 10: Commit, Push, Create PR
 
 ```bash
-# Create a feature branch
-git checkout -b feat/add-first-time-btc-account-test
+# Create a branch (following naming convention from Chapter 6)
+git checkout -b test/qaa-XXXX    # Replace XXXX with your Jira ticket number
 
 # Stage your changes
 git add e2e/desktop/tests/specs/your.spec.ts
 
-# Commit with conventional commit format
+# Commit with conventional commit format (see Chapter 6.3)
 git commit -m "test(e2e): add first-time BTC account test for desktop"
-
-# Push to remote
-git push -u origin feat/add-first-time-btc-account-test
-
-# Create a PR targeting develop
-gh pr create --base develop --title "test(e2e): add first-time BTC account test" \
-  --body "## Summary
-- Automates QAA-1139: Add Account (first time, BTC) on Desktop
-- Links to Xray: B2CQA-786
-
-## Test plan
-- [x] Test passes locally 3/3 runs
-- [x] Allure report verified
-- [x] Tags and TMS links correct"
 ```
 
-After the PR is merged, update the Jira ticket to "Done" and add a comment linking the PR.
+Then use the Claude Code `/create-pr` command to create the PR with the correct structure:
+
+```
+/create-pr
+```
+
+This command will ask for your ticket URL, description, change type, scope, and test coverage. It creates a changeset, generates a structured PR body, pushes, creates a **draft PR**, and opens it in your browser. See Chapter 50.9 for a full walkthrough.
+
+After the PR is merged, move the Jira ticket to "Done" and add a comment linking the PR.
 
 <div class="resource-box">
 <h4>Resources</h4>
@@ -2352,7 +2381,7 @@ After the PR is merged, update the Jira ticket to "Done" and add a comment linki
 ## Real Ticket Walkthrough -- QAA-1139 (Add Account BTC)
 
 <div class="chapter-intro">
-This is your capstone chapter. Everything you learned in Chapters 43-49 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process: understanding the ticket, analyzing existing code, writing the test, running it, and preparing the PR.
+This is your capstone chapter. Everything you learned in Chapters 43-49 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
 </div>
 
 ### 50.1 Understanding the Ticket
@@ -2366,9 +2395,44 @@ This is your capstone chapter. Everything you learned in Chapters 43-49 converge
 2. The user adds a BTC account for the first time
 3. The test verifies the account appears in the portfolio and account list
 
-**Context:** This test already exists in mobile (`e2e/mobile/specs/addAccount/addAccountBTC.spec.ts`). We need to create the desktop version.
+**Context:** This test already exists in mobile (`e2e/mobile/specs/addAccount/addAccountBTC.spec.ts`). We need to ensure the desktop version also links the Xray test case.
 
-### 50.2 Analyzing Existing Desktop Coverage
+#### What Are Xray Tickets?
+
+**Xray** is a test management plugin for Jira. It extends Jira with dedicated issue types for testing: **Test**, **Test Execution**, **Test Plan**, and **Test Set**. In our workflow, two types of Jira tickets matter:
+
+| Ticket type | Example | Purpose |
+|---|---|---|
+| **QAA ticket** | `QAA-1139` | A work item — "automate this test", "fix this flaky test", etc. |
+| **Xray test case** (B2CQA) | `B2CQA-786` | A test scenario — "Add account when no account exists (BTC)". Lives in Xray. |
+
+The `QAA-1139` ticket tells you **what to do**. The `B2CQA-786` test case tells you **what the test should verify**.
+
+#### How `xrayTicket` Strings Flow to Xray and Allure
+
+In the test code, each currency entry has an `xrayTicket` field — a comma-separated string of B2CQA IDs:
+
+```typescript
+{ currency: Currency.BTC, xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073" }
+```
+
+Here is how this string flows through the system:
+
+1. **Test runs** → the framework reads the `xrayTicket` string and calls `addTmsLink()` for each ID
+2. **Allure collects** → each ID appears as a **TMS link** (Test Management System) in the Allure report
+3. **CI uploads** → the `allure-results/` directory is uploaded to the Allure server after each CI run
+4. **Xray reads** → Xray imports the Allure results and updates the execution status of each B2CQA test case (pass/fail)
+5. **Traceability** → stakeholders can now trace: Jira ticket → Xray test case → automated test → CI execution → report
+
+#### Why Linking Matters
+
+- **Coverage tracking** — PMs and QA leads see which Xray test cases have automation in the Xray coverage dashboard
+- **Test execution linking** — each CI run automatically updates Xray with pass/fail per test case
+- **Gap analysis** — if a B2CQA ID is missing from the code, the test runs but **doesn't report to Xray** — it is invisible coverage
+
+In this ticket, `B2CQA-786` exists in the mobile test's ticket list but is **missing** from the desktop test. That is the gap we need to close.
+
+### 50.2 Analyzing Existing Coverage
 
 The existing `add.account.spec.ts` already tests adding BTC:
 
@@ -2389,29 +2453,27 @@ for (const currency of currencies) {
 }
 ```
 
-**But notice:** The existing test uses `userdata: "skip-onboarding-with-last-seen-device"` and already has BTC tickets (`B2CQA-2499`). The ticket `B2CQA-786` ("Add account when no account exists before") is specifically about the **first-time** experience — when the empty state UI is shown.
+The existing test uses `userdata: "skip-onboarding-with-last-seen-device"` which starts with **zero accounts** (empty portfolio). It clicks "Add Account", selects BTC, completes the flow, and verifies the account appears. This is exactly the "first time add account" scenario that `B2CQA-786` describes.
 
-**Your decision:** Should you add a new test to the existing file, or is the existing BTC test sufficient?
+**Conclusion:** We do not need a new test. The existing test already covers the scenario — we just need to add `B2CQA-786` to the `xrayTicket` string so Xray knows this test case is covered.
 
-Let's check: the existing test starts from the portfolio (which shows the empty state when no accounts exist) and adds a BTC account. The `skip-onboarding-with-last-seen-device` userdata has zero accounts, so the portfolio IS in the empty state. The existing test does cover the first-time flow — but `B2CQA-786` is not yet linked.
+> **Note:** The mobile reference at `e2e/mobile/specs/addAccount/addAccountBTC.spec.ts` already has `B2CQA-786` in its `tmsLinks` array. The desktop test is the only one missing it.
 
-**Two possible approaches:**
+### 50.3 Create a Branch
 
-1. **Add the B2CQA-786 ticket ID to the existing BTC entry** — if the existing test fully covers the first-time flow
-2. **Create a separate test** that explicitly validates first-time-specific UI elements (empty state message, onboarding prompts)
+Following the branch naming convention from Chapter 6, create a branch from `develop`:
 
-Let's check what `B2CQA-786` specifically requires. The mobile test does:
-- Start with no accounts
-- Navigate to add account
-- Select BTC
-- Complete the add account flow
-- Verify the account appears
+```bash
+git checkout develop
+git pull
+git checkout -b test/qaa-1139
+```
 
-The existing desktop test does exactly this. **The simplest and correct approach is to add `B2CQA-786` to the existing BTC currency entry's xrayTicket field.**
+The branch name uses the `<prefix>/qaa-<jira_ticket_number>` pattern. Since this ticket adds test coverage, the `test/` prefix is appropriate.
 
-### 50.2b Hands-On: Run the Desktop Test BEFORE the Fix
+### 50.4 Run the Test in Isolation
 
-Before touching any code, run the existing desktop BTC add account test to see how it behaves today. This builds your mental model and gives you a baseline to compare after the fix.
+Before touching any code, run the existing BTC add account test to build your mental model and create a baseline.
 
 **Prerequisites** (one-time setup — skip if already done):
 ```bash
@@ -2433,161 +2495,148 @@ pnpm desktop build:testing
 pnpm e2e:desktop test:playwright:setup      # Install Playwright browsers
 ```
 
-**Run the BTC test:**
+**Run the test file:**
 ```bash
 cd e2e/desktop
+pnpm test:playwright add.account.spec.ts
+```
+
+This runs ALL currencies in the file. To isolate just the BTC test, you have two options:
+
+**Option A — Grep filter** (quick, no code changes):
+```bash
 pnpm test:playwright -- --grep "Bitcoin.*Add account"
 ```
 
-The test name is `[Bitcoin] Add account` inside the `Add Accounts` describe block. The `--grep` flag matches against the full test title.
+**Option B — Comment out other currencies** (most isolated, recommended for debugging):
+Edit `add.account.spec.ts` and temporarily comment out all entries except BTC in the `currencies` array, then run the whole file. Remember to restore the file after.
+
+> **Tip:** Use Playwright's debug mode to step through the test visually — see Chapter 43.8 for details:
+> ```bash
+> PWDEBUG=1 pnpm test:playwright add.account.spec.ts
+> ```
 
 **What you should observe:**
 1. Playwright launches Electron (Ledger Live Desktop)
-2. The app starts with `skip-onboarding-with-last-seen-device` userdata — empty portfolio, no accounts
+2. The app starts with empty portfolio (no accounts)
 3. The test clicks "Add Account" → modular drawer opens
 4. BTC is selected → Speculos scans and finds "Bitcoin 1"
 5. Account is added → portfolio shows balance and operations
 6. Navigation to Accounts → Bitcoin 1 → verifies details
 7. Test passes
 
-**Now check the Allure report to see what metadata is reported:**
-```bash
-# Generate and open the Allure report
-npx allure serve allure-results
-```
+### 50.5 Implement the Change
 
-This opens the report in your browser. Find the `[Bitcoin] Add account` test and look at:
-- **TMS Links section** — you will see `B2CQA-2499`, `B2CQA-2644`, `B2CQA-2672`, `B2CQA-2073` listed
-- **Notice:** `B2CQA-786` is **not** there — this is the gap we need to fix
-- **Tags** — `@NanoSP`, `@bitcoin`, `@family-bitcoin`, etc.
-- **Team** — `WALLET_XP`
-- **Steps** — Each `@step`-decorated page object method appears as a named step with timing
-
-> **Tip:** You can also use Playwright's built-in debug mode to step through the test interactively:
-> ```bash
-> PWDEBUG=1 pnpm test:playwright -- --grep "Bitcoin.*Add account"
-> ```
-> This opens the Playwright Inspector where you can pause, step, and inspect locators in real time.
-
-Press `Ctrl+C` in the terminal to stop the Allure server when you are done reviewing.
-
-### 50.2c Hands-On: Study the Mobile Reference Implementation
-
-The ticket says this test "currently exists only in `e2e/mobile/specs/addAccount/addAccountBTC.spec.ts`". Let's look at how the mobile version works to understand the reference implementation.
-
-**Read the mobile test:**
-```bash
-cat e2e/mobile/specs/addAccount/addAccountBTC.spec.ts
-```
-
-You will see:
-```typescript
-import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
-import { runAddAccountTest } from "./addAccount";
-
-runAddAccountTest(
-  Currency.BTC,
-  ["B2CQA-2499", "B2CQA-2644", "B2CQA-2672", "B2CQA-786"],
-  //                                            ^^^^^^^^^^^
-  // B2CQA-786 is here! This is the ticket we need to link on desktop too.
-  [
-    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
-    "@smoke", "@bitcoin", "@family-bitcoin",
-  ],
-);
-```
-
-**Key observation:** The mobile test passes `B2CQA-786` in its `tmsLinks` array. Now read the helper to understand the flow:
-```bash
-cat e2e/mobile/specs/addAccount/addAccount.ts
-```
-
-The helper `runAddAccountTest()` does:
-1. Initializes the app with `userdata: "skip-onboarding"` — empty portfolio, no accounts
-2. Waits for the portfolio page to load
-3. Taps "Add Account" → "Import with your Ledger"
-4. Selects BTC via modular drawer (or legacy flow as fallback)
-5. Adds the account at index 0
-6. Verifies the account appears with balance, operations, and correct address index
-
-**Compare mobile vs desktop:**
-
-| Aspect | Mobile (`addAccount.ts`) | Desktop (`add.account.spec.ts`) |
-|---|---|---|
-| Framework | Detox + Jest | Playwright |
-| Userdata | `skip-onboarding` | `skip-onboarding-with-last-seen-device` |
-| Starting state | Empty portfolio | Empty portfolio |
-| Flow | Add account → verify | Add account → verify |
-| `B2CQA-786` linked? | Yes | **No** — this is the gap |
-
-Both tests cover the same scenario (first-time BTC add account from empty state). The only difference is the framework and the missing Xray link on desktop.
-
-**(Optional) Run the mobile test** if you have the mobile build environment set up:
-```bash
-# Terminal 1: Metro bundler
-pnpm mobile start
-
-# Terminal 2: Run the test (iOS example)
-pnpm mobile e2e:test -c ios.sim.debug -- --testNamePattern="add account.*BTC"
-```
-
-> **Note:** Mobile builds take 10-30 minutes and require Xcode/Android Studio. If you don't have the mobile environment ready, reading the code above is sufficient — the important takeaway is that `B2CQA-786` is in the mobile test's `tmsLinks` but missing from the desktop test's `xrayTicket`.
-
-### 50.3 The Implementation
-
-Open `e2e/desktop/tests/specs/add.account.spec.ts`:
+Open `e2e/desktop/tests/specs/add.account.spec.ts` and add `B2CQA-786` to the BTC entry's `xrayTicket` string:
 
 ```typescript
 const currencies = [
   {
     currency: Currency.BTC,
-    xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073",
-    //          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    // ADD B2CQA-786 here:
-    // xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073, B2CQA-786",
+    xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073, B2CQA-786",
+    //                                                              ^^^^^^^^^^
+    //                                                    Added B2CQA-786 here
   },
 ```
 
-**That is it for linking the ticket.** But wait — let's verify the existing test actually covers the "first time" aspects. Reading the test flow:
+That is the only code change. The `xrayTicket` field is a comma-separated string — the framework's `addTmsLink()` helper splits it and registers each ID with Allure. After this change, `B2CQA-786` will appear in the Allure report and flow to Xray on the next CI run.
 
-```typescript
-async ({ app, userdataFile }) => {
-  // 1. Starts from portfolio (empty state, no accounts)
-  await app.portfolio.clickAddAccountButton();       // ✓ First time: empty state button
+### 50.6 Rerun the Tests
 
-  // 2. Modular dialog or legacy
-  const selector = await getModularSelector(app, "ASSET");
-  if (selector) {
-    await selector.validateItems();
-    await selector.selectAssetByTicker(currency.currency);
-    await selector.selectNetwork(currency.currency);
-    await app.scanAccountsDrawer.selectFirstAccount(); // ✓ Selects BTC account from device
-    await app.scanAccountsDrawer.clickCloseButton();
-  } else {
-    await app.addAccount.expectModalVisibility();
-    await app.addAccount.selectCurrency(currency.currency);
-    await app.addAccount.addAccounts();
-    await app.addAccount.done();
-  }
+Run the test again to confirm your change did not break anything:
 
-  // 3. Verify first account appears
-  await app.portfolio.expectBalanceVisibility();      // ✓ Balance now visible
-  await app.portfolio.checkOperationHistory();        // ✓ Operations visible
-  await app.portfolio.expectAccountsPersistedInAppJson(userdataFile, 1, 5000); // ✓ Persisted
-
-  // 4. Navigate to account
-  await app.mainNavigation.openTargetFromMainNavigation("accounts");
-  await app.accounts.navigateToAccountByName(firstAccountName);
-  await app.account.expectAccountVisibility(firstAccountName);
-  await app.account.expectAccountBalance();           // ✓ Account has balance
-  await app.account.expectLastOperationsVisibility(); // ✓ Operations visible
+```bash
+pnpm test:playwright add.account.spec.ts
 ```
 
-**Conclusion:** The existing test already covers the full "first time add account BTC" flow. We just need to add the missing Xray ticket ID.
+Then run it at least 3 times for stability:
+```bash
+pnpm test:playwright -- --grep "Bitcoin.*Add account" --repeat-each=3
+```
 
-### 50.4 But What If the Ticket Required a NEW Test?
+All 3 runs should pass. If any run fails, investigate — it may be a flaky test or an environment issue (Docker not running, Speculos timeout, etc.). You only changed metadata, not behavior, so failures indicate an existing issue.
 
-For learning purposes, here is how you would write it from scratch if the scenario were different enough:
+### 50.7 Verify with Allure
+
+Generate and open the Allure report to confirm the new ticket ID appears:
+
+**Option A — Serve directly (recommended for quick checks):**
+```bash
+npx allure serve allure-results
+```
+
+**Option B — Generate a persistent report:**
+```bash
+pnpm allure:generate
+open allure-report/index.html        # macOS
+```
+
+In the report, navigate to **Suites** → **Add Accounts** → **[Bitcoin] Add account** and check the **Links** section. You should now see:
+- `B2CQA-2499`
+- `B2CQA-2644`
+- `B2CQA-2672`
+- `B2CQA-2073`
+- `B2CQA-786` — **this is the new one you just added**
+
+Each link is clickable and points to the Xray test case in Jira. If you ran the test before your change (in step 50.4), compare the reports — `B2CQA-786` was missing before and is now present.
+
+Press `Ctrl+C` in the terminal to stop the Allure server when done.
+
+### 50.8 Commit the Change
+
+Stage and commit following the Conventional Commits format from Chapter 6:
+
+```bash
+git add e2e/desktop/tests/specs/add.account.spec.ts
+git commit -m "test(e2e): link B2CQA-786 to BTC add account test on desktop"
+```
+
+The commit type is `test` (adding test coverage), the scope is `e2e`, and the description explains what was done and why.
+
+### 50.9 Create the PR with Claude Code
+
+The team uses a Claude Code command to create PRs with the correct structure, changeset, and Slack announcement. In your terminal, run:
+
+```
+/create-pr
+```
+
+Claude Code will ask you for:
+
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1139`
+2. **Ticket description** — "Link Xray test case B2CQA-786 to existing BTC add account test on desktop"
+3. **Change type** — `test`
+4. **Change scope** — `e2e/desktop`
+5. **Test coverage** — `yes` (the change itself is test metadata)
+6. **QA focus areas** — "BTC add account test, Allure TMS links"
+7. **UI changes** — `no`
+
+The command then:
+1. Reads `.claude/rules/git-workflow.md` to enforce commit conventions
+2. Creates a **changeset** via the `create-changeset` skill
+3. Generates a structured PR body with checklist, description, and context link
+4. Pushes the branch and creates a **draft PR** via `gh pr create --draft`
+5. Opens the PR in your browser
+6. Generates a Slack announcement via the `slack-pr-message` skill
+
+> **Reference:** The full `/create-pr` command is defined in `~/.claude/commands/create-pr.md`. It uses:
+> - `~/.claude/rules/git-workflow.md` — commit and branch naming conventions
+> - `~/.claude/skills/slack-pr-message/SKILL.md` — Slack message formatting
+
+### 50.10 Mark the PR as Ready
+
+After CI passes and your PR has been reviewed:
+
+1. In GitHub, navigate to your draft PR
+2. Click **"Ready for review"** at the bottom of the PR page — this publishes the PR and makes it mergeable
+3. Once approved and merged, update the Jira ticket:
+   - Move `QAA-1139` to **Done**
+   - Add a comment: "Linked B2CQA-786 to existing desktop BTC add account test in PR #XXXX"
+4. The next CI run will automatically upload Allure results to Xray, updating `B2CQA-786` with the test execution status
+
+### 50.11 Reference: Writing a New Test from Scratch
+
+For this ticket, we only needed to add a ticket ID to an existing test. But for cases where a new test file is required, here is the full template with all patterns you need:
 
 ```typescript
 import { test } from "tests/fixtures/common";
@@ -2649,127 +2698,11 @@ test.describe("Add Account - First Time BTC", () => {
 });
 ```
 
-### 50.5 Hands-On: Run the Fixed Test and Generate the Allure Report
-
-Now that you have made the one-line change (adding `B2CQA-786` to the BTC `xrayTicket`), run the test again to confirm it still passes and verify that the Allure report now includes the new ticket.
-
-#### Step 1: Run the test
-
-```bash
-cd e2e/desktop
-pnpm test:playwright -- --grep "Bitcoin.*Add account"
-```
-
-The test should pass exactly as before — you only changed metadata, not behavior.
-
-#### Step 2: Run multiple times for stability
-
-Before opening a PR, run the test at least 3 times to make sure it is stable:
-```bash
-pnpm test:playwright -- --grep "Bitcoin.*Add account" --repeat-each=3
-```
-
-All 3 runs should pass. If any run fails, investigate — it may be a flaky test or an environment issue (Docker not running, Speculos timeout, etc.).
-
-#### Step 3: Generate and open the Allure report
-
-Allure is the test reporting framework used across Ledger Live E2E tests. It produces an interactive HTML report from the `allure-results/` directory that Playwright populates after each run.
-
-**Option A — Serve directly (recommended for quick checks):**
-```bash
-npx allure serve allure-results
-```
-This generates a temporary report and opens it in your browser. Press `Ctrl+C` to stop the server when done.
-
-**Option B — Generate a persistent report:**
-```bash
-# Generate the report into ./allure-report/
-pnpm allure:generate
-
-# Open it manually
-open allure-report/index.html        # macOS
-# or: xdg-open allure-report/index.html  # Linux
-```
-
-#### Step 4: Navigate the Allure report
-
-Once the report is open in your browser:
-
-1. **Find the test:** Click on **Suites** in the left sidebar → expand **Add Accounts** → click **[Bitcoin] Add account**
-
-2. **Check the TMS Links:** In the test detail panel, look for the **Links** section. You should now see:
-   - `B2CQA-2499`
-   - `B2CQA-2644`
-   - `B2CQA-2672`
-   - `B2CQA-2073`
-   - `B2CQA-786` — **this is the new one you just added**
-
-   Each link is clickable and points to the Xray test case in Jira. Compare this with the report you generated in Section 50.2b — `B2CQA-786` was missing before your change, now it is present.
-
-3. **Check the test metadata:**
-   - **Tags:** `@NanoSP`, `@bitcoin`, `@family-bitcoin`, etc.
-   - **Owner/Team:** `WALLET_XP`
-   - **Duration:** How long the test took (typically 30-90 seconds)
-
-4. **Explore the test steps:** Click on the test to expand its step trace. Each `@step`-decorated page object method appears as a named step:
-   - `portfolio.clickAddAccountButton()`
-   - `modularSelector.selectAssetByTicker(BTC)`
-   - `scanAccountsDrawer.selectFirstAccount()`
-   - `portfolio.expectBalanceVisibility()`
-   - etc.
-
-   Each step shows its duration. If a step fails, the report shows the failure message, a screenshot, and (if configured) a video recording.
-
-5. **Explore the report tabs:**
-   - **Overview** — Summary with pass/fail counts, duration, and environment info
-   - **Suites** — Tests grouped by `test.describe()` blocks
-   - **Graphs** — Duration trends, status distribution
-   - **Timeline** — Gantt chart of parallel test execution
-
-#### Step 5: Typecheck
-
-Run the typecheck to make sure the metadata change did not introduce any issues:
-```bash
-cd ../..   # back to monorepo root
-pnpm e2e:desktop typecheck
-```
-
-This should pass cleanly — the `xrayTicket` field is a plain string, so adding a ticket ID cannot break types.
-
-### 50.6 Git Workflow for This Ticket
-
-```bash
-# 1. Create branch from develop
-git checkout develop
-git pull
-git checkout -b feat/link-btc-first-time-add-account-xray
-
-# 2. Make the change (add B2CQA-786 to the xrayTicket)
-# Edit e2e/desktop/tests/specs/add.account.spec.ts
-
-# 3. Commit
-git add e2e/desktop/tests/specs/add.account.spec.ts
-git commit -m "test(e2e): link B2CQA-786 to BTC add account test on desktop"
-
-# 4. Push and create PR
-git push -u origin feat/link-btc-first-time-add-account-xray
-gh pr create --base develop \
-  --title "test(e2e): link B2CQA-786 to BTC add account test" \
-  --body "Closes QAA-1139. Links Xray B2CQA-786 to the existing BTC add account test."
-```
-
-### 50.7 Updating Jira
-
-After the PR is merged:
-1. Move QAA-1139 to **Done**
-2. Add a comment: "Linked B2CQA-786 to existing desktop BTC add account test in PR #XXXX"
-3. Verify that the next CI run includes B2CQA-786 in the Xray report
-
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Real E2E work is not always writing new tests. Sometimes the right answer is linking an Xray ticket to existing coverage. Always check what exists before writing new code. When you do write new tests, follow the template from Section 50.4 — it includes every pattern you need: imports, fixtures, modular dialog detection, assertions, and TMS linking.
+<strong>Key takeaway:</strong> The workflow is always: understand ticket → create branch (<code>&lt;prefix&gt;/qaa-&lt;number&gt;</code>) → run test in isolation → implement → rerun 3x → verify Allure → commit (Conventional Commits) → <code>/create-pr</code> → mark ready. Real E2E work is not always writing new tests — sometimes the right answer is linking an Xray ticket to existing coverage. Always check what exists before writing new code.
 </div>
 
-### 50.8 Quiz
+### 50.12 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz — Real Ticket Walkthrough</h3>
@@ -2896,7 +2829,7 @@ async expectNoAccountsMessage() {
    - What each `await app.*` call does in the user flow
    - What the test verifies
 
-**Verification:** Your explanation should match the test's actual behavior. Run the test to confirm: `pnpm e2e:desktop test:playwright -- --grep "Settings"`
+**Verification:** Your explanation should match the test's actual behavior. Run the test to confirm: `pnpm e2e:desktop test:playwright settings.spec.ts`
 
 ### 51.4 Exercise 4: Debug a Broken Test (45 min)
 

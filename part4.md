@@ -525,9 +525,9 @@ Error: Element is not attached to the DOM
 
 **Playwright Inspector** (headed debug mode):
 ```bash
-PWDEBUG=1 npx playwright test --grep "my test"
+PWDEBUG=1 pnpm e2e:desktop test:playwright your-test.spec.ts
 ```
-Opens a browser with an inspector panel — step through actions, inspect locators live, see resolved elements.
+Opens a browser with an inspector panel — step through actions, inspect locators live, see resolved elements. See Part 6, Chapter 43.8 for a detailed walkthrough with screenshots.
 
 **Playwright Trace Viewer:**
 ```bash

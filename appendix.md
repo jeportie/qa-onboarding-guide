@@ -113,9 +113,9 @@ pnpm mobile test:jest "filename"          # Mobile test file matching "filename"
 ```bash
 pnpm e2e:desktop test:playwright                      # Run all desktop E2E tests
 pnpm e2e:desktop test:playwright settings.spec.ts     # Run a single spec file
-pnpm e2e:desktop test:playwright --grep "Settings"    # Filter by test name pattern
-pnpm e2e:desktop test:playwright --grep "@smoke"      # Run only smoke tests
-pnpm e2e:desktop test:playwright --grep "@NanoSP"     # Run only NanoSP-compatible tests
+pnpm e2e:desktop test:playwright -- --grep "Settings" # Filter by test name pattern (alternative)
+pnpm e2e:desktop test:playwright -- --grep "@smoke"   # Run only smoke tests
+pnpm e2e:desktop test:playwright -- --grep "@NanoSP"  # Run only NanoSP-compatible tests
 pnpm e2e:desktop allure:generate                      # Generate Allure report from results
 pnpm e2e:desktop allure:open                          # Open Allure report in browser
 pnpm e2e:desktop allure                               # Generate + open (combined)
