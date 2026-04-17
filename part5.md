@@ -456,14 +456,14 @@ pnpm e2e:desktop test:playwright
 pnpm e2e:desktop test:playwright add.account.spec.ts
 
 # Run tests matching a name pattern (grep)
-pnpm e2e:desktop test:playwright -- --grep "Add account"
+pnpm e2e:desktop test:playwright --grep "Add account"
 
 # Run tests with a specific tag
-pnpm e2e:desktop test:playwright -- --grep "@smoke"
-pnpm e2e:desktop test:playwright -- --grep "@bitcoin"
+pnpm e2e:desktop test:playwright --grep "@smoke"
+pnpm e2e:desktop test:playwright --grep "@bitcoin"
 
 # Run with the Playwright UI (interactive debugger)
-pnpm e2e:desktop test:playwright -- --ui
+pnpm e2e:desktop test:playwright --ui
 
 # Run in debug mode (opens inspector, pauses on first action)
 PWDEBUG=1 pnpm e2e:desktop test:playwright add.account.spec.ts
@@ -896,9 +896,9 @@ test("Add BTC account", {
 
 Run only tests with a specific tag:
 ```bash
-pnpm e2e:desktop test:playwright -- --grep "@smoke"
-pnpm e2e:desktop test:playwright -- --grep "@bitcoin"
-pnpm e2e:desktop test:playwright -- --grep "@NanoSP"
+pnpm e2e:desktop test:playwright --grep "@smoke"
+pnpm e2e:desktop test:playwright --grep "@bitcoin"
+pnpm e2e:desktop test:playwright --grep "@NanoSP"
 ```
 
 **Annotations — for linking to external systems:**
@@ -1724,7 +1724,7 @@ cd e2e/desktop
 pnpm run allure:generate
 pnpm run allure:open
 # Or simply:
-npx allure serve allure-results
+allure serve allure-results
 ```
 
 **The five views:**
@@ -2243,7 +2243,7 @@ test.describe("YOUR FEATURE", () => {
 pnpm e2e:desktop test:playwright your.spec.ts
 
 # Or filter by test name (alternative):
-pnpm e2e:desktop test:playwright -- --grep "YOUR TEST DESCRIPTION"
+pnpm e2e:desktop test:playwright --grep "YOUR TEST DESCRIPTION"
 
 # Run with debug mode (step-by-step) — see Chapter 22.8
 PWDEBUG=1 pnpm e2e:desktop test:playwright your.spec.ts
@@ -2274,7 +2274,7 @@ Common flakiness causes:
 
 ```bash
 cd e2e/desktop
-npx allure serve allure-results
+allure serve allure-results
 ```
 
 Verify:
@@ -2287,6 +2287,13 @@ Verify:
 ### 28.10 Step 10: Commit, Push, Create PR
 
 ```bash
+# Sync with develop and install dependencies
+git pull
+pnpm i
+# If install fails:
+pnpm clean
+pnpm i
+
 # Create a branch (following naming convention from Chapter 6)
 git checkout -b test/qaa-XXXX    # Replace XXXX with your Jira ticket number
 
@@ -2483,6 +2490,11 @@ Following the branch naming convention from Chapter 6, create a branch from `dev
 ```bash
 git checkout develop
 git pull
+pnpm i
+# If install fails:
+pnpm clean
+pnpm i
+
 git checkout -b test/qaa-1139
 ```
 
@@ -2522,7 +2534,7 @@ This runs ALL currencies in the file. To isolate just the BTC test, you have two
 
 **Option A — Grep filter** (quick, no code changes):
 ```bash
-pnpm test:playwright -- --grep "Bitcoin.*Add account"
+pnpm test:playwright --grep "Bitcoin.*Add account"
 ```
 
 **Option B — Comment out other currencies** (most isolated, recommended for debugging):
@@ -2568,7 +2580,7 @@ pnpm test:playwright add.account.spec.ts
 
 Then run it at least 3 times for stability:
 ```bash
-pnpm test:playwright -- --grep "Bitcoin.*Add account" --repeat-each=3
+pnpm test:playwright --grep "Bitcoin.*Add account" --repeat-each=3
 ```
 
 All 3 runs should pass. If any run fails, investigate — it may be a flaky test or an environment issue (Docker not running, Speculos timeout, etc.). You only changed metadata, not behavior, so failures indicate an existing issue.
@@ -2579,7 +2591,7 @@ Generate and open the Allure report to confirm the new ticket ID appears:
 
 **Option A — Serve directly (recommended for quick checks):**
 ```bash
-npx allure serve allure-results
+allure serve allure-results
 ```
 
 **Option B — Generate a persistent report:**
@@ -3070,8 +3082,12 @@ This is why the test can call `app.market.starCoin(...)` and `app.marketBanner.c
 Following the branch naming convention from Chapter 6:
 
 ```bash
-git checkout develop
 git pull
+pnpm i 
+// if install failure : 
+pnpm clean
+pnpm i
+
 git checkout -b test/qaa-1141
 ```
 
@@ -3083,13 +3099,13 @@ Before changing anything, run the existing test to build your mental model and c
 
 **Run the market test file:**
 ```bash
-cd e2e/desktop
-pnpm test:playwright market.spec.ts
+PWDEBUG=1 pnpm e2e:desktop test:playwright e2e/desktop/tests/specs/market.spec.ts
 ```
 
 To isolate the "Filters behavior" test specifically:
 ```bash
-pnpm test:playwright -- --grep "Filters behavior"
+cd e2e/desktop
+PWDEBUG=1 pnpm test:playwright --grep "Filters behavior"
 ```
 
 > **Note:** Unlike the Add Account test in Chapter 29, the market test does **not** require an active Speculos instance. It uses the `speculos-tests-app` userdata for initial state but does not perform any device interactions (no signing, no address verification). Docker must be running (the fixture still initializes Speculos as part of the standard setup), but the test itself only interacts with the market UI.
@@ -3146,7 +3162,7 @@ pnpm test:playwright market.spec.ts
 
 Run it at least 3 times for stability:
 ```bash
-pnpm test:playwright -- --grep "Filters behavior" --repeat-each=3
+pnpm test:playwright --grep "Filters behavior" --repeat-each=3
 ```
 
 All 3 runs should pass. You only changed metadata, so failures indicate an existing issue (environment, Docker, network timing), not a regression from your change.
@@ -3154,7 +3170,7 @@ All 3 runs should pass. You only changed metadata, so failures indicate an exist
 **Verify the Allure report:**
 
 ```bash
-npx allure serve allure-results
+allure serve allure-results
 ```
 
 Navigate to **Suites** → **Market** → **Filters behavior** and check the **Links** section. You should see:

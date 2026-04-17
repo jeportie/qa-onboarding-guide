@@ -662,14 +662,14 @@ pnpm desktop build:testing
 ```bash
 pnpm e2e:desktop test:playwright send.spec.ts
 # Or filter by test name pattern (alternative):
-pnpm e2e:desktop test:playwright -- --grep "my test name"
+pnpm e2e:desktop test:playwright --grep "my test name"
 ```
 
 #### Step 4: Debug Failures
 
 ```bash
 # Open Playwright UI mode for interactive debugging
-pnpm e2e:desktop test:playwright -- --ui
+pnpm e2e:desktop test:playwright --ui
 
 # Generate and view Allure report
 pnpm e2e:desktop allure

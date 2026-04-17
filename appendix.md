@@ -113,9 +113,9 @@ pnpm mobile test:jest "filename"          # Mobile test file matching "filename"
 ```bash
 pnpm e2e:desktop test:playwright                      # Run all desktop E2E tests
 pnpm e2e:desktop test:playwright settings.spec.ts     # Run a single spec file
-pnpm e2e:desktop test:playwright -- --grep "Settings" # Filter by test name pattern (alternative)
-pnpm e2e:desktop test:playwright -- --grep "@smoke"   # Run only smoke tests
-pnpm e2e:desktop test:playwright -- --grep "@NanoSP"  # Run only NanoSP-compatible tests
+pnpm e2e:desktop test:playwright --grep "Settings" # Filter by test name pattern (alternative)
+pnpm e2e:desktop test:playwright --grep "@smoke"   # Run only smoke tests
+pnpm e2e:desktop test:playwright --grep "@NanoSP"  # Run only NanoSP-compatible tests
 pnpm e2e:desktop allure:generate                      # Generate Allure report from results
 pnpm e2e:desktop allure:open                          # Open Allure report in browser
 pnpm e2e:desktop allure                               # Generate + open (combined)
@@ -870,7 +870,7 @@ A: Check these common causes:
 1. **Missing `@step()` decorator** — page object methods need the `@step` annotation to appear in Allure
 2. **Wrong `xrayTicket` string** — verify the comma-separated B2CQA ticket IDs in `addTmsLink()` match the expected Xray test cases
 3. **Missing team tag** — ensure `test.info().annotations` includes the correct team tag
-4. Run the test and open the report with `npx allure serve allure-results` to inspect step traces and links.
+4. Run the test and open the report with `allure serve allure-results` to inspect step traces and links.
 
 ### Mobile-Specific Issues
 
