@@ -46,6 +46,13 @@
   - [31. Exercises & Challenges](part5#exercises-amp-challenges)
   - [Part 5 Assessment](part5#part-5-final-assessment)
 
+- [**Part 6 -- Ledger Wallet Components & Swap Live App**](part6)
+  - [32. Live Apps in Ledger Wallet](part6#live-apps-in-ledger-wallet)
+  - [33. Swap Live App Architecture](part6#swap-live-app-architecture-amp-components)
+  - [34. Releases & Firebase Environments](part6#swap-live-app-releases-amp-firebase-environments)
+  - [35. Ticket Walkthrough: QAA-1136](part6#real-ticket-walkthrough-qaa-1136-swap-coverage-gap)
+  - [Part 6 Assessment](part6#part-6-final-assessment)
+
 - [**Appendix**](appendix)
   - [A: Command Reference](appendix#a-complete-command-reference)
   - [B: Environment Variables](appendix#b-environment-variables-reference)
