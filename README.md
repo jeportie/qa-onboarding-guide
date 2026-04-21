@@ -8,8 +8,8 @@
 </div>
 
 <div style="display: flex; justify-content: center; gap: 12px; margin: 24px 0; flex-wrap: wrap;">
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">35 Chapters</span>
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">28 Interactive Quizzes</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">45 Chapters</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">38 Interactive Quizzes</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">6 Appendices</span>
 </div>
 
@@ -21,7 +21,7 @@
 
 This guide is your single reference for everything you need to become an effective QA Automation Engineer on Ledger Live. It covers the full stack — from the monorepo architecture and device emulation to E2E test writing, CI/CD pipelines, and a complete real ticket walkthrough.
 
-Every chapter builds on the previous one. Each ends with an interactive quiz (80% to pass). Take your time with Parts 1-3 before jumping into the more advanced material. Parts 5 and 6 go deep on desktop E2E and the Swap Live App with real ticket walkthroughs.
+Every chapter builds on the previous one. Each ends with an interactive quiz (80% to pass). Take your time with Parts 1-3 before jumping into the more advanced material. Parts 5, 6 and 7 go deep on desktop E2E, mobile E2E, and the Swap Live App with real ticket walkthroughs.
 
 </div>
 
@@ -60,7 +60,8 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 | **3** | [E2E Testing in Practice](part3.md) | Ch 13-16 | Desktop & mobile E2E architecture deep dives + your first tests |
 | **4** | [CI/CD & Mastery](part4.md) | Ch 17-21 | GitHub Actions, test strategy, debugging, contributing, AI agents |
 | **5** | [E2E Desktop in Detail](part5.md) | Ch 22-31 | Playwright deep dive, Electron, Speculos mastery, Allure/Xray, codebase walkthrough, daily workflow, real tickets |
-| **6** | [Ledger Wallet Components & Swap Live App](part6.md) | Ch 32-35 | Live Apps overview, Swap Live App architecture, releases & Firebase environments, QAA-1136 walkthrough |
+| **6** | [E2E Mobile in Detail](part6.md) | Ch 32-41 | React Native primer, mobile toolchain, Detox zero-to-advanced, bridge & POMs, sharding & CI, QAA-702 walkthrough |
+| **7** | [Ledger Wallet Components & Swap Live App](part7.md) | Ch 42-45 | Live Apps overview, Swap Live App architecture, releases & Firebase environments, QAA-1136 walkthrough |
 | **A** | [Appendix](appendix.md) | A-F | Commands, env vars, Ledger Live stack references, devices, troubleshooting FAQ, glossary |
 
 ---
