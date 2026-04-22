@@ -5160,7 +5160,7 @@ Every piece of work you do on the mobile E2E suite starts in Jira and ends in an
 |---|---|---|---|
 | **QAA ticket** | `QAA` | `QAA-702` | A work item you pick up in your sprint — "automate X", "cover regression Y", "fix flake in Z". |
 | **Xray test case** | `B2CQA` | `B2CQA-604` | A test scenario in Xray — reusable across platforms (LLD, LLM, LLC). |
-| **Bug** | `LIVE` / `BACKLOG-*` | `LIVE-12345` | A product defect. Rarely your starting point, but you link it in `$BugLink(...)` when reproducing. |
+| **Bug** | `LIVE` (tagged with `LLM` / `LLD` labels) | `LIVE-12345` | A product defect. Rarely your starting point, but you link it in `$BugLink(...)` when reproducing. |
 
 The **QAA ticket tells you what to do**. The **B2CQA ticket tells you what to verify**. These are never the same ticket. A single QAA-XXX can cover one B2CQA, or it can bundle five. Read carefully.
 
