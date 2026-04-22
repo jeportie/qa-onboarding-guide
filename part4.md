@@ -5437,30 +5437,49 @@ Reviewer-facing signals that you did the work:
 ## Real Ticket Walkthrough: QAA-702 — Swap History ERC20 Export
 
 <div class="chapter-intro">
-This is your mobile capstone — and the first lesson is that <strong>the test you were hired to write already exists</strong>. <code>QAA-702</code> — the sprint ticket to automate scenario <code>B2CQA-604</code> (Swap history export with an ERC20 receive) — was implemented during the April 2026 migration to the new <code>e2e/mobile/</code> peer workspace. The spec is 37 lines of declarative config. All the Detox code lives in a shared driver. This chapter teaches you to read that pattern, then extend it.
+Your mobile capstone. <strong>QAA-702</strong> — <em>[SWAP] [LLM] Improve 'History' test</em> — is a live, in-progress sprint ticket. The parent scenario <strong>B2CQA-604</strong> already has step 1 automated (native → native swap export); QAA-702 asks you to add step 2: the same export flow, but with an <strong>ERC20 token on the Receive side</strong>. This is not a recap. By the end of this chapter you will have a branch, a new spec file, an extended userdata fixture, a green Detox run, and an Allure report ready to paste into a PR.
 </div>
 
-### 4.10.1 The Ticket: QAA-702 vs B2CQA-604
+### 4.10.1 Understanding the Ticket
 
-Two Jira projects, two roles:
+**Jira ticket:** QAA-702 · **Parent epic:** QAA-919 *"SWAP regression coverage automation"*
+**Xray test case:** B2CQA-604 *"[SWAP] User should be able to export all history operations"*
+**Linked bug:** LIVE-19533 *"[SWAP][LLM][iOS] Can't export Swap history"* (closed)
+**Status:** In Progress · not yet automated · labels `LLM`, `UI`
 
-- **QAA-702** lives in the <strong>QAA</strong> project (QA Automation). It is a sprint work item that says "automate scenario B2CQA-604 on LLM (Ledger Live Mobile)". It has a status column, an assignee, a sprint, and a PR link. When the test ships, the ticket closes.
-- **B2CQA-604** lives in the <strong>B2CQA</strong> Xray project. It is a reusable test scenario: preconditions, steps, expected result, applicable platforms. It is not sprint-bound. The same B2CQA case can be automated on LLD (desktop) and LLM (mobile) independently — each gets its own QAA ticket.
+The ticket text, verbatim:
 
-Read B2CQA-604 at `https://ledgerhq.atlassian.net/browse/B2CQA-604`. The condensed scenario:
+> Only LLM related.
+>
+> Base test B2CQA-604 should be improved if possible, as we faced the bug of exporting History fail.
+>
+> So, need to add the step of History export, when there is a tx with ERC20 token in Receive field.
 
-- **Precondition.** The app is initialized with swap history userdata that contains a completed SOL → ETH swap via Exodus (swap id `wQ90NrWdvJz5dA4`).
-- **Steps.**
-  1. Navigate to Swap → Swap history.
-  2. Tap the "Export operations" link.
-  3. The app writes a CSV to disk (in Detox mode, into the workspace's `artifacts/` directory).
-- **Expected result.** The CSV contains the provider name, the swap id, both currency tickers, the amount, both account names, and both fresh addresses.
+**What "step 2" means.** `B2CQA-604` is not a single-step test case. Inside Xray it contains multiple numbered steps; each step is a distinct export scenario that the automation suite must cover. Step 1 — a SOL → ETH swap where the Receive side is **native ETH** — is already automated (you will see it in a moment). Step 2 — adding coverage where the Receive side is an **ERC20 token on Ethereum** (e.g., USDT) — is what `QAA-702` asks for.
 
-> The scenario describes **behaviour**, not **UI wording**. If a product change renames the export link, you update the testID it points at — not the scenario.
+**Why it matters historically.** Ledger's own swap team filed `LIVE-19533` last cycle: on iOS, exporting the swap history failed whenever the history contained an ERC20 receive. The bug was fixed, but no regression test was added for that specific shape. `QAA-702` closes that regression hole.
 
-### 4.10.2 Surprise: the Test Already Exists
+**Why the test case ID does not change.** Pavlo OKHONKO left a comment on B2CQA-604 on 2025-07-21:
 
-Open `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperations.spec.ts`. The whole file — verbatim:
+> "Keep this test in current suite till step2 to be automated: QAA-702"
+
+So our new spec will reuse `tmsLinks: ["B2CQA-604"]`. In Xray, both steps map to the same B2CQA card; in the repo, they live in two sibling spec files sharing the same driver.
+
+### 4.10.2 Why This Matters
+
+ERC20 receive is by far the most common swap shape on Ethereum. A user who swaps BTC or SOL into "a dollar on Ethereum" almost always lands in USDT or USDC, not native ETH. Without this coverage:
+
+- **Export regressions are invisible.** A change in how the CSV serialises a `TokenAccount` row would pass CI even if it corrupted every non-native receive.
+- **Bug LIVE-19533 can resurface.** The original failure was specific to how ERC20 operations were iterated on iOS. Nothing prevents a similar regression tomorrow.
+- **Xray dashboards lie.** Coverage looks green at the B2CQA level even though only half the scenario is exercised.
+
+Adding step 2 is a small, high-leverage fix: one spec file, one fixture append, reuse of an already-battle-tested driver.
+
+### 4.10.3 Analyzing Existing Coverage
+
+Before writing anything, read what is already there.
+
+**The step 1 spec** — `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperations.spec.ts`, verbatim:
 
 ```typescript
 import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
@@ -5500,52 +5519,7 @@ runExportSwapHistoryOperationsTest(
 );
 ```
 
-That is the entire spec. Thirty-seven lines. No `describe`, no `it`, no Detox matchers, no assertions — just an object literal and one function call. There is no `import { Swap }` either; the `Swap` class is made available globally by the workspace's Jest setup (see `e2e/mobile/jest.environment.ts`), which is why it reads "free-floating" here.
-
-> **Honest caveat.** The `Swap` identifier *is* referenced in the spec without an import. This is an intentional pattern in the canonical workspace — globals such as `app`, `Swap`, `AppInfos`, `$TmsLink`, `$Tag`, `liveDataCommand`, and `liveDataWithAddressCommand` are injected by the Jest environment. If you try to use them from a non-Jest context (e.g., a `ts-node` script), they will be undefined.
-
-### 4.10.3 The Thin-Spec + Shared-Driver Pattern
-
-Why is the spec so empty?
-
-Because a "spec" in this codebase is not a test — it is **a data bundle that parameterises a shared test**. The real test logic lives in a sibling file called a **driver**: `e2e/mobile/specs/swap/otherTestCases/swap.other.ts`. That driver exports several `runXxxTest(...)` functions. Each spec file imports one of those functions, builds a config object, and calls it.
-
-The benefits are not theoretical:
-
-1. **Matrix expansion.** One driver, many specs. The DEX swap driver one level up (`swap.ts`) is consumed by nine spec files — `swapBTC_NATIVE_SEGWIT_LTC.spec.ts`, `swapETH_DOT.spec.ts`, `swapETH_SOL.spec.ts`, `swapETH_USDC_ETH.spec.ts`, `swapETH_USDT_ETH.spec.ts`, `swapETH_USDT_SOL.spec.ts`, `swapXRP_ETH_USDC.spec.ts`, and two more — each a 20-line config. Adding the tenth pair is a 20-line file, not a 200-line file.
-2. **Consistent Allure reporting.** Every spec using `runExportSwapHistoryOperationsTest` produces the same step names in Allure. Reviewers learn the shape once.
-3. **Trivial review.** A PR adding a new pair is two or three files: the spec, maybe a new enum entry in `Account` / `Addresses`, maybe a new `Provider`. The reviewer scans a config object, not a 100-line Detox dance.
-4. **Clear Xray binding.** `tmsLinks: ["B2CQA-604"]` is an exact, machine-readable contract between the spec and the Xray case.
-
-The pattern has a cost — you cannot eyeball a spec file and know what it does. You must open the driver. That cost is amortised once per driver, and the driver is read often.
-
-### 4.10.4 Reading the Spec, Line by Line
-
-**The imports.** Three enum modules and one driver import.
-
-- **`Account`** (`libs/ledger-live-common/src/e2e/enum/Account.ts`, 497 lines) exports a class with ~150 static instances. Each is the tuple `(Currency, accountName, index, derivationPath, tokenType?, ensName?, derivationMode?, parentAccount?, address?)`. Examples used here:
-  - `Account.SOL_1 = new Account(Currency.SOL, "Solana 1", 0, "44'/501'/0'")`
-  - `Account.ETH_1 = new Account(Currency.ETH, "Ethereum 1", 0, "44'/60'/0'/0/0", …)`
-  These objects are the single source of truth for account metadata across the whole e2e suite, desktop and mobile.
-- **`Provider`** (`libs/ledger-live-common/src/e2e/enum/Provider.ts`, 121 lines) is a class of swap/earn providers with fields `(name, uiName, kyc, isNative, availableOnLns, contractAddress?, app?)`. Example: `Provider.EXODUS = new Provider("exodus", "Exodus", false, true, true)`. The driver uses `.name` for CSV matching and `.uiName` for UI assertions.
-- **`Addresses`** (`libs/ledger-live-common/src/e2e/enum/Addresses.ts`, 12 lines) is a small `enum` of hard-coded addresses matching the swap history fixture. The two used here:
-  - `SWAP_HISTORY_SOL_FROM = "21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub"`
-  - `SWAP_HISTORY_ETH_TO   = "0x8526F50A2FA870B1B7b91cc054aa06799dAc0110"`
-
-**The config object.**
-
-- `swap` — a `Swap` model from `@ledgerhq/live-common/e2e/models/Swap`. Constructor: `(accountToDebit, accountToCredit, amount)`. Here: **0.07 SOL → ETH**.
-- `provider` — must match the provider recorded in the `swap-history` userdata fixture. The driver asserts this on-screen and in the exported CSV.
-- `swapId` — the id of the pre-recorded swap operation in the fixture. Must also exist on Exodus's side because the mobile app may contact the provider to enrich the operation. If Exodus deletes the order history for id `wQ90NrWdvJz5dA4`, the test starts failing in a way that has nothing to do with a mobile regression.
-- `addressFrom` / `addressTo` — the two fresh addresses expected in the CSV. The fixture was generated against these.
-- `tmsLinks: ["B2CQA-604"]` — the Xray binding.
-- `tags` — CI filter labels (see 4.10.7).
-
-**The call.** Positional arguments, no defaults. Reordering two arguments of the same type (e.g., the two addresses) silently swaps them — TypeScript cannot catch it.
-
-### 4.10.5 Where the Test Logic Lives: `swap.other.ts`
-
-Open `e2e/mobile/specs/swap/otherTestCases/swap.other.ts`. The file is ~500 lines and exports eleven driver functions. The one we care about:
+**The driver** — `e2e/mobile/specs/swap/otherTestCases/swap.other.ts`, the function we will reuse:
 
 ```typescript
 export function runExportSwapHistoryOperationsTest(
@@ -5579,49 +5553,9 @@ export function runExportSwapHistoryOperationsTest(
 }
 ```
 
-That is the entire function — not an excerpt. Walk it top to bottom:
-
-1. **`describe("Swap history", …)`** — the Jest block.
-2. **`beforeAll(async () => …)`**:
-   - `app.speculos.setExchangeDependencies(swap)` — tells the Speculos helper which currencies the Exchange app needs installed to sign a swap.
-   - `beforeAllFunctionSwap({ userdata: "swap-history", speculosApp: AppInfos.EXCHANGE })` — shared helper from `../swap.setup.ts` that calls `app.init(...)` with `userdata/swap-history.json` and boots the Exchange Speculos app.
-3. **`tmsLinks.forEach(tmsLink => $TmsLink(tmsLink))`** — injects each Xray link as an Allure annotation on the current test context. For this spec, exactly `B2CQA-604`. Xray reads this annotation to flip the scenario to `Automated`.
-4. **`tags.forEach(tag => $Tag(tag))`** — injects each tag as an Allure label. CI's `test_filter` input matches against these.
-5. **The `it(...)`** assigns the expected fresh addresses to the swap model (so `checkExportedFileContents` has something to match), then runs three POM calls:
-   - `app.swap.goToSwapHistory()` — tap the history button.
-   - `app.swap.clickExportOperations()` — tap `enabled-export-swap-operations-link` and wait for the CSV to appear on disk.
-   - `app.swap.checkExportedFileContents(swap, provider, swapId)` — read the CSV and assert content.
-
-Ten lines of actual test code. Every other line is Jest scaffolding or Allure annotation.
-
-### 4.10.6 The Page Object — `swap.page.ts`
-
-The POM lives at `e2e/mobile/page/trade/swap.page.ts`. It extends `CommonPage` and follows the same `@Step`-decorator pattern as every other POM in the workspace. The three methods invoked by the export driver:
+**The assertion** — `e2e/mobile/page/trade/swap.page.ts`, the method the driver calls at the end:
 
 ```typescript
-// e2e/mobile/page/trade/swap.page.ts  (excerpts)
-
-historyButton = "navigation-header-swap-history";
-topBarSwapHistoryButton = "topbar-swap-history";
-exportOperationsButton = "enabled-export-swap-operations-link";
-
-@Step("Go to swap history")
-async goToSwapHistory() {
-  if (await IsIdVisible(this.topBarSwapHistoryButton, 5000)) {
-    await tapById(this.topBarSwapHistoryButton);
-  } else {
-    await tapById(this.historyButton);
-  }
-}
-
-@Step("Click on export operations")
-async clickExportOperations() {
-  await tapById(this.exportOperationsButton);
-  const filePath = path.resolve(__dirname, "../../artifacts/ledgerwallet-swap-history.csv");
-  const fileExists = await FileUtils.waitForFileToExist(filePath, 5000);
-  jestExpect(fileExists).toBeTruthy();
-}
-
 @Step("Check contents of exported operations file")
 async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) {
   const targetFilePath = path.resolve(__dirname, "../../artifacts/ledgerwallet-swap-history.csv");
@@ -5639,151 +5573,335 @@ async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) 
 }
 ```
 
-Three observations:
+**Conclusion.** The driver is fully parameter-safe. It takes any `SwapType`, any `Provider`, any `swapId`, and any two addresses. Nothing about it is hard-wired to native-receive. The assertion only reads `currency.ticker`, `accountName`, and `address` from each side of the swap — all of which a `TokenAccount` exposes correctly (more on that in 4.10.4). **The gap is pure data coverage: we need a second spec, targeting the same driver, with an ERC20 receive account and a matching fixture entry.**
 
-- **Every public method is `@Step`-decorated.** The decorator arguments become Allure step titles — the strings your reviewer reads in the report tree. Placeholders like `$0`, `$1` interpolate positional parameters (see `expectSwapDrawerInfos` in the full file).
-- **The export assertion is `toContain`, not a structural CSV parse.** Deliberately permissive — columns can be reordered across live-common versions; whitespace is irrelevant. As long as every expected token appears somewhere in the file, the assertion passes.
-- **The artifact path is relative to the POM, not the spec.** `path.resolve(__dirname, "../../artifacts/…")` resolves to `e2e/mobile/artifacts/`. Jest's global setup creates the directory; the teardown cleans it.
+### 4.10.4 Picking the Representative Case
 
-The POM is roughly 240 lines total. Open it once, top to bottom, to learn the testID catalogue used by the swap drivers. Treat it as a lookup table.
+**Choice: SOL → USDT (ERC-20 on Ethereum).** Reasons:
 
-### 4.10.7 Tag Taxonomy
+- **Matches the bug.** LIVE-19533 was triggered by an ERC20 receive; USDT is the archetype.
+- **USDT is the highest-volume ERC20 Ledger Live users receive from swaps.** USDC is a close second, covered in 4.10.13 as the obvious follow-up.
+- **The enum entry already exists.** `TokenAccount.ETH_USDT_1` is defined at `libs/ledger-live-common/src/e2e/enum/Account.ts:319` with `accountName: "Tether USD 1"`, `Currency.ETH_USDT` (ticker `"USDT"`), and `parentAccount: Account.ETH_1`.
+- **Re-uses step 1's seed.** The `swap-history` userdata already contains a USDT `TokenAccountRaw` under the Ethereum parent at `0x8526F50A2FA870B1B7b91cc054aa06799dAc0110` — the same address as `Addresses.SWAP_HISTORY_ETH_TO`. This is not a coincidence. ERC20 balances are held *at the parent Ethereum account's address*; there is no separate "USDT address". We will reuse the enum constant directly.
 
-The tag array is not decorative. Each tag becomes an Allure label, and the CI `test_filter` workflow input matches against them.
+**Alternative considered: SOL → USDC.** Equally valid; `TokenAccount.ETH_USDC_1` exists at `Account.ts:310`. If the Swap team prefers USDC as the first ERC20 scenario, the only changes are the enum name and the `swapId`. Either choice discharges the ticket. We pick USDT and mention USDC in the reference section.
 
-Device tags (Speculos targets):
+**Why not ETH → USDT?** A native-to-ERC20 swap would cover the scenario too, but the step 1 precedent (`SOL_1` as debit) and the fixture shape (SOL history + ETH destination) make **keeping the debit side as SOL** the lowest-churn change. One data axis moves — the Receive side — which is what the ticket asks for.
 
-- `@NanoSP` — Nano S+.
-- `@LNS` — Nano S (legacy).
-- `@NanoX` — Nano X.
-- `@Stax` — Stax.
-- `@Flex` — Flex.
-- `@NanoGen5` — Nano Gen 5 (newest device; added to the matrix in the April 2026 migration).
+### 4.10.5 Checking the Userdata Fixture
 
-Family / currency tags:
+The driver hardcodes `userdata: "swap-history"` → `e2e/mobile/userdata/swap-history.json`. We need to know whether it already contains a SOL → USDT swap operation.
 
-- `@ethereum`, `@bitcoin`, `@solana`, `@polkadot`, etc. — single-currency scopes.
-- `@family-evm` — any EVM chain (Ethereum, Polygon, BSC, Arbitrum, Optimism, …).
-- `@family-bitcoin` — any UTXO chain (BTC, LTC, DOGE, BCH, …).
-- `@family-solana` — Solana + SPL tokens.
-
-How CI uses them: the `test-mobile-e2e-reusable.yml` workflow takes a `test_filter` input (comma- or pipe-separated). A run with `test_filter: "@family-evm,@family-solana"` picks up every spec that carries either tag. A swap-only nightly is `"@family-evm|@family-bitcoin|@family-solana"`.
-
-> **Inferred, not verified.** I have not opened every CI job definition to confirm the exact filter syntax. Treat the above as the tags' *intent*; confirm the syntax against the current `.github/workflows/test-mobile-e2e-reusable.yml` inputs before writing a new matrix.
-
-### 4.10.8 Running the Existing Spec Locally
-
-From the repo root, once per session, build the mobile app against the Detox-instrumented variant:
+From the repo root:
 
 ```bash
-# iOS (requires macOS + Xcode)
+grep -n "\"swapId\"\|\"provider\":\|\"receiverAccountId\"" \
+  e2e/mobile/userdata/swap-history.json
+```
+
+You get exactly two entries — both SOL → **native ETH** — at `$.accounts[?].data.swapHistory[]`:
+
+```json
+{
+  "status": "finished",
+  "provider": "exodus",
+  "operationId": "js:2:solana:21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub:solanaSub-...-OUT",
+  "swapId": "wQ90NrWdvJz5dA4",
+  "receiverAccountId": "js:2:ethereum:0x8526F50A2FA870B1B7b91cc054aa06799dAc0110:",
+  "fromAmount": "70000000",
+  "toAmount": "3546620000000000"
+}
+```
+
+There is no ERC20-receive operation. That means **we have to add one** before the new spec can pass. This is the main piece of "real work" in the ticket.
+
+The append goes into the SOL account's `swapHistory` array (same place as the existing two entries, so the UI picks it up on the SOL side). The new entry:
+
+```json
+{
+  "status": "finished",
+  "provider": "exodus",
+  "operationId": "js:2:solana:21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub:solanaSub-<operation-hash>-OUT",
+  "swapId": "<new-swap-id>",
+  "receiverAccountId": "js:2:ethereum:0x8526F50A2FA870B1B7b91cc054aa06799dAc0110:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
+  "tokenId": "ethereum/erc20/usd_tether__erc20_",
+  "fromAmount": "70000000",
+  "toAmount": "25000000"
+}
+```
+
+Three fields to notice:
+
+- **`receiverAccountId`** now points to the **USDT sub-account** of the ETH parent. The encoded suffix (`+ethereum%2Ferc20%2F...`) is how live-common disambiguates the token account from the parent. You can copy the exact suffix from the existing USDT `TokenAccountRaw` already in `swap-history.json` (grep for `"tokenId": "ethereum/erc20/usd_tether__erc20_"`) — the token sub-account is already present under the ETH parent; we are only adding the swap-history entry that references it.
+- **`tokenId`** is required on ERC20 receive entries; it is absent from the two native-receive entries.
+- **`swapId`** must be new and unique in the fixture. Use a fresh short alphanumeric (e.g., `"ERC20TestUsdt01"`). It does **not** need to exist at Exodus, because the driver's assertion only reads the CSV — it does not query the partner.
+
+> **Verify before you commit:** run `jq '[.[] | .data.swapHistory | length] | add' e2e/mobile/userdata/swap-history.json` and confirm the count increased by 1. Run `jq` again on the new entry to make sure the JSON is valid. A broken fixture kills every spec in `specs/swap/otherTestCases/`.
+
+**Handover path.** If extending the fixture feels risky (it is a 2.3 MB file owned by the Swap-automation sub-team), you have a legitimate escape hatch: open a companion ticket in QAA-919's epic asking the fixture owner to add the ERC20 op, pause your branch, and land the spec in a second PR once the fixture merges. This is slower but cleaner politically. For most onboarding-level contributions, extending the fixture inline is fine — the diff is one JSON object.
+
+### 4.10.6 Create a Branch
+
+Following the repo convention for new E2E coverage — `test/` prefix, ticket slug:
+
+```bash
+cd /path/to/ledger-live
+git checkout develop
+git pull
+pnpm i
+
+git checkout -b test/qaa-702-swap-history-erc20-export
+```
+
+Why `test/` and not `feat/`: the change lives entirely under `e2e/mobile/` and `e2e/mobile/userdata/`. We are shipping test coverage, not product behaviour. This matches the commit type we will use below (`test(mobile): ...`) — check recent PRs landing swap specs to confirm the team's current preference; `feat(mobile):` is also tolerated.
+
+### 4.10.7 Run the Baseline in Isolation
+
+Never judge your own change against a broken baseline. Confirm step 1 is green **before** touching anything.
+
+**One-time build** (required after a fresh clone or any native-code change):
+
+```bash
+# iOS — needs macOS + Xcode
 pnpm --filter e2e-mobile run build:ios:debug
 
-# Android (requires Android SDK + emulator)
+# Android — needs Android SDK + a running emulator
 pnpm --filter e2e-mobile run build:android:debug
 ```
 
-Then from inside `e2e/mobile/`, run the spec. Jest's `-t` flag matches against test names:
+**Run step 1 alone:**
 
 ```bash
 cd e2e/mobile
-
-# iOS, debug
-pnpm test:ios:debug -- -t "Export swap history operations"
-
-# Android, debug
-pnpm test:android:debug -- -t "Export swap history operations"
-```
-
-To filter by file path instead:
-
-```bash
 pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperations"
 ```
 
-Open the Allure report after the run:
+Expected output: **1 test passing**, the SOL → Ethereum export. The test takes about 45–90 seconds end-to-end (Speculos boot, app launch, userdata hydration, navigation, CSV write, CSV read, teardown).
+
+If this run is red, **stop**. It means either your environment is broken (Speculos not running, wrong Detox build, stale metro cache) or the step 1 spec has started failing for unrelated reasons. Chapters 4.4 (Toolchain) and 4.8 (Running & Debugging) walk through the recovery paths. Fix the environment first; resume QAA-702 once the baseline is green.
+
+### 4.10.8 Implement the Change
+
+Two files change: the new spec, and the userdata fixture.
+
+**Step 1 — Create the spec.** New file `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts`:
+
+```typescript
+import { Account, TokenAccount } from "@ledgerhq/live-common/e2e/enum/Account";
+import { Provider } from "@ledgerhq/live-common/e2e/enum/Provider";
+import { Addresses } from "@ledgerhq/live-common/e2e/enum/Addresses";
+import { runExportSwapHistoryOperationsTest } from "./swap.other";
+
+const swapHistoryERC20TestConfig = {
+  swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, "0.07"),
+  provider: Provider.EXODUS,
+  swapId: "ERC20TestUsdt01",
+  addressFrom: Addresses.SWAP_HISTORY_SOL_FROM,
+  addressTo: Addresses.SWAP_HISTORY_ETH_TO,
+  tmsLinks: ["B2CQA-604"],
+  tags: [
+    "@NanoSP",
+    "@LNS",
+    "@NanoX",
+    "@Stax",
+    "@Flex",
+    "@NanoGen5",
+    "@solana",
+    "@family-solana",
+    "@ethereum",
+    "@family-evm",
+  ],
+};
+
+runExportSwapHistoryOperationsTest(
+  swapHistoryERC20TestConfig.swap,
+  swapHistoryERC20TestConfig.provider,
+  swapHistoryERC20TestConfig.swapId,
+  swapHistoryERC20TestConfig.addressFrom,
+  swapHistoryERC20TestConfig.addressTo,
+  swapHistoryERC20TestConfig.tmsLinks,
+  swapHistoryERC20TestConfig.tags,
+);
+```
+
+Field-by-field justification:
+
+- **`swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, "0.07")`** — debit side unchanged (SOL, same as step 1, same fixture entry origin); credit side is now the ERC20 token account. The amount `"0.07"` matches the `fromAmount` on the fixture entry (70000000 lamports = 0.07 SOL); the driver asserts this string appears in the CSV. `Swap` is a global injected by the Jest environment — do not `import` it.
+- **`provider: Provider.EXODUS`** — must match the `"provider": "exodus"` field we wrote into the fixture.
+- **`swapId: "ERC20TestUsdt01"`** — the exact string we added to the fixture. The driver looks this up to verify the CSV row.
+- **`addressFrom: Addresses.SWAP_HISTORY_SOL_FROM`** — unchanged. Same Solana holder as step 1.
+- **`addressTo: Addresses.SWAP_HISTORY_ETH_TO`** — reuse of step 1's Ethereum holder. **This is the important bit.** USDT is an ERC20 token; its balance and operations are indexed under the *parent Ethereum address*, not under a separate "USDT address". The holder address is the same whether you receive native ETH or USDT. No new constant in `Addresses.ts` is needed.
+- **`tmsLinks: ["B2CQA-604"]`** — reuse of the same Xray case ID per Pavlo's comment. In the Allure output this spec will display a `B2CQA-604` badge alongside step 1's identical badge; Xray is fine with two automated executions mapping to one test case.
+- **`tags`** — we kept both families because the pair is cross-family (SOL → USDT on Ethereum). A CI filter restricted to `@family-evm` should still pick this spec up, since `@family-evm` is present.
+
+**Step 2 — Extend the userdata fixture.** Open `e2e/mobile/userdata/swap-history.json` and locate the SOL account's `swapHistory` array (around line 4181 — right after the two `wQ90NrWdvJz5dA4` entries). Append the ERC20-receive entry shown in 4.10.5:
+
+```json
+,
+{
+  "status": "finished",
+  "provider": "exodus",
+  "operationId": "js:2:solana:21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub:solanaSub-<fresh-hash>-OUT",
+  "swapId": "ERC20TestUsdt01",
+  "receiverAccountId": "js:2:ethereum:0x8526F50A2FA870B1B7b91cc054aa06799dAc0110:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
+  "tokenId": "ethereum/erc20/usd_tether__erc20_",
+  "fromAmount": "70000000",
+  "toAmount": "25000000"
+}
+```
+
+Replace `<fresh-hash>` with any unique ~88-char base58-looking string (copy from the existing `wQ90NrWdvJz5dA4` operationId and flip a few characters). Validate with:
+
+```bash
+jq '.' e2e/mobile/userdata/swap-history.json > /dev/null   # JSON well-formed
+jq '[.[] | .data.swapHistory | length] | add' \
+  e2e/mobile/userdata/swap-history.json                    # should be 3 (was 2)
+```
+
+> **Verify:** confirm the `receiverAccountId` suffix matches the existing USDT `TokenAccountRaw` id in the same file. Search for `"tokenId": "ethereum/erc20/usd_tether__erc20_"` — the sub-account should already exist under the ETH parent at `0x8526F5...0110`. Mismatched suffixes mean the swap entry will render in the UI as an orphan and the export may omit it.
+
+### 4.10.9 Rerun the Tests
+
+With the spec and fixture in place, run only the new file:
 
 ```bash
 cd e2e/mobile
-pnpm allure         # runs `allure generate ./artifacts` then `allure open`
+pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperationsERC20"
 ```
 
-The Allure report shows the `B2CQA-604` link and the step tree from the three `@Step`-decorated POM methods. If the link is missing, the `$TmsLink` injection failed; re-check that the spec file is the one actually loaded by the glob.
+**On the first run, expect RED.** Typical first-fail causes, in order of likelihood:
 
-### 4.10.9 Extending the Family — a Worked Example
+1. **Fixture JSON is malformed** — most common. `jq .` on the file catches this in one command. Fix the comma/brace that went missing when you appended.
+2. **`swapId` mismatch** between spec and fixture. Re-read both strings; the driver compares byte-for-byte.
+3. **`toContain` miss on `swap.amount`.** The amount `"0.07"` you passed to the `Swap` constructor must appear *as written* in the CSV. If you see a `toContain("0.07")` failure, check the fixture's `fromAmount` (70000000 = 0.07 SOL at 9 decimals) matches what you claimed in the spec.
+4. **`toContain` miss on `swap.accountToCredit.accountName`** — the driver asserts that `"Tether USD 1"` appears in the exported CSV. If the product has recently renamed the default USDT account label, you will need to align `TokenAccount.ETH_USDT_1.accountName` with reality (a live-common change — separate concern).
 
-Say B2CQA opens `B2CQA-605`: "Export swap history, Receive field is an SPL token on Solana". You get the QAA ticket.
+Walk failures by opening the Detox console output, then the Allure report (next section), then iterating. Do **not** change the driver to "work around" a fixture problem. The driver is shared; it is correct for step 1 and for every sibling in `swap.other.ts`.
 
-Because of the thin-spec pattern, the work is ninety percent copy-paste:
+Once green, run three times in a row for stability (mobile E2E is flakier than desktop by an order of magnitude):
 
-1. **Copy the existing spec:**
-   ```bash
-   cp e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperations.spec.ts \
-      e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsSPL.spec.ts
-   ```
-2. **Edit the config.** New account pair ending in an SPL token account, new `swapId` matching a real past Exodus order for that pair, new addresses matching the seed used for the new fixture, updated `tmsLinks`:
-   ```typescript
-   const swapHistoryTestConfig = {
-     swap: new Swap(Account.ETH_1, Account.SOL_USDC_1 /* hypothetical */, "20"),
-     provider: Provider.EXODUS,
-     swapId: "<real-exodus-order-id>",
-     addressFrom: Addresses.SWAP_HISTORY_ETH_FROM /* new enum entry */,
-     addressTo:   Addresses.SWAP_HISTORY_SOL_USDC_TO /* new enum entry */,
-     tmsLinks: ["B2CQA-605"],
-     tags: ["@NanoSP","@LNS","@NanoX","@Stax","@Flex","@NanoGen5",
-            "@ethereum","@family-evm","@solana","@family-solana"],
-   };
-   ```
-3. **Add missing enum entries.** If `Account.SOL_USDC_1` does not exist, add it to `libs/ledger-live-common/src/e2e/enum/Account.ts`. If the new addresses are not in `Addresses.ts`, add them. These enum files are shared with desktop — a new entry may require reviewers from both `@ledgerhq/wallet-xp` and the desktop team.
-4. **Extend the userdata.** The driver hardcodes `userdata: "swap-history"`. If the existing fixture does not contain your new operation, enrich `userdata/swap-history.json` in place (preferred) or extend the driver to accept a fixture name parameter.
-5. **Push.** The `jest.config.js` glob discovers spec files automatically — no registration. CI picks it up on the next run.
+```bash
+for i in 1 2 3; do
+  pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperationsERC20" || break
+done
+```
 
-The pattern rewards families. The first swap export spec cost ~500 lines of driver + 37 of spec. The tenth will cost 37 of spec and maybe a one-line enum entry.
+All three passes is the acceptance bar.
 
-### 4.10.10 What Cannot Be Done This Way
+### 4.10.10 Verify with Allure
 
-The thin-spec pattern is not magic. It works when:
+From `e2e/mobile/`:
 
-- The scenario fits the driver's parameter shape (same `beforeAll`, same step sequence, same final assertion kind).
-- The only variation is *data* — account pair, provider, swap id, tags, Xray link.
+```bash
+pnpm allure
+```
 
-It does not work for:
+This runs `allure generate ./artifacts` then `allure open`. In the report:
 
-- **Bespoke flows.** If B2CQA-617 says "try to swap, then kill the app mid-sign, restart, recover the in-flight order", no driver has a matching shape. Write a regular `describe/it` spec alongside.
-- **Edge cases that require different userdata.** The driver hardcodes the fixture name. A scenario needing `userdata: "swap-history-empty"` forces you to extend the driver's parameter list (preferred) or write a one-off.
-- **Multi-session orchestration.** If the scenario spans two app sessions, there is no `runXxxTest` helper — back to handwritten Jest.
+- Navigate **Suites → Swap history → Export swap history operations - Solana to Tether USD**
+- Check the **Links** panel — a `B2CQA-604` badge must be present (injected by `tmsLinks.forEach($TmsLink)` in the driver)
+- Expand **Steps** — you should see:
+  1. *Go to swap history* (from `goToSwapHistory()`)
+  2. *Click on export operations* (from `clickExportOperations()`)
+  3. *Check contents of exported operations file* (from `checkExportedFileContents()`)
+- The step list must match step 1's shape exactly. If your tree diverges (extra step, missing step), the driver contract has broken.
+- **Tags** — confirm the 10 tags you set appear as Allure labels. CI's `test_filter` matches against these.
 
-When a spec does not fit, look at its neighbours. `swap_noAccountFrom.spec.ts`, `swapWithDifferentSeed_AAB.spec.ts`, `swapSwitchSendAndReceiveCurrencies.spec.ts` — each has its own `runXxx` function in `swap.other.ts`. Adding an eleventh driver function is better than bloating one of the existing ten with optional parameters.
+Paste a screenshot of the step tree into the PR body when you open the review.
 
-### 4.10.11 PR Checklist
+### 4.10.11 Commit the Change
 
-For a new spec in this family (or a fix to the existing one), the PR should be small and opinionated:
+Two concerns, two commits is cleanest:
 
-- **Branch name.** `test/mobile-b2cqa-605-swap-export-spl` — prefix `test/` for a pure e2e change. For a fix to an existing broken spec: `bugfix/mobile-qaa-702-fresh-address-drift`.
-- **Commits.** One per concern, Conventional Commits style:
-  - `test(mobile): add B2CQA-605 to swap export history coverage`
-  - `feat(common): add Account.SOL_USDC_1 and two addresses` (separate commit, scope `common`, if enum entries are needed)
-  - `test(mobile): enrich swap-history userdata with SPL token op` (if the fixture was extended)
-- **Changeset.** If you touch `libs/ledger-live-common`, run `pnpm changeset` and pick `patch`. Pure `e2e/mobile/**` changes usually do not need one.
-- **Reviewers.** CODEOWNERS will auto-request `@ledgerhq/wallet-xp`. If you touch product code under `apps/ledger-live-mobile/src/screens/Swap/` or swap exchange code in live-common, also `@ledgerhq/ptx`.
-- **Evidence in the PR body.** Green CI run link and a screenshot of the Allure step tree.
+```bash
+git add e2e/mobile/userdata/swap-history.json
+git commit -m "test(mobile): add ERC20 (USDT) swap history entry to swap-history userdata"
 
-Draft-first. Once CI is green, mark ready. After merge, flip B2CQA-605 in Xray to `Automated` / `Automated In: LLM`.
+git add e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts
+git commit -m "test(mobile): add ERC20 receive scenario to swap history export (QAA-702)"
+```
 
-### 4.10.12 Gotchas
+Why two commits: the fixture change is reusable — a future SPL or BSC-token scenario may want to add further entries without touching the spec, and having the fixture commit stand alone makes reverts and cherry-picks precise. If the team's norm is one commit per PR (check recent merged PRs under `e2e/mobile/`), squash on merge.
 
-- **Real order ids.** The `swapId` (here `wQ90NrWdvJz5dA4`) must match an order that actually exists in the partner's records. Exodus returns 404 or stale metadata for unknown ids, and the app's enrichment code may either hide the row or throw. If the spec starts failing nondeterministically, check the partner's API first.
-- **Addresses must match the fixture seed.** `Addresses.SWAP_HISTORY_SOL_FROM` is a constant generated from the seed used when the `swap-history` userdata was recorded. Regenerate the fixture with a different seed and every `checkExportedFileContents` assertion will flip to red.
-- **CI tag expectations.** Adding a new tag value (e.g. for a future device) requires a CI filter update too. Otherwise the run still executes on the old matrix and the new tag is cosmetic.
-- **Breaking an enum.** `Account`, `Provider`, `Addresses`, `Currency`, `AppInfos` are shared between desktop and mobile. Renaming `Account.SOL_1` to `Account.SOLANA_1` touches every spec that references it — dozens of files across two workspaces. Prefer adding a new entry to renaming an existing one.
-- **Globals-not-imports.** The spec uses `new Swap(...)` without importing `Swap`. The Jest environment injects the symbol. If you run the file outside Jest (e.g., `tsx swapExportHistoryOperations.spec.ts`), it will throw. The workspace lint config tolerates these globals; copying the file elsewhere will not work.
-- **Thin vs thick driver.** Some specs look tempting to fold into a driver but are genuine one-offs. If a driver function grows to eight boolean parameters and four optional objects, the pattern has stopped paying for itself — split it.
+Conventional-Commit shape is per `.claude/rules/git-workflow.md`: `<type>(scope): <imperative description>`. Scope is `mobile` (matching the `e2e/mobile/` root). Type is `test` — we are strictly adding coverage; no product behaviour moves.
+
+### 4.10.12 Open the PR with `/create-pr`
+
+From the repo root:
+
+```
+/create-pr
+```
+
+Answer the prompts:
+
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-702`
+2. **Ticket description** — "Add step 2 of B2CQA-604: swap history export with ERC20 (USDT) on Receive side. Closes LIVE-19533 regression hole."
+3. **Change type** — `test`
+4. **Change scope** — `e2e/mobile`
+5. **Test coverage** — `yes`
+6. **QA focus areas** — "Swap history export, ERC20 receive, CSV artifact assertion on `TokenAccount.accountName` / `currency.ticker`"
+7. **UI changes** — `no`
+
+Reviewers to request (CODEOWNERS will add `@ledgerhq/wallet-xp` automatically; add the PTX/Swap owner by hand):
+
+- `@ledgerhq/wallet-xp` — `e2e/mobile/` owners
+- `@ledgerhq/ptx` or the Swap automation sub-team — fixture owners (surface the `swap-history.json` diff in the PR description so they review it deliberately)
+
+After CI is green and approvals land:
+
+1. Click **Ready for review** on the draft
+2. Merge into `develop`
+3. Move `QAA-702` to **Done** and comment "Step 2 of B2CQA-604 automated in PR #XXXX, spec `swapExportHistoryOperationsERC20.spec.ts`"
+4. In Xray, **B2CQA-604 already reads as Automated** (step 1 did that). If there is a "scenario steps covered" tracking field, mark step 2 as covered. Otherwise no Xray field changes — both steps share the same card.
+
+### 4.10.13 Reference — Extending to Other ERC20 Receive Currencies
+
+Once this template is green, adding USDC, DAI, or LINK is mechanical:
+
+- **USDC.** Replace `TokenAccount.ETH_USDT_1` with `TokenAccount.ETH_USDC_1` (Account.ts:310, accountName `"USD Coin 1"`, `Currency.ETH_USDC`). Add a matching `swap-history.json` entry with the USDC tokenId (verify the exact string in live-common's token registry). New `swapId`. File name `swapExportHistoryOperationsERC20_USDC.spec.ts`.
+- **DAI, LINK, MATIC-on-mainnet.** Same pattern. If the `TokenAccount` enum does not have the entry you need, add it to `libs/ledger-live-common/src/e2e/enum/Account.ts` in a **separate PR** first — the enum file is shared with desktop and wants to be reviewed in isolation.
+- **SPL / Solana tokens (e.g. ETH → GIGA).** Different family, but the driver does not care. The constraint is fixture content: SPL ops have `tokenId` in a different namespace and the `receiverAccountId` suffix is Solana-specific. Take the existing `SOL_GIGA_1` `TokenAccountRaw` in `swap-history.json` (if present) as the template.
+
+If the team later asks for a dedicated B2CQA per currency (e.g. `B2CQA-9999 — Swap history export, USDC receive`), flip `tmsLinks` to the new ID. Until then, reuse `B2CQA-604` — that is the commitment recorded in Pavlo's comment.
+
+### 4.10.14 Reference — Changes That May Be Required in `checkExportedFileContents`
+
+The driver's assertion at `swap.page.ts:163-176` reads:
+
+```typescript
+jestExpect(fileContents).toContain(swap.accountToCredit.currency.ticker);
+jestExpect(fileContents).toContain(swap.accountToCredit.accountName);
+jestExpect(fileContents).toContain(swap.accountToCredit.address);
+```
+
+For `TokenAccount.ETH_USDT_1`:
+
+- `currency.ticker` → `"USDT"` (from `Currency.ETH_USDT` at `libs/ledger-live-common/src/e2e/enum/Currency.ts:98`)
+- `accountName` → `"Tether USD 1"`
+- `address` → the parent Ethereum address (`0x8526F5…0110`)
+
+All three are already assertable without modification. **Do not change the driver pre-emptively.** If and only if your Detox run surfaces a specific `toContain` miss — for example the CSV writes `"Tether USD"` as the account name instead of `"Tether USD 1"`, meaning the index suffix is not exported — consider a minimal fix in that `toContain` line (e.g., loosen to `currency.name` or assert the substring that the app actually emits). Any such change is a driver change, affects step 1 too, and must be justified in the PR body.
+
+> **Verify:** run the spec once, let the assertion fail loudly if it will, then decide. Do not guess.
+
+### 4.10.15 PR Checklist
+
+- [ ] New spec file compiles and runs in isolation
+- [ ] `swap-history.json` validates under `jq .`
+- [ ] Three consecutive green runs on iOS (and Android if your matrix covers it)
+- [ ] Allure report shows `B2CQA-604` link and three `@Step` entries
+- [ ] Commit messages follow `test(mobile): ...` convention
+- [ ] PR body includes the Allure step-tree screenshot and the fixture-diff highlight
+- [ ] Reviewers: `@ledgerhq/wallet-xp` + Swap-automation owner
+- [ ] QAA-702 linked in the PR description
+- [ ] No changes to `swap.other.ts` or `swap.page.ts` (unless 4.10.14 applied — then justify)
 
 <div class="chapter-outro">
-<strong>Key takeaway.</strong> QAA-702 is not a 500-line authoring exercise. It is 37 lines of declarative config wired into a shared driver, and the skill it rewards is different from "write Detox code" — it is <em>read the driver, pick the right enum values, pick a stable swap id, pick the right tags</em>. The value of the thin-spec pattern is that the tenth member of a test family costs a tenth of the first. Your job when extending it is to keep the family disciplined — same driver, same shape, same tags — and when that stops being true, start a new family.
+<strong>Key takeaway.</strong> QAA-702 is a surgical coverage addition, not a rewrite. The driver is already ERC20-safe; the page object's assertions already read ticker/accountName/address from any <code>Account | TokenAccount</code>; only two things were genuinely missing — a spec file declaring the USDT receive scenario, and a matching entry in the <code>swap-history</code> userdata fixture. The work that carries weight is the <em>diligence</em>: reading the driver first, inspecting the fixture to know whether you are adding or reusing, matching the <code>swapId</code> and <code>provider</code> fields byte-for-byte, and running three times before opening the PR. That is the loop every real QAA ticket rewards.
 </div>
 
-### 4.10.13 Quiz
+### 4.10.16 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz — QAA-702 Walkthrough</h3>
@@ -5791,69 +5909,69 @@ Draft-first. Once CI is green, mark ready. After merge, flip B2CQA-605 in Xray t
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> The 37-line spec <code>swapExportHistoryOperations.spec.ts</code> contains no <code>describe</code> or <code>it</code> block. Where is the actual test logic?</p>
+<p><strong>Q1.</strong> Why does the new spec for QAA-702 reuse <code>tmsLinks: ["B2CQA-604"]</code> instead of opening a new B2CQA case?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Generated at runtime by Detox from the config object</button>
-<button class="quiz-choice" data-value="B">B) In the <code>SwapPage</code> POM at <code>e2e/mobile/page/trade/swap.page.ts</code></button>
-<button class="quiz-choice" data-value="C">C) In the shared driver <code>swap.other.ts</code> in the same directory — specifically <code>runExportSwapHistoryOperationsTest</code></button>
-<button class="quiz-choice" data-value="D">D) In <code>@ledgerhq/live-common</code> under <code>e2e/enum/</code></button>
+<button class="quiz-choice" data-value="A">A) Xray forbids creating new B2CQA cases from the mobile repo</button>
+<button class="quiz-choice" data-value="B">B) The driver hard-codes that ID</button>
+<button class="quiz-choice" data-value="C">C) Pavlo OKHONKO's comment on B2CQA-604 explicitly says step 2 (the ERC20 receive) remains inside the same test case until QAA-702 automates it; both steps map to one card</button>
+<button class="quiz-choice" data-value="D">D) Because step 1 failed and is being retired</button>
 </div>
-<p class="quiz-explanation">This is the thin-spec + shared-driver pattern. The spec only assembles a config and calls a driver function; the driver wraps it in <code>describe</code>/<code>beforeAll</code>/<code>it</code> and runs the three POM calls.</p>
+<p class="quiz-explanation">The test case ID is the contract between Xray and the suite. Pavlo's comment is the single source of truth that the ERC20 scenario belongs under <code>B2CQA-604</code> as step 2 — both specs will carry the same <code>tmsLinks</code> entry.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> Which import provides <code>Account.SOL_1</code> and <code>Account.ETH_1</code>?</p>
+<p><strong>Q2.</strong> Why is <code>addressTo</code> set to <code>Addresses.SWAP_HISTORY_ETH_TO</code> instead of a new ERC20-specific constant?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>e2e/mobile/helpers/accounts</code></button>
-<button class="quiz-choice" data-value="B">B) <code>@ledgerhq/live-common/e2e/enum/Account</code> — under <code>libs/ledger-live-common/src/e2e/enum/Account.ts</code></button>
-<button class="quiz-choice" data-value="C">C) <code>detox</code></button>
-<button class="quiz-choice" data-value="D">D) Declared globally by the Jest environment</button>
+<button class="quiz-choice" data-value="A">A) The <code>Addresses</code> enum is frozen and cannot be extended</button>
+<button class="quiz-choice" data-value="B">B) ERC20 balances and operations are indexed at the parent Ethereum account's address — there is no separate "USDT address". The holder address is the same whether you receive native ETH or USDT</button>
+<button class="quiz-choice" data-value="C">C) Detox cannot hold more than one address constant in memory</button>
+<button class="quiz-choice" data-value="D">D) The fixture does not care about addresses</button>
 </div>
-<p class="quiz-explanation">The three enum modules (<code>Account</code>, <code>Provider</code>, <code>Addresses</code>) live in <code>libs/ledger-live-common/src/e2e/enum/</code> and are shared between desktop and mobile e2e suites. Editing them affects both.</p>
+<p class="quiz-explanation">A <code>TokenAccount</code> inherits its address from its <code>parentAccount</code>. <code>TokenAccount.ETH_USDT_1</code>'s parent is <code>Account.ETH_1</code>, which lives at <code>SWAP_HISTORY_ETH_TO</code> in the fixture. Reusing that constant is both correct and the minimum-churn change.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> The spec's tag array contains <code>@NanoSP</code>, <code>@LNS</code>, <code>@NanoX</code>, <code>@Stax</code>, <code>@Flex</code>, <code>@NanoGen5</code>, <code>@solana</code>, <code>@family-solana</code>, <code>@ethereum</code>, <code>@family-evm</code>. What do these do at runtime?</p>
+<p><strong>Q3.</strong> You inspect <code>swap-history.json</code> before coding. You find two swap entries, both SOL &rarr; native ETH. What is the correct next step?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) They cause Jest to skip the spec if the tags do not match the device</button>
-<button class="quiz-choice" data-value="B">B) They are decorative — ignored by every runner</button>
-<button class="quiz-choice" data-value="C">C) They decide which Speculos firmware to load</button>
-<button class="quiz-choice" data-value="D">D) They are injected as Allure labels via <code>$Tag(...)</code> in the driver's <code>beforeAll</code>, and CI's <code>test_filter</code> input matches against them to slice the suite</button>
+<button class="quiz-choice" data-value="A">A) Skip the ticket — the fixture is not ready</button>
+<button class="quiz-choice" data-value="B">B) Write the spec anyway; the fixture will catch up</button>
+<button class="quiz-choice" data-value="C">C) Delete the existing entries and regenerate</button>
+<button class="quiz-choice" data-value="D">D) Append a new ERC20-receive entry to the SOL account's <code>swapHistory</code> array, validate with <code>jq</code>, then write the spec that references the new entry's <code>swapId</code>/<code>provider</code></button>
 </div>
-<p class="quiz-explanation">The driver calls <code>tags.forEach(tag => $Tag(tag))</code>. The tags become Allure labels and are what CI matches when you restrict a run to, say, EVM-family specs on Stax.</p>
+<p class="quiz-explanation">The driver reads the fixture at <code>beforeAll</code> via <code>userdata: "swap-history"</code>. A spec referencing a non-existent swap row will fail on <code>toContain(swapId)</code>. The fixture and the spec are two halves of the same change.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> You need to run only this spec on an iOS debug simulator. What is the right command sequence?</p>
+<p><strong>Q4.</strong> The driver calls <code>jestExpect(fileContents).toContain(swap.amount)</code>. You passed <code>"0.07"</code> to the <code>Swap</code> constructor. The fixture's <code>fromAmount</code> is <code>"70000000"</code>. Why is the assertion still correct?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>pnpm --filter e2e-mobile run build:ios:debug</code> from the repo root, then <code>cd e2e/mobile && pnpm test:ios:debug -- -t "Export swap history operations"</code></button>
-<button class="quiz-choice" data-value="B">B) <code>pnpm mobile e2e:build -c ios.sim.debug</code> then <code>pnpm mobile e2e:test</code> (old command set, pre-migration)</button>
-<button class="quiz-choice" data-value="C">C) <code>npx detox test --spec swapExportHistoryOperations</code></button>
-<button class="quiz-choice" data-value="D">D) <code>pnpm test</code> at the repo root</button>
+<button class="quiz-choice" data-value="A">A) The CSV export is human-readable, expressed in SOL units (e.g., <code>"0.07 SOL"</code>); <code>fromAmount</code>'s integer lamports are how live-common stores balances internally. The assertion reads the CSV, not the fixture</button>
+<button class="quiz-choice" data-value="B">B) <code>toContain</code> silently coerces numeric types</button>
+<button class="quiz-choice" data-value="C">C) The driver divides by 10^8 before asserting</button>
+<button class="quiz-choice" data-value="D">D) The assertion is known-broken but nobody has fixed it</button>
 </div>
-<p class="quiz-explanation">Since the April 2026 workspace migration, the canonical commands route through <code>pnpm --filter e2e-mobile</code> or are run from inside <code>e2e/mobile/</code>. The <code>pnpm mobile e2e:*</code> aliases no longer exist.</p>
+<p class="quiz-explanation">Internal units (lamports, wei) and display units (SOL, ETH) are different representations of the same amount. The CSV shows display units; that is what <code>"0.07"</code> matches. The fixture's <code>fromAmount: "70000000"</code> is 0.07 SOL at 9 decimals — consistent, not contradictory.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> You want to add <code>B2CQA-605</code> to cover the same export scenario with an SPL receive. What is the smallest correct change?</p>
+<p><strong>Q5.</strong> Your first run is red: <code>toContain("Tether USD 1")</code> fails on the exported CSV. What is the correct first investigation?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Fork the driver into <code>swap.other.spl.ts</code> and copy the whole <code>runExportSwapHistoryOperationsTest</code> function</button>
-<button class="quiz-choice" data-value="B">B) Clone the existing spec file, change the account pair / <code>swapId</code> / addresses / <code>tmsLinks</code> / tags, add any missing enum entries and userdata; leave the driver alone</button>
-<button class="quiz-choice" data-value="C">C) Add a second call to <code>runExportSwapHistoryOperationsTest</code> at the bottom of the existing spec file</button>
-<button class="quiz-choice" data-value="D">D) Fork the POM into <code>swap.spl.page.ts</code></button>
+<button class="quiz-choice" data-value="A">A) Patch the driver to use <code>currency.name</code> instead of <code>accountName</code></button>
+<button class="quiz-choice" data-value="B">B) Open the CSV in <code>e2e/mobile/artifacts/ledgerwallet-swap-history.csv</code> and read what the app actually wrote; reconcile with <code>TokenAccount.ETH_USDT_1.accountName</code> — the mismatch is data, not code</button>
+<button class="quiz-choice" data-value="C">C) Delete the fixture entry</button>
+<button class="quiz-choice" data-value="D">D) Change <code>Swap</code>'s constructor</button>
 </div>
-<p class="quiz-explanation">The thin-spec pattern rewards cloning the data-bundle file. The driver and POM are already parameterised; do not fork them unless the new scenario needs a different flow.</p>
+<p class="quiz-explanation">A red assertion is evidence, not a verdict. Read the artifact; compare it to the expected substring. Most of the time the mismatch is a fixture field (e.g., the account name in the userdata differs from <code>accountName</code> in the enum) — not a driver bug.</p>
 </div>
 
-<div class="quiz-question" data-correct="D">
-<p><strong>Q6.</strong> The spec uses <code>new Swap(...)</code> without importing <code>Swap</code>. How does this work?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> A reviewer asks: "why not modify step 1's spec to iterate over both native and ERC20 receive, instead of creating a second file?" What is the best defense?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>Swap</code> is automatically imported by a Babel plugin</button>
-<button class="quiz-choice" data-value="B">B) It is a TypeScript global declaration in <code>tsconfig.test.json</code> with no runtime effect</button>
-<button class="quiz-choice" data-value="C">C) It is a copy-paste bug that somehow still runs green</button>
-<button class="quiz-choice" data-value="D">D) <code>Swap</code> is one of several symbols (with <code>app</code>, <code>$TmsLink</code>, <code>$Tag</code>, <code>AppInfos</code>, <code>liveDataCommand</code>) injected as globals by <code>e2e/mobile/jest.environment.ts</code>; the symbol resolves at Jest runtime, and outside Jest it is undefined</button>
+<button class="quiz-choice" data-value="A">A) Jest forbids parameterised <code>it</code> blocks</button>
+<button class="quiz-choice" data-value="B">B) The driver is read-only</button>
+<button class="quiz-choice" data-value="C">C) The thin-spec + shared-driver pattern keeps each spec a flat data bundle; one spec = one scenario = one Allure test case. Folding two receive types into one file would hide failures behind a shared <code>beforeAll</code>, collapse two Allure cases into one, and break the one-file-per-pair convention established by the existing sibling specs</button>
+<button class="quiz-choice" data-value="D">D) The driver's <code>describe</code> block does not accept loops</button>
 </div>
-<p class="quiz-explanation">The workspace's Jest environment injects shared helpers as globals to keep specs short. The trade-off is that the file is not runnable as a plain Node script — you must use the Jest harness (or the Detox runner wrapping it).</p>
+<p class="quiz-explanation">The repo's swap specs are deliberately one-scenario-per-file. Two separate specs means two independent Detox runs, two Allure cases, two CI artifacts, two failure signals. Iteration inside the spec would save two lines of code and cost every one of those benefits.</p>
 </div>
 
 <div class="quiz-score"></div>
