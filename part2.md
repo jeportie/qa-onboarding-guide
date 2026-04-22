@@ -1579,10 +1579,10 @@ pnpm e2e:desktop allure:open       # serves apps/ledger-live-desktop/allure-repo
 pnpm e2e:desktop allure            # convenience: generate + open in one shot
 ```
 
-Mobile (Detox + Jest), from `apps/ledger-live-mobile/e2e`:
+Mobile (Detox + Jest), from `e2e/mobile/`:
 
 ```bash
-pnpm allure                        # same generate+open, but on e2e/allure-results
+pnpm allure                        # same generate+open, but on e2e/mobile/artifacts
 ```
 
 Generic fallback — useful when debugging a third-party package:
@@ -1737,24 +1737,26 @@ export default defineConfig({
 });
 ```
 
-**Mobile — `apps/ledger-live-mobile/e2e/jest.config.js` + `detox.config.js`:**
+**Mobile — `e2e/mobile/jest.config.js` + `e2e/mobile/detox.config.js`:**
 
 ```javascript
-// jest.config.js
+// jest.config.js (excerpt)
 module.exports = {
-  rootDir: "..",
-  testMatch: ["<rootDir>/e2e/specs/**/*.spec.ts"],
+  rootDir: ".",
+  testMatch: ["<rootDir>/specs/**/*.spec.ts"],
   reporters: [
-    "default",
+    "detox/runners/jest/reporter",
     ["jest-allure2-reporter", {
-      resultsDir: "e2e/allure-results",
-      links: {
-        tms: "https://ledgerhq.atlassian.net/browse/{}",
-        issue: "https://ledgerhq.atlassian.net/browse/{}",
+      resultsDir: "artifacts",
+      testCase: {
+        links: {
+          tms: "https://ledgerhq.atlassian.net/browse/{{name}}",
+          issue: "https://ledgerhq.atlassian.net/browse/{{name}}",
+        },
       },
     }],
-    ["<rootDir>/e2e/utils/customJsonReporter.js", {}],
   ],
+  testEnvironment: "<rootDir>/jest.environment.ts",
   // ...
 };
 ```
@@ -1829,7 +1831,7 @@ Filtering by team is how each squad finds only its own tests in a shared nightly
 
 `customJsonReporter.ts` is the bridge between Playwright/Detox and Jira. It implements the runner's `Reporter` interface and writes a single `xray-report.json` file at the end of the run.
 
-**File**: `apps/ledger-live-desktop/tests/utils/customJsonReporter.ts` (mirror at `apps/ledger-live-mobile/e2e/utils/customJsonReporter.js`).
+**File**: `e2e/desktop/tests/utils/customJsonReporter.ts`. On mobile, the equivalent Xray JSON is produced by the `jest-allure2-reporter` output under `e2e/mobile/artifacts/` and reformatted by `e2e/mobile/xray.formater.sh` inside CI (no standalone `customJsonReporter.js` in the mobile workspace).
 
 ```typescript
 import { Reporter, TestCase, TestResult } from "@playwright/test/reporter";
@@ -2146,7 +2148,7 @@ This five-minute exercise is mandatory onboarding for anyone touching E2E tests.
 <button class="quiz-choice" data-value="C">C) <code>pnpm e2e:desktop allure</code></button>
 <button class="quiz-choice" data-value="D">D) <code>pnpm test:allure</code></button>
 </div>
-<p class="quiz-explanation"><code>pnpm e2e:desktop allure</code> is the combined script that runs <code>allure generate</code> on <code>allure-results/</code> then opens the rendered report. Mobile uses <code>pnpm allure</code> from <code>apps/ledger-live-mobile/e2e</code>.</p>
+<p class="quiz-explanation"><code>pnpm e2e:desktop allure</code> is the combined script that runs <code>allure generate</code> on <code>allure-results/</code> then opens the rendered report. Mobile uses <code>pnpm allure</code> from <code>e2e/mobile/</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">

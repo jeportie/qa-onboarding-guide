@@ -57,11 +57,13 @@ pnpm build:llm:deps
 pnpm build:cli
 
 # === Android (release -- debug builds broken locally) ===
-pnpm mobile e2e:build -c android.emu.release
+cd e2e/mobile && pnpm build:android
+# or from repo root: nx run live-mobile:e2e:build -- --configuration android.emu.release
 
 # === iOS (debug) ===
-pnpm mobile pod                           # Install CocoaPods
-pnpm mobile e2e:build -c ios.sim.debug
+pnpm mobile pod                           # Install CocoaPods (still from apps/ledger-live-mobile)
+cd e2e/mobile && pnpm build:ios:debug
+# or from repo root: pnpm --filter ledger-live-mobile-e2e-tests run build:ios:debug
 ```
 
 ### Development
@@ -133,9 +135,24 @@ pnpm test:android myTest.spec.ts          # Single file (Android)
 pnpm test:ios:debug                       # All iOS tests (requires Metro running)
 pnpm test:ios:debug myTest.spec.ts        # Single file (iOS)
 pnpm allure                               # Generate + open mobile Allure report
+pnpm typecheck                            # Type-check (runs scripts/typecheck.js)
+pnpm lint                                 # oxlint over the workspace
+```
+
+**From the repo root (equivalent forms):**
+
+```bash
+# pnpm filter form
+pnpm --filter ledger-live-mobile-e2e-tests run build:ios:debug
+pnpm --filter ledger-live-mobile-e2e-tests run test:android
+
+# Nx target form (delegates to the mobile app's e2e:build executor)
+nx run live-mobile:e2e:build -- --configuration ios.sim.release
+nx run live-mobile:e2e:build -- --configuration android.emu.release
 ```
 
 > **Note**: iOS debug tests require Metro running in a separate terminal: `pnpm mobile start` (from repo root).
+> **Note**: ENVFILE paths remain `apps/ledger-live-mobile/.env.mock` and `apps/ledger-live-mobile/.env.mock.prerelease` (see Appendix B) — they live under the app directory, not the E2E workspace.
 
 ### Git & Versioning
 
@@ -241,6 +258,7 @@ pnpm dev:lld -- --inspect
 | `SPECULOS_API_PORT` | `5000` | REST API port for Speculos. Auto-assigned by the fixture system (you rarely set this manually). |
 | `SPECULOS_ADDRESS` | `http://127.0.0.1` | Base URL for Speculos REST API. Auto-set by the fixture system. |
 | `DISABLE_TRANSACTION_BROADCAST` | `1` | Prevent transactions from being broadcast to the real blockchain. Always `1` in tests. |
+| `ENVFILE` | `apps/ledger-live-mobile/.env.mock` | Detox-time env file selection. Two values for E2E mocks: `.env.mock` (staging Firebase) and `.env.mock.prerelease` (prod Firebase). **File location unchanged** — they still live under `apps/ledger-live-mobile/` even though the E2E workspace moved to `e2e/mobile/`. Resolved in `e2e/mobile/detox.config.js` via `ENV_FILE_MOCK` / `ENV_FILE_MOCK_PRERELEASE` constants. |
 | `NODE_OPTIONS` | `--max-old-space-size=14336` | Node.js memory limit. CI uses 14GB. Increase locally if you get OOM errors. |
 
 ### CI-Specific
@@ -910,7 +928,8 @@ For iOS, the bridge connects directly -- check that the simulator is running and
 **Q: Android E2E tests crash immediately in debug mode**
 A: Known issue -- Android debug builds are broken locally due to a Detox/Espresso bug. Always use release builds:
 ```bash
-pnpm mobile e2e:build -c android.emu.release
+cd e2e/mobile && pnpm build:android
+# or: pnpm --filter ledger-live-mobile-e2e-tests run build:android
 ```
 
 **Q: Android emulator not found — name mismatch**
@@ -946,10 +965,11 @@ If the name doesn't match, rename it in Android Studio (Device Manager → Edit 
 | **Detox** | A grey-box E2E testing framework for React Native by Wix. "Grey-box" means it has visibility into app internals for synchronization. |
 | **Donjon** | Ledger's security research team. Operates the public bug bounty at donjon.ledger.com. |
 | **E2E** | End-to-End testing. Tests that simulate real user interactions across the full application stack, from UI to backend to device. |
+| **E2E workspace** | Top-level peer workspaces under `e2e/` — `e2e/desktop/` (Playwright) and `e2e/mobile/` (Detox), each an independent Nx/Turbo project with its own `package.json`, `project.json`, Jest/Playwright config, and specs. Mobile migrated from `apps/ledger-live-mobile/e2e/` to `e2e/mobile/` in 2026; a small legacy set of ~17 specs still lives under `apps/ledger-live-mobile/e2e/` during the transition. |
 | **EAL** | Evaluation Assurance Level (Common Criteria). Ledger Stax/Flex/Nano S+ are EAL6+; Nano X is EAL5+. |
 | **ELF** | Executable and Linkable Format. The binary format used for compiled Ledger coin applications that run inside Speculos. |
 | **Electron** | A framework for building cross-platform desktop applications using web technologies (Chromium + Node.js). Ledger Live Desktop is an Electron app. |
-| **ENVFILE** | Environment file passed to Detox builds. Mobile E2E uses `.env.mock` (staging Firebase) and `.env.mock.prerelease` (prod Firebase). Release builds use a different set (`.env`, `.env.testing`, `.env.staging`, `.env.production`). |
+| **ENVFILE** | Environment file passed to Detox / native builds. Two namespaces, both physically under `apps/ledger-live-mobile/` (path unchanged by the E2E migration): Detox mocks — `.env.mock` (staging Firebase) and `.env.mock.prerelease` (prod Firebase), referenced from `e2e/mobile/detox.config.js` via `ENV_FILE_MOCK` constants. Release builds — `.env`, `.env.testing`, `.env.staging`, `.env.production`. |
 | **Feature Flag** | A configuration toggle stored in Firebase Remote Config that enables or disables features without deploying new code. Supports gradual rollouts and kill switches. |
 | **Firebase Remote Config** | Google's cloud service used by Ledger Live to store and serve feature flags. Four environments: Ledger Wallet, Swap, Earn, Buy Sell. |
 | **Fixture** | In Playwright, a mechanism for declaring reusable test setup and teardown logic. Fixtures are injected into tests via parameter destructuring. The Ledger Live fixture system handles Speculos, Electron, page objects, and feature flags. |

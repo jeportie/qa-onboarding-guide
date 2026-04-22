@@ -705,7 +705,7 @@ If these terms feel natural to you now, the chapter has done its job. If any fee
 
   <div class="quiz-score"></div>
 </div>
-## Who's Who: Teams & Ownership
+## Teams and Ownership
 
 <div class="chapter-intro">
 Ledger is not one monolithic engineering team — it is a federation of tribes, squads, and horizontal teams that each own a slice of the product you will be testing. As a QAA engineer, you will ping more teams in a single week than most developers ping in a quarter: WXP for UI regressions, PTX when a swap test goes red, Coin Integration when a family-specific flow breaks, Wallet CI when a pipeline hangs. This chapter gives you the org map and the names. By the end, when someone says "tag live-hub on this" or "ask wallet-ci", you will know exactly who they mean. (R1)
@@ -1506,7 +1506,7 @@ This is why QAA's flake doctrine is so strict. Every retry, every "let me just r
 </div>
 
 ---
-## The Ticket Lifecycle: Jira, Xray & QAA's Flow
+## The Ticket Lifecycle - Jira, Xray and QAA's Flow
 
 <div class="chapter-intro">
 Chapters 0.1 through 0.4 gave you the what — what Ledger ships, how hardware works, who owns what, how releases move. Chapter 0.5 gives you the where — where the work actually lives day to day. At Ledger, that place is Jira. Every test case, every bug, every automation task is a ticket. This chapter teaches you the three projects that matter for QAA, how a single B2CQA test case links to a Playwright spec via Xray, and what you do on a morning when nightly went red. By the end you will be able to open Jira, find your ticket, find the test case it implements, and understand what "Automated" means in an Xray cell.
@@ -1610,7 +1610,7 @@ Here is a week in the life of an automation task. Let us say you pick up `QAA-11
 ┌─────────────────────────────────────────────────────────────────────┐
 │  4. Create feature branch from develop:                              │
 │        feat/qaa-1129-receive-address-warning-eth                     │
-│  5. Write the spec in apps/ledger-live-mobile/e2e/specs/receive/.    │
+│  5. Write the spec in e2e/mobile/specs/receive/.                     │
 │  6. Add $TmsLink("B2CQA-2697") (mobile) or TMS annotation (desktop). │
 │  7. Run locally against Speculos 3+ times to catch flakiness.        │
 └──────────────────────────┬──────────────────────────────────────────┘

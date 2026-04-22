@@ -928,6 +928,23 @@ Smoke corpora are ~10–15% of the full suite, chosen for **breadth** (one test 
 
 ### 6.3.10 Kicking Off a Custom Run with `gh workflow run`
 
+**`test-mobile-e2e-reusable.yml` — canonical inputs.** (Verify against `.github/workflows/test-mobile-e2e-reusable.yml`; the list below is current as of the `e2e/mobile/` migration.)
+
+| Input | Type | Purpose |
+|-------|------|---------|
+| `ref` | string | Branch/sha to test |
+| `test_filter` | string | Filter by test name / path / tag (comma or pipe separated) |
+| `tests_type` | choice | `Android Only` \| `iOS Only` \| `iOS & Android` |
+| `speculos_device` | choice | `nanoS` \| `nanoSP` \| `nanoX` \| `stax` \| `flex` \| `nanoGen5` |
+| `production_firebase` | boolean | Switch to prerelease Firebase + `.env.mock.prerelease` |
+| `enable_broadcast` | boolean | Actually broadcast signed transactions on-chain |
+| `export_to_xray` | boolean | **(NEW)** Reformat Allure JSONs and POST to Xray Cloud (`upload-to-xray` job) |
+| `test_execution_android` | string | **(NEW)** Optional pre-existing Xray Test Execution key for Android results |
+| `test_execution_ios` | string | **(NEW)** Optional pre-existing Xray Test Execution key for iOS results |
+| `smoke_tests` | boolean | Prepend `@smoke` to the filter for a fast subset |
+| `enable_wallet40` | boolean | Default `true`; toggles the Wallet 4.0 UI (`E2E_ENABLE_WALLET40`) |
+| `generate_ai_artifacts` | boolean | **(NEW)** Produce AI-triage artifacts alongside Allure |
+
 Three paths of increasing speed.
 
 **1. GitHub Actions UI.** Browse to Actions → "[Mobile] - E2E Only - Scheduled/Manual" → "Run workflow". Pick inputs from the dropdowns. Obvious but slow — form-filling adds minutes.
@@ -1041,9 +1058,9 @@ The recipe for triaging a red E2E CI:
 6. **Reproduce locally.** For mobile:
 
 ```bash
-pnpm mobile e2e:build -c ios.sim.release
-pnpm mobile e2e:test  -c ios.sim.release \
-     -- -t "<exact it() name from Allure>" --loglevel trace
+cd e2e/mobile
+pnpm build:ios                              # nx run live-mobile:e2e:build -- --configuration ios.sim.release
+pnpm test:ios -- -t "<exact it() name from Allure>" --loglevel trace
 ```
 
 For desktop:

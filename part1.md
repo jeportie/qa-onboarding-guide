@@ -522,13 +522,16 @@ e2e/
 │   │   │   └── common.ts           # Main fixtures (app, speculos, userdata)
 │   │   └── userdata/               # Pre-configured app state profiles
 │   └── playwright.config.ts         # Playwright configuration
-├── mobile/                           # Detox tests for LLM
-│   ├── specs/                       # Test files
+├── mobile/                           # Detox tests for LLM (peer workspace to e2e/desktop/)
+│   ├── specs/                       # Test files (.spec.ts)
 │   ├── page/                        # Page Object Model classes
 │   ├── bridge/                      # WebSocket bridge (test <-> app)
 │   ├── helpers/                     # Reusable helper functions
 │   ├── detox.config.js              # Detox configuration
-│   └── jest.config.ts               # Jest runner configuration
+│   ├── jest.config.js               # Jest runner configuration
+│   ├── jest.environment.ts          # Allure reporter wiring
+│   ├── package.json                 # Nx/Turbo workspace (`e2e-mobile`)
+│   └── project.json                 # Nx project descriptor
 └── common/                          # Shared E2E infrastructure
     ├── speculos/                    # Speculos transport and management
     ├── models/                      # Device model definitions
@@ -750,11 +753,13 @@ pnpm e2e:desktop test:playwright
 # Start Metro bundler (for debug builds)
 pnpm mobile start
 
-# In another terminal — iOS:
-pnpm mobile e2e:test -c ios.sim.debug
+# In another terminal — iOS (from e2e/mobile/):
+cd e2e/mobile && pnpm test:ios:debug
+# or: pnpm --filter e2e-mobile run test:ios:debug
 
-# Android:
-pnpm mobile e2e:test -c android.emu.debug
+# Android (from e2e/mobile/):
+cd e2e/mobile && pnpm test:android:debug
+# or: pnpm --filter e2e-mobile run test:android:debug
 ```
 
 ### 5.8 Verify Your Setup

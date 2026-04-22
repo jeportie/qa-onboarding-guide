@@ -3,9 +3,9 @@
 - [**Part 0 -- Welcome to Ledger**](part0)
   - [0.1 Ledger Ecosystem & Product Suite](part0#the-ledger-ecosystem-amp-product-suite)
   - [0.2 Hardware Deep Dive & BOLOS](part0#hardware-deep-dive-amp-bolos)
-  - [0.3 Who's Who: Teams & Ownership](part0#whos-who-teams-amp-ownership)
+  - [0.3 Teams and Ownership](part0#teams-and-ownership)
   - [0.4 Release Cycle & Environments](part0#the-release-cycle-amp-environments)
-  - [0.5 Ticket Lifecycle: Jira, Xray & QAA](part0#the-ticket-lifecycle-jira-xray-amp-qaas-flow)
+  - [0.5 Ticket Lifecycle - Jira, Xray & QAA](part0#the-ticket-lifecycle-jira-xray-and-qaas-flow)
   - [0.6 Security Posture & Disclosure](part0#security-posture-amp-responsible-disclosure)
   - [Part 0 Assessment](part0#part-0-final-assessment)
 
