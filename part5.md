@@ -1,3362 +1,1420 @@
-
-
-
-# PART 5 -- E2E DESKTOP IN DETAIL
+## Live Apps in Ledger Wallet
 
 <div class="chapter-intro">
-Parts 2 and 3 gave you the overview — what the tools are and how the architecture fits together. Part 5 is where you become productive. This is a deep-dive masterclass that takes you from zero knowledge in Playwright, Electron, Speculos, and Allure to confidently writing, running, and debugging desktop E2E tests. Every concept is explained with real code from the Ledger Live codebase. By the end, you will have completed your first real Jira ticket.
+A Live App is not a React component. It is not a screen. It is an embedded webview, loaded from a remote URL, sandboxed behind a strict API, and versioned independently from the Wallet shell itself. Understanding Live Apps is a prerequisite to understanding Swap — and several other high-value surfaces in Ledger Wallet.
+</div>
+
+### 5.1.1 What Is a Live App?
+
+A **Live App** is a web application that renders inside Ledger Wallet (desktop and mobile) in a sandboxed webview and communicates with the Wallet through a well-defined JSON-RPC bridge called **Wallet API**.
+
+In practice, a Live App is:
+
+- A **separate repo** (not part of `ledger-live`) owned by the feature team
+- A **separate deployment** — the Swap Live App is containerized and shipped to AWS EKS via ArgoCD; other Live Apps may run on their own infrastructure, but the pattern is always "independent of the Wallet release train"
+- A **manifest entry** declared inside `ledger-live` that tells the Wallet shell: "load this URL, expose these Wallet-API permissions, show this icon, put it in that tab"
+- A **sandboxed runtime** — the Live App cannot touch the device, blockchain, or accounts directly; every privileged action must go through the Wallet API
+
+This split matters because it decouples the Live App team's velocity from the Wallet shell's velocity. Swap can release multiple times per week without waiting for a desktop release; the market team can iterate on discover surfaces without touching native code.
+
+### 5.1.2 Why Live Apps Exist
+
+Before Live Apps, every new feature had to ship inside `ledger-live-desktop` and `ledger-live-mobile`. That model broke down quickly:
+
+| Constraint | Consequence |
+|---|---|
+| One release cadence for the whole Wallet | Feature teams blocked by Wallet release train |
+| Native code changes for every feature | High risk, long review, long QA cycle |
+| Shared bundle size | Every feature grows the installer |
+| Shared codebase ownership | Feature teams needed desktop/mobile expertise |
+| Single regulatory posture | One non-compliant feature risked the whole app |
+
+Live Apps solve all five:
+
+- Each app ships on its own cadence (Swap ships independently of the Wallet)
+- No native code — features are standard web apps
+- Bundle size in the Wallet is zero (the webview loads the app remotely)
+- The feature team owns the repo, the CI/CD, and the ops
+- Legal / compliance boundaries can be drawn **per Live App**, not per Wallet version (critical for MiCA)
+
+### 5.1.3 Architecture -- How a Live App Loads
+
+Here is the data flow when a user opens Swap from inside Ledger Wallet:
+
+```
+User taps "Swap" tab
+       │
+       ▼
+Wallet shell reads the manifest
+  for "swap" (manifest-api)
+       │
+       ▼
+Wallet mounts a webview/iframe
+  pointing at the Live App URL
+  (e.g. swap-v3.apps.ledger.com)
+       │
+       ▼
+Live App boots and calls
+  window.ledgerLive.accounts.list()
+       │
+       ▼
+Wallet API bridge intercepts the
+  call, checks manifest permissions,
+  returns account list
+       │
+       ▼
+Live App shows quotes. User picks
+  one. App calls
+  walletApi.exchange.start()
+       │
+       ▼
+Wallet shell drives the device
+  signing flow through Speculos /
+  a real device
+       │
+       ▼
+Live App shows the "transaction
+  sent" state
+```
+
+The three layers to remember:
+
+1. **Manifest** — configuration in `ledger-live`, declares where to load the app from and what it is allowed to do
+2. **Live App** — the web app itself, loaded in a webview, owns its UX
+3. **Wallet API** — the JSON-RPC bridge between the two; the **only** way a Live App touches accounts, signing, or the network on behalf of the user
+
+### 5.1.4 The Manifest API
+
+Manifests live inside `ledger-live`. They declare how each Live App is exposed inside the Wallet — which URL to load per environment, which Wallet-API permissions to grant, which icon to show, which platforms it supports.
+
+The manifest service is consumed by both desktop and mobile. For each Live App there is typically one manifest per environment.
+
+**Manifest schema (from the Wallet API spec).** Every manifest validated by `@ledgerhq/wallet-api-manifest-validator` carries this shape:
+
+| Field | Type | Purpose |
+|---|---|---|
+| `id` | `string` | Manifest unique id (e.g., `swap-live-app-aws`) |
+| `name` | `string` | Display name shown in the Wallet (e.g., `"Swap"`) |
+| `url` | `string` | The URL the Wallet loads in the webview |
+| `homepageUrl` | `string` | Canonical homepage for the app |
+| `platform` / `platforms` | `"desktop" \| "mobile" \| "all"` or array | Which Wallet shells load this app |
+| `apiVersion` | `string` | Wallet-API semver range the app expects (e.g., `^2.0.0`) |
+| `manifestVersion` | `string` | Manifest schema version |
+| `branch` | `"stable" \| "experimental" \| "soon" \| "debug"` | Stability channel exposed to users |
+| `categories` | `string[]` | Catalog tabs (e.g., `["exchange"]`) |
+| `currencies` | `string[]` or `"*"` | Which currencies the app supports |
+| `content.shortDescription` / `content.description` | `TranslatableString` | Copy shown in the catalog |
+| `permissions` | `AppPermission[]` | The **capability allow-list** — see below |
+| `domains` | `string[]` | Allowed navigation domains inside the webview |
+| `private` | `boolean` (optional) | Hides the app from the public catalog |
+
+**Real permission list (extract from the Swap dev manifest** — `apps/live-app/manifests/manifest.dev.json`**):**
+
+```json
+{
+  "id": "swap-live-app-aws",
+  "name": "Swap DEV",
+  "url": "http://localhost:3000",
+  "platforms": ["android", "ios", "desktop"],
+  "apiVersion": "^2.0.0",
+  "branch": "experimental",
+  "categories": ["exchange"],
+  "currencies": "*",
+  "permissions": [
+    "account.list",
+    "account.request",
+    "currency.list",
+    "custom.exchange.start",
+    "custom.exchange.complete",
+    "custom.exchange.swap",
+    "device.exchange",
+    "device.transport",
+    "exchange.start",
+    "exchange.complete",
+    "transaction.sign",
+    "transaction.signAndBroadcast",
+    "wallet.capabilities",
+    "wallet.userId"
+  ]
+}
+```
+
+Every permission maps to one or more JSON-RPC methods the Live App can invoke. Anything not whitelisted is denied at the bridge layer, even if the Live App tries to invoke it — which is the Wallet's defence against a compromised or malicious app iframe.
+
+**One manifest per environment.** The URL field differs by environment; everything else stays structurally similar:
+
+| Environment | Manifest | Live App URL (public) |
+|---|---|---|
+| **Local dev** | local override (`manifest.dev.json` in the repo) | `http://localhost:3000` |
+| **Staging** | `manifest-api` staging | `swap-live-app-stg.ledger-test.com` |
+| **Pre-prod** | `manifest-api` pre-prod | `swap-live-app-ppr.ledger-test.com` |
+| **Production** | `manifest-api` prod | `swap-live-app.ledger.com` |
+
+### 5.1.5 The Wallet API
+
+Wallet API is the [**JSON-RPC 2.0**](https://www.jsonrpc.org/specification) contract between the Wallet shell and any embedded Live App. The transport is **`postMessage`** between the parent window (the Wallet) and the iframe (the Live App) — not HTTP, not WebSocket. This matters: there is no network round-trip for a Wallet-API call, but the Wallet still enforces every permission inside the shell.
+
+Wallet API is split across a **Client** (bundled inside the Live App) and a **Server** (hosted by the Wallet shell):
+
+```
+  ┌─────────────────┐      postMessage      ┌──────────────────┐
+  │   Live App      │ ◄──── JSON-RPC ────►  │  Wallet shell    │
+  │  (webview)      │         2.0           │   (Ledger Live)  │
+  │                 │                       │                  │
+  │ wallet-api-     │                       │ wallet-api-      │
+  │ client          │                       │ server           │
+  └─────────────────┘                       └──────────────────┘
+@ledgerhq/wallet-api-client    │          @ledgerhq/wallet-api-server
+                               │
+                   @ledgerhq/wallet-api-core
+                   (shared types and errors)
+```
+
+**Canonical JSON-RPC methods (from `/spec/rpc/README.md` in the Wallet API repo).** These are the calls a Swap Live App relies on:
+
+| Method | Purpose |
+|---|---|
+| `transaction.sign` | User signs a transaction on the device — returns the raw signed tx |
+| `transaction.broadcast` | Broadcasts a previously signed transaction — returns the tx hash |
+| `message.sign` | User signs an EIP-191 / EIP-712 message on the device |
+| `account.list` | List accounts the user has in the Wallet |
+| `account.request` | Prompt the user to pick (or create) an account for the Live App |
+| `account.receive` | Show a "Verify on device" address for an account |
+| `currency.list` | List currencies supported in the Wallet |
+| `exchange.start` | Start an exchange (swap/buy/sell) flow — returns a `deviceTransactionId` |
+| `exchange.complete` | Finish the exchange after backend payload is retrieved — device signs |
+| `wallet.capabilities` | Query which Wallet-API features the host supports |
+| `wallet.userId` | Get an opaque, stable per-Wallet user identifier |
+
+A minimal request / response pair, verbatim to the spec:
+
+```json
+// request
+{ "jsonrpc": "2.0", "id": 1, "method": "transaction.sign",
+  "params": { "accountId": "...", "transaction": { }, "params": { "useApp": "Ethereum" } } }
+// response
+{ "jsonrpc": "2.0", "id": 1, "result": { } }
+```
+
+**Canonical error types (from `/spec/core/errors.md`).** Every Wallet-API error is a `PlatformError` (`title`, `description`, `errorCode`) wrapped in the JSON-RPC 2.0 error envelope. Four error codes matter for swap QA:
+
+| Code | Title | When QA sees it |
+|---|---|---|
+| `100` | `AccountNotFound` | The Live App passed an `accountId` the Wallet cannot match — usually a stale fixture or a currency the Wallet has not added |
+| `101` | `AccountNotMain` | A sub-account was used where a main account was expected — common mistake when a test targets a token account by mistake |
+| `102` | `AccountAndTransactionNotLinked` | The transaction object is for a different currency family than the account — the single most frequent "I swear I typed the right thing" error in fixture-driven tests |
+| `103` | `TransactionNotProvided` | The transaction object is missing or malformed — often after a build that dropped a required field |
+
+**Two things to internalize as a QA:**
+
+1. **Everything is audited at the bridge** — if a Wallet-API call is rejected, the Wallet shell returns a `PlatformError` with a clear code. Grep for the error code and title before assuming a code bug; the manifest `permissions` list is usually where the truth lives.
+2. **The Wallet API is versioned** — manifests declare `apiVersion` (e.g., `^2.0.0`). The Wallet shell and the Live App can evolve independently but the version range must overlap, so cross-version testing matters when either side bumps.
+
+### 5.1.6 Live Apps in the Ledger Wallet Catalog
+
+The Wallet ships several production Live Apps. Each has its own repo, team, Firebase, and release cycle. The most important ones for QA:
+
+| Live App | What it does | Team | Where it lives |
+|---|---|---|---|
+| **Swap** | Crypto-to-crypto swap across multiple providers (CEX + DEX) | Swap | Swap tab / CTA from account |
+| **PTX (Buy/Sell)** | Buy and sell crypto with fiat through MoonPay / Coinify / Banxa | PTX | Buy / Sell buttons |
+| **Earn** | Staking and yield across supported chains | Earn | Earn tab |
+| **Discover** | Third-party Live Apps (wallet-connect, NFT marketplaces, etc.) | Discover | Discover tab |
+| **MoonPay (Buy)** | MoonPay's own Live App, wrapped via PTX | PTX + MoonPay | Buy flow |
+| **Recover / Ledger Sync** | Account recovery and cross-device sync | Recover | Settings |
+
+All of them follow the same pattern: separate repo, manifest entry, Wallet-API permissions, sandboxed webview. The complexity hides in the business logic, the partner integrations, and the legal constraints — which is exactly where QA spends its time.
+
+### 5.1.7 QA Implications of the Live App Model
+
+The Live App model changes how QA thinks about bugs:
+
+- A bug in the Wallet shell (device flow, account sync, wallet-api bridge) affects **all** Live Apps → reproduce on at least two Live Apps before blaming the shell
+- A bug in the Live App (quote rendering, provider selection, KYC flow) is **scoped** to that repo → open the ticket in the Live App's Jira project, not in the Wallet's
+- An end-to-end test that opens a Live App has to wait for the webview to load; this is slower and flakier than intra-Wallet navigation — budget for it
+- Release windows are **per Live App** → a swap regression does not require a Wallet hotfix; the swap team rolls back swap
+- Firebase feature flags can live in two projects at once — one for the Wallet, one for the Live App — and a QA session may need to coordinate both (see Chapter 4.5)
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> A Live App is a remote, sandboxed web app wired into Ledger Wallet through a manifest and the Wallet API. Each Live App has its own repo, deployment, Firebase, and release cadence — which is why Swap QA work rarely happens inside <code>ledger-live</code> alone. The Wallet shell is the runtime; the Live App is the product.
+</div>
+
+### 5.1.8 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz -- Live Apps in Ledger Wallet</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> What is a Live App, architecturally?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A native screen inside <code>ledger-live-desktop</code></button>
+<button class="quiz-choice" data-value="B">B) A plugin DLL loaded into the Electron main process</button>
+<button class="quiz-choice" data-value="C">C) A remote web application loaded into a sandboxed webview and talking to the Wallet over the Wallet API</button>
+<button class="quiz-choice" data-value="D">D) A background worker running on the device</button>
+</div>
+<p class="quiz-explanation">A Live App is a remote web app embedded in a sandboxed webview. It never runs native code. Everything privileged (accounts, signing, network) is brokered by the Wallet API bridge.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> Which statement about Live App releases is true?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A new Live App version requires a new Ledger Wallet release</button>
+<button class="quiz-choice" data-value="B">B) Each Live App releases independently from the Wallet shell, on its own cadence</button>
+<button class="quiz-choice" data-value="C">C) Live Apps are rebuilt on every Wallet CI run</button>
+<button class="quiz-choice" data-value="D">D) Live Apps are stored inside the installer and updated via Electron auto-updater</button>
+</div>
+<p class="quiz-explanation">Decoupled releases are the main reason Live Apps exist. Swap, for example, can ship several times a week without Wallet desktop or mobile releasing at all. The manifest points at a URL that the Live App team updates independently.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> The Wallet API is best described as...</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A JSON-RPC bridge that brokers every privileged call a Live App needs to make, with permissions enforced at the bridge</button>
+<button class="quiz-choice" data-value="B">B) A REST API hosted by Ledger's backend</button>
+<button class="quiz-choice" data-value="C">C) A WebSocket used only for streaming market prices</button>
+<button class="quiz-choice" data-value="D">D) A shared library linked into the Live App</button>
+</div>
+<p class="quiz-explanation">Wallet API is an in-process JSON-RPC bridge between the webview and the shell. The shell enforces manifest permissions at the bridge — a Live App cannot bypass them even if it tries.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> Why are manifests important from a QA perspective?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) They contain the Live App's source code</button>
+<button class="quiz-choice" data-value="B">B) They replace feature flags</button>
+<button class="quiz-choice" data-value="C">C) They are loaded only in production</button>
+<button class="quiz-choice" data-value="D">D) They control which URL the Wallet loads per environment and which Wallet-API permissions the app has — a misconfigured manifest can break an otherwise correct Live App</button>
+</div>
+<p class="quiz-explanation">If the manifest points at the wrong URL or denies a required permission, the Live App will fail even if its own code is flawless. When a Live App is broken in one environment only, always compare manifests first.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> A webview-based Live App is slower to load than a native screen. What does this mean for E2E test design?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Use <code>page.waitForTimeout(5000)</code> before every action</button>
+<button class="quiz-choice" data-value="B">B) Budget for webview boot time and Wallet-API handshake in fixture/setup, not inside assertions — and prefer deterministic waits on app-specific selectors over sleeps</button>
+<button class="quiz-choice" data-value="C">C) Never test Live Apps end-to-end</button>
+<button class="quiz-choice" data-value="D">D) Disable webviews in test mode</button>
+</div>
+<p class="quiz-explanation">Live Apps need deterministic waits on app-specific UI elements (e.g., the quotes list) because the boot adds latency the Wallet shell does not have. Fixed sleeps create flakiness; Playwright's auto-waiting on a real element is what you want.</p>
+</div>
+
+<div class="quiz-score"></div>
 </div>
 
 ---
 
-## Playwright from Zero -- Core Concepts
+
+## Swap Live App -- Architecture & Components
 
 <div class="chapter-intro">
-Playwright is the foundation of everything in desktop E2E. If you have never used it before, this chapter teaches you every concept you need — from what a locator is to how auto-waiting works — using real examples from the Ledger Live codebase. After this chapter, you will be able to read any test file in the suite and understand every line.
+The Swap Live App is the most business-critical Live App in Ledger Wallet. It is also the most architecturally complex — several repos, several backends, several providers, and a regulated perimeter. This chapter is the map you need to debug a swap issue without guessing where the problem lives.
 </div>
 
-### 22.1 What Is Playwright?
+### 5.2.1 What Swap Does
 
-Playwright is an open-source browser automation framework created by Microsoft. It can control Chromium, Firefox, WebKit, and — critically for us — **Electron** applications. Unlike Selenium (which communicates over HTTP), Playwright talks to browsers via the Chrome DevTools Protocol (CDP), making it faster and more reliable.
+From the user's point of view, Swap exchanges one crypto for another directly from Ledger Wallet without leaving the app and without giving custody to anyone. Under the hood, "directly from Ledger Wallet" hides a lot of moving parts:
 
-**Key facts:**
-- Language: TypeScript/JavaScript (also supports Python, Java, .NET)
-- Created by: Microsoft (the same team that originally built Puppeteer at Google)
-- First release: 2020
-- Used for: E2E testing, web scraping, automation
-- Killer feature: **Auto-waiting** — Playwright automatically waits for elements to be ready before interacting with them
+1. The user picks a source account and a destination currency
+2. The Swap Live App asks multiple providers for quotes in parallel
+3. The user picks a provider (or the best-rate pick is preselected)
+4. The Wallet shell builds a transaction on the source chain, the device signs it, the Wallet broadcasts it
+5. The provider receives the source asset, converts it, and sends the destination asset to the user's destination account
+6. Swap polls the provider for status until the trade reaches a terminal state (completed, failed, refunded)
 
-**Why Playwright over alternatives?**
+Ledger does not hold funds at any step. The provider takes custody briefly between inbound and outbound; Ledger's role is limited to quote aggregation, transaction orchestration, and status reporting. That boundary is a legal one — see 33.9 for why.
 
-| Feature | Playwright | Cypress | Selenium |
-|---------|-----------|---------|----------|
-| Multi-browser | Chromium, Firefox, WebKit | Chromium only (limited Firefox) | All browsers |
-| Electron support | Native | No | No |
-| Auto-waiting | Built-in | Built-in | Manual |
-| Parallel execution | Built-in | Via CI splitting | Via Grid |
-| Speed | Fast (CDP) | Fast (in-process) | Slower (HTTP) |
-| Language | TS/JS, Python, Java, .NET | JS/TS only | All major |
+### 5.2.2 The Swap Repo Landscape
 
-Ledger Live Desktop uses Playwright because it natively supports **Electron testing** — the ability to launch and control the desktop application as if a real user were clicking through it.
+Swap lives in several repos. You will need to know each one by name.
 
-### 22.2 The Locator System
+| Repo | What it is | Language / stack | QA interest |
+|---|---|---|---|
+| **`swap-live-app`** | The Swap Live App itself — the webview UI users see | Next.js 15 (App Router) + React 19 + TypeScript 5.9 + Tailwind 4; containerized and deployed to AWS EKS via ArgoCD | Most frontend bugs live here |
+| **`swap`** | The Swap backend: quote aggregator + completer (polls providers and updates status) | Scala (service) + Scala (completer), PostgreSQL, RabbitMQ | Quote discrepancies, status-polling issues, provider outages surface here |
+| **`swap-configuration`** | Configuration for supported pairs, limits, fees, provider enablement | Rust + CSV configuration files | "Why is this pair unavailable?" almost always starts here |
+| **`exchange-sdk`** | Shared TypeScript SDK used by Live Apps (Swap, PTX) and by the Wallet shell to drive exchange flows | TypeScript | Wallet-API exchange contract lives here |
+| **`wallet-api`** | The JSON-RPC bridge itself — `client`, `server`, `core`, `simulator`, `manifest-validator` packages | TypeScript monorepo | Manifest schema, RPC methods, error types are defined here |
+| **`ledger-live`** (this repo) | The Wallet shell, including E2E tests for swap | pnpm + Turborepo monorepo | E2E desktop (`send.swap.spec.ts`, `accounts.swap.spec.ts`) and mobile tests |
+| **`ledger-live-assets`** | Static assets: provider logos, provider configs, icons | Static CDN-served | Missing logo, wrong provider label → check here |
 
-A **locator** is how you tell Playwright which element to interact with. Think of it as a CSS selector on steroids — but with built-in waiting and retry logic.
+A **swap bug does not always belong to Swap** — it might live in `ledger-live` (the shell), in `exchange-sdk` (the bridge contract), in `wallet-api` (the protocol itself), or in the provider. Triage by layer.
 
-#### The Golden Rule: `getByTestId` first
+### 5.2.3 Frontend: the `swap-live-app` Repo
 
-The most reliable locator strategy is `data-testid` attributes. These are custom attributes added to the source code specifically for testing:
+`swap-live-app` is a **Next.js 15 (App Router) + React 19 + TypeScript 5.9 + Tailwind 4** monorepo. It is **not** deployed on Vercel — the application is containerized by GitHub Actions (`build.yml`), pushed to a JFrog OCI registry (`jfrog.ledgerlabs.net/ptx-oci-prod-green/swap-live-app`), and deployed to **AWS EKS via ArgoCD** (GitOps). Chapter 4.5 covers the environments and URLs.
 
-```html
-<!-- In the React source code -->
-<button data-testid="portfolio-empty-state-add-account-button">Add Account</button>
+**Repo layout** (from `apps/docs/architecture/index.md`):
+
+```
+swap-live-app/
+├── apps/
+│   ├── live-app/           # Main swap application (Next.js 15, App Router)
+│   └── docs/               # Documentation site (VitePress)
+├── packages/
+│   ├── ui-desktop/         # Design system components (Atomic Design)
+│   ├── formatter/          # Number/currency formatting with i18n
+│   ├── utils/              # Shared utilities (cn helper)
+│   ├── testing-tools/      # Testing utilities and MSW setup
+│   ├── window-transport-simulator/   # Wallet API transport simulator
+│   ├── eslint-config/      # Shared ESLint configurations
+│   ├── typescript-config/  # Shared TypeScript configurations
+│   └── tailwind-config/    # Shared Tailwind CSS configuration
+├── argocd/                 # ArgoCD deployment configs (stg, ppr, prd, prx)
+├── .github/workflows/      # CI/CD (build, e2e, release, rollback, code freeze)
+└── .rules/                 # Project-wide coding standards
 ```
 
-```typescript
-// In the test
-this.page.getByTestId("portfolio-empty-state-add-account-button");
+**Inside `apps/live-app/src/`:**
+
+```
+src/
+├── app/             # Next.js App Router pages & layouts
+├── components/      # Feature and page-specific components
+├── context/         # React contexts (Wallet API, user state)
+├── hooks/           # Custom React hooks
+├── locales/         # i18n strings
+├── queries/         # React Query API calls to the swap backend
+├── remote-config/   # Firebase remote config (feature flags, partner config)
+├── schemas/         # Zod schemas for runtime validation
+├── state/           # Jotai atoms
+├── swap-api/        # Typed client for the `swap` backend
+├── wallet-api/      # Thin wrapper around @ledgerhq/wallet-api-client
+└── middleware.ts    # Next.js edge middleware
 ```
 
-This is the most stable because `data-testid` attributes are never changed by designers or translators. They exist solely for tests.
+**Key stack traits to remember as QA:**
 
-**Real example from `portfolio.page.ts`:**
-```typescript
-private addAccountButton = this.page.getByTestId("portfolio-empty-state-add-account-button");
-private buySellEntryButton = this.page.getByTestId("buy-sell-entry-button");
-private chart = this.page.getByTestId("chart-container");
-private totalBalance = this.page.getByTestId("total-balance");
+- **Next.js App Router** (not Pages Router) — URL routing is filesystem-based under `src/app/`
+- **Styling** — Tailwind 4 + Ledger's Lumen design system (`@ledgerhq/lumen-design-core`, `@ledgerhq/lumen-ui-react`) + `@ledgerhq/react-ui`. Tailwind utilities come from a custom preset — QA should not be tempted to read arbitrary class values like `w-[107px]`; only design-token sizes are valid
+- **State** — Jotai atoms (not Redux/Zustand) for local state; React Query for backend calls
+- **Feature flags** — Firebase Remote Config (see chapter 34)
+- **UI component library** — `@workspace/ui-desktop` is the in-repo design system, organised Atomic-Design style (atoms / molecules / organisms / primitives), documented via Storybook
+- **Simulator** — `@workspace/window-transport-simulator` + `@ledgerhq/wallet-api-simulator` mock the Wallet-API bridge so the Live App can run standalone at `http://localhost:3000` during dev
+- **Analytics / monitoring** — Datadog RUM (`@datadog/browser-rum`), Segment (`@segment/analytics-next`), Mixpanel (`mixpanel-browser`) are all bundled into `apps/live-app`
+
+The Live App is **stateless across sessions** from the Wallet's perspective — if you reopen Swap, it reboots. This matters in tests: every `openSwap()` in an E2E spec is a full webview boot (plus Next.js hydration).
+
+### 5.2.4 Backend: the `swap` Service and Completer
+
+The `swap` backend is two processes sharing a PostgreSQL database and a RabbitMQ (Amazon MQ) queue:
+
+```
+              HTTPS from Live App
+                     │
+                     ▼
+        ┌────────────────────────┐
+        │       swap service      │
+        │  (Scala, REST, quotes,  │
+        │   trade creation)       │
+        └────────┬───────────────┘
+                 │ enqueue
+                 ▼
+        ┌────────────────────────┐
+        │       RabbitMQ          │
+        │      (Amazon MQ)        │
+        └────────┬───────────────┘
+                 │ consume
+                 ▼
+        ┌────────────────────────┐
+        │       swap completer    │
+        │  (Scala, polls provider │
+        │   status, persists it)  │
+        └────────┬───────────────┘
+                 │
+                 ▼
+        ┌────────────────────────┐
+        │      PostgreSQL         │
+        │  (trades, statuses,     │
+        │   audit)                │
+        └────────────────────────┘
 ```
 
-#### `getByRole` — Accessible locators
+Responsibilities:
 
-`getByRole` finds elements by their ARIA role, which is what screen readers see. It is the second most reliable strategy:
+- **`swap` service** — receives quote and trade requests from the Live App, fans them out to providers, ranks quotes, returns the best, and creates the trade record
+- **`swap completer`** — background worker that polls providers for long-running trades and updates status in PostgreSQL; the Live App (and Wallet) read status from the service endpoint
+- **PostgreSQL** — system of record for every trade, status history, audit
+- **RabbitMQ** — decouples trade creation (synchronous, user-facing) from status polling (asynchronous, provider-dependent)
 
-```typescript
-// From add.account.modal.ts — find an option by accessible name
-private selectAccountInList = (Currency: Currency) =>
-  this.page.getByRole("option", {
-    name: `${Currency.name} (${Currency.ticker})`,
-    exact: true,
-  });
+The **completer is why a swap you started can "complete later"** even if you close Swap. Status is owned by the backend, not the Live App.
+
+### 5.2.5 Configuration: the `swap-configuration` Repo
+
+`swap-configuration` holds the declarative rules that the service and the Live App obey:
+
+- Which swap pairs are supported, per provider
+- Per-pair min/max amounts
+- Per-provider fee tiers
+- Which providers are enabled globally and per environment
+- KYC requirements per provider
+- Geolocation / jurisdiction rules
+
+It is **Rust** tooling over **CSV** sources. QA almost never edits this repo, but you will read it constantly:
+
+- "Why can't I swap X to Y?" → grep the pair in `swap-configuration`
+- "Why is Changelly disabled on pre-prod?" → same
+- "Why does the min amount differ between stg and prod?" → same
+
+When you see a behavior that looks like a bug but might be a config intent, **check `swap-configuration` before opening a ticket**.
+
+### 5.2.6 Shared Contracts: `exchange-sdk`
+
+`exchange-sdk` is a TypeScript package that both the Wallet shell and the Swap Live App consume. It defines:
+
+- The Wallet-API exchange contract (types, method signatures, error codes)
+- The shape of swap quotes, trade requests, and status responses
+- Helpers for building the transaction the device will sign
+
+Bugs in `exchange-sdk` are particularly painful because they surface as mysterious errors at the Wallet-API bridge — the Live App thinks it sent a valid call, the shell thinks it received a malformed one, and the stack trace points at neither. When you see `INVALID_PARAMS` or similar bridge errors from Swap, check if `exchange-sdk` was recently bumped on either side.
+
+### 5.2.7 Static Assets: `ledger-live-assets`
+
+This repo serves static assets (images, provider configs) through a CDN. For Swap specifically:
+
+- Provider logos (Changelly, CIC, 1inch, Paraswap, MoonPay, Thorswap, Uniswap, ...)
+- Provider metadata (display name, URL, KYC flag)
+- Icons used in the Live App UI
+
+If a provider shows up with a broken or missing logo in prod, that is an assets repo issue, not a Swap issue.
+
+### 5.2.8 Providers
+
+Swap aggregates multiple providers. Each provider is either a CEX (custodial, KYC-prone) or a DEX (non-custodial, usually KYC-free). For QA, the CEX/DEX distinction drives the flow:
+
+| Provider | Type | KYC required? | Notes |
+|---|---|---|---|
+| **Changelly** | CEX | Conditional | Float rates, widely supported pairs |
+| **CIC** | CEX | Conditional | Partner-specific fiat off-ramp |
+| **1inch** | DEX | No | EVM DEX aggregator |
+| **Paraswap** | DEX | No | EVM DEX aggregator |
+| **MoonPay** | CEX (fiat-on-ramp, via Swap on some flows) | Yes | Different flow — often has its own Live App |
+| **Thorswap** | DEX | No | Cross-chain (BTC, ETH, LTC, ...) |
+| **Uniswap** | DEX | No | EVM, canonical DEX |
+
+Two things to remember in tests:
+
+- **KYC path diverges**: `selectExchangeWithoutKyc` picks a provider the test can actually go through without a human. Using `selectExchange` (including KYC-capable providers) may land on Changelly/CIC and block the test behind a KYC screen.
+- **DEX swaps need token approvals** before the actual swap — `app.swap.ensureTokenApproval(...)` handles this. If a test flakes on a token swap only, missing or stale approval is the first suspect.
+
+### 5.2.9 The Regulatory Boundary (MiCA / CASP)
+
+Since late 2024, swap in the EU falls under MiCA. Two consequences matter for QA:
+
+- Ledger operates Swap under an **RTO** (Reception and Transmission of Orders) model. Ledger does not custody funds and does not match orders — providers do.
+- Provider availability varies **by user jurisdiction**. A pair that works in stg from a French test IP may not work from a US-VPN test session.
+
+This is why QA environments have stg/ppr/prod split, and why the list of enabled providers differs across envs (see Chapter 4.5).
+
+### 5.2.10 Putting It All Together
+
+The end-to-end exchange flow involves four actors — the **Live App** (frontend), the **Exchange SDK** (shared contracts), the **Wallet API** (JSON-RPC bridge exposed by the Wallet shell), and the **Swap backend** (service + completer). The sequence below is the canonical happy path for a swap trade:
+
+![Swap Live App sequence diagram — Live App, Exchange SDK, Wallet API, and Swap Backend](images/Swap-live-app-schema.png)
+
+In words, step by step:
+
+1. The Wallet shell reads the manifest and opens the Live App URL
+2. The Live App boots, uses `exchange-sdk` types to request quotes from the `swap` service
+3. The service consults `swap-configuration` to know which providers and pairs are enabled
+4. The service hits each enabled provider in parallel
+5. The Live App shows quotes, the user picks one
+6. The Live App asks the Wallet API (via `exchange.start`) to initialize an exchange nonce on the device
+7. The Live App then calls `exchange.complete`; the Wallet shell builds the tx, the device signs, and the Wallet broadcasts
+8. The `swap` service writes the trade record; the **completer** polls the provider until the trade reaches a terminal state
+9. The Live App queries status until completion; logos and provider metadata come from `ledger-live-assets`
+
+**When you triage a swap bug, ask by layer, top to bottom:**
+
+- Live App UX / rendering → `swap-live-app`
+- Wallet-API bridge / shell device flow → `ledger-live` + `exchange-sdk`
+- Quote rejection, wrong pair availability, stale status → `swap` backend
+- Supported pair / min-max / provider enablement → `swap-configuration`
+- Missing logo / wrong provider label → `ledger-live-assets`
+- Provider-specific failure → the provider itself (escalate)
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><code>swap-live-app</code> repo — the Live App itself</li>
+<li><code>swap</code> repo — Scala backend (service + completer)</li>
+<li><code>swap-configuration</code> repo — pair/fees/provider configuration</li>
+<li><code>exchange-sdk</code> repo — Wallet-API exchange contract</li>
+<li><code>ledger-live-assets</code> repo — provider logos and metadata</li>
+<li><code>e2e/desktop/tests/specs/send.swap.spec.ts</code> in <code>ledger-live</code> — desktop swap E2E tests</li>
+<li><code>e2e/mobile/specs/swap/</code> in <code>ledger-live</code> — mobile swap E2E tests</li>
+</ul>
+</div>
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Swap is an aggregator plus an orchestrator. The Live App is the UI; the <code>swap</code> service is the quote/trade API; the completer is the status worker; <code>swap-configuration</code> is the rulebook; <code>ledger-live-assets</code> supplies branding. A swap bug is almost always scoped to one of these layers — triaging by layer saves hours of blind debugging.
+</div>
+
+### 5.2.11 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz -- Swap Live App Architecture</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> Where does the Swap Live App's frontend source code live, and how is it deployed?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) In <code>ledger-live/apps/swap</code>, bundled with the Wallet shell</button>
+<button class="quiz-choice" data-value="B">B) In the separate <code>swap-live-app</code> repo — containerized by GitHub Actions, pushed to JFrog, and deployed to AWS EKS via ArgoCD</button>
+<button class="quiz-choice" data-value="C">C) In <code>exchange-sdk</code>, served from npm</button>
+<button class="quiz-choice" data-value="D">D) In <code>ledger-live-assets</code>, served from a CDN</button>
+</div>
+<p class="quiz-explanation">The Swap Live App lives in its own repo. Deployment is <strong>not</strong> Vercel — <code>build.yml</code> builds a Docker image, pushes it to JFrog (<code>jfrog.ledgerlabs.net/ptx-oci-prod-green/swap-live-app</code>), and ArgoCD syncs it to an EKS cluster (GitOps). The Wallet shell loads the Live App by URL, declared in a manifest.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> Which component is responsible for polling providers and updating the status of long-running trades?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The Swap Live App frontend</button>
+<button class="quiz-choice" data-value="B">B) The <code>swap</code> service (REST API)</button>
+<button class="quiz-choice" data-value="C">C) The <code>swap</code> completer — a background worker consuming from RabbitMQ and writing status to PostgreSQL</button>
+<button class="quiz-choice" data-value="D">D) The <code>exchange-sdk</code> package</button>
+</div>
+<p class="quiz-explanation">The completer is the status worker. It decouples "I just created a trade" (synchronous, user-facing) from "is the trade complete?" (asynchronous, provider-dependent). This is why a trade can complete even after the user closes Swap.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> A user reports that a specific swap pair is unavailable in production only. What repo should you check first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>swap-configuration</code> — the declarative rules about which pairs are enabled per provider and per environment</button>
+<button class="quiz-choice" data-value="B">B) <code>ledger-live</code></button>
+<button class="quiz-choice" data-value="C">C) <code>swap-live-app</code></button>
+<button class="quiz-choice" data-value="D">D) <code>ledger-live-assets</code></button>
+</div>
+<p class="quiz-explanation">Pair availability is driven by <code>swap-configuration</code>. Before you assume a code bug, check whether the pair is intentionally disabled or restricted for that environment.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> Why does the desktop E2E test call <code>selectExchangeWithoutKyc</code> instead of <code>selectExchange</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It is faster</button>
+<button class="quiz-choice" data-value="B">B) It is the only method that works on Speculos</button>
+<button class="quiz-choice" data-value="C">C) It is required by <code>exchange-sdk</code></button>
+<button class="quiz-choice" data-value="D">D) To deterministically pick a provider that will not trigger a KYC step mid-test — KYC screens cannot be automated</button>
+</div>
+<p class="quiz-explanation">KYC-capable providers (Changelly, CIC) can route the test into an identity-verification flow that no E2E test can complete. <code>selectExchangeWithoutKyc</code> restricts the provider pool to those that allow the swap to proceed without human verification.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> A token-pair swap test flakes only on DEX providers. What is the most likely root cause?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Speculos is misconfigured</button>
+<button class="quiz-choice" data-value="B">B) The ERC-20 token approval step has not been granted or is stale — DEX swaps require an approval before the swap itself</button>
+<button class="quiz-choice" data-value="C">C) The completer is down</button>
+<button class="quiz-choice" data-value="D">D) <code>ledger-live-assets</code> is serving stale logos</button>
+</div>
+<p class="quiz-explanation">DEX swaps on EVM chains require an ERC-20 <code>approve()</code> transaction before the actual swap. The test calls <code>app.swap.ensureTokenApproval(...)</code>; if that step is skipped or the approval is stale, the swap itself will fail on the first DEX provider.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Swap Live App -- Releases & Firebase Environments
+
+<div class="chapter-intro">
+The Swap Live App has its own branching model, its own CI/CD, and its own Firebase — none of which is obvious from inside <code>ledger-live</code>. This chapter maps every environment to the URLs, feature flags, and monitoring you will actually use on your first week of QA work.
+</div>
+
+### 5.3.1 Release Model -- Trunk-Based on `develop`
+
+The Swap Live App follows **trunk-based development**. There is **no `release/*` branch** and no Gitflow: `develop` is the single source of truth, feature branches are short-lived, and production is cut from `develop` by running a workflow.
+
+```
+develop (trunk — always deployable, auto-deploys to staging)
+  │
+  ├── feat/<name>    (short-lived, days)
+  ├── fix/<name>     (short-lived)
+  └── hotfix/<name>  (branched from the latest app@vX.Y.Z tag)
 ```
 
-The `exact: true` option means the name must match exactly (no partial matches).
+Key rules:
 
-**Common roles:** `button`, `link`, `textbox`, `option`, `heading`, `checkbox`, `radio`, `dialog`.
+- `develop` is the trunk; feature and fix branches merge back quickly
+- Every merge to `develop` builds a Docker image tagged `develop` and auto-deploys to **staging** (ArgoCD sync)
+- A production release is triggered manually by running the **`release-production.yml`** GitHub Action — it consumes pending **Changesets** (`.changeset/*.md`), bumps versions, commits the bump, and creates an `app@vX.Y.Z` git tag
+- The tag push triggers `build.yml` which builds a Docker image tagged `app-vX.Y.Z` (hyphen, not `@`) and ArgoCD picks it up for production
+- **Hotfixes** branch from the latest `app@vX.Y.Z` tag, are tagged as a new patch release, and are merged back into `develop` (do **not** cherry-pick — always merge, to avoid divergence)
+- **Code freezes** are activated with the `code-freeze.yml` workflow; it flips the `CODE_FREEZE` repo variable and makes the "Code Freeze Check" fail on open PRs, blocking merges
 
-#### `getByText` — Text content locators
+Versioning is **fully automated** by Changesets. Before a PR that introduces a user-facing change, you run `npx changeset`, select the bump type (major/minor/patch), write a summary, and commit the generated `.changeset/*.md` with your PR. The release workflow does the rest.
 
-When elements have no `data-testid` and no specific ARIA role, you can find them by their visible text:
+> **Note:** Git tag format is `app@vX.Y.Z` (with `@`). The corresponding Docker image tag is `app-vX.Y.Z` (with a hyphen). The conversion happens automatically in the pipeline.
 
-```typescript
-// From portfolio.page.ts
-private assetAllocationTitle = this.page.getByText("Asset allocation");
-private showAllButton = this.page.getByText("Show all");
-private showMoreButton = this.page.getByText("Show more");
+### 5.3.2 The Environments and Their URLs
+
+Swap has **four** environments: three long-lived (stg, ppr, prd) and one dynamic per-PR preview (prx). Each long-lived env has an internal AWS hostname (used by Ledger-internal tooling) and a public Cloudflare hostname (the one QA and end users actually hit). Memorize the shape:
+
+| Environment | Purpose | Frontend (Live App, public) | Internal AWS host | ArgoCD config |
+|---|---|---|---|---|
+| **Staging** (`stg`) | Auto-deploys on every merge to `develop`; internal dev and early QA | `swap-live-app-stg.ledger-test.com` | `swap-live-app.aws.stg.ldg-tech.com` | `argocd/stg/values.yaml` |
+| **Pre-prod** (`ppr`) | Final validation — prod-like; QA sign-off | `swap-live-app-ppr.ledger-test.com` | `swap-live-app.aws.ppr.ldg-tech.com` | `argocd/ppr/values.yaml` |
+| **Production** (`prd`) | End users | `swap-live-app.ledger.com` | `swap-live-app.aws.prd.ldg-tech.com` | `argocd/prd/values.yaml` |
+| **Preview** (`prx`) | Dynamic per-PR environment | — | `swap-live-app-pr<NNN>.aws.stg.ldg-tech.com` | `argocd/prx/values.yaml` |
+
+The backend (the `swap` service QA hits for quotes and trade creation) has its own URLs, versioned in the path:
+
+| Env | Backend URL |
+|---|---|
+| Staging | `swap-stg.ledger-test.com/v5` |
+| Pre-prod | `swap-ppr.ledger-test.com/v5` |
+| Production | `swap.ledger.com` |
+
+A few things to note:
+
+- The Live App frontend and the swap backend are **separate services on separate URLs** — the Live App calls the backend via HTTPS. When debugging a swap issue, always check both sides
+- `ledger-test.com` is Ledger's public test domain (behind Cloudflare) — do not expose these URLs to end users; they are for QA and dev only
+- `ldg-tech.com` is Ledger's internal AWS domain — typically only reachable from Ledger infrastructure
+- Provider enablement can differ between environments; a provider may be paused in stg to test fallback, or may be disabled in prod because of a region block
+- Each `argocd/{env}/values.yaml` has two fields that control which image runs: `imageTag` (default — `develop` for stg, `main` for prd) and `IMAGE_UPDATE_OVERRIDE_TAG` (empty = automatic updates; set to `app-vX.Y.Z` to pin a version, which is how rollbacks work)
+
+### 5.3.3 Firebase Projects
+
+Swap uses **two separate Firebase projects**. They serve different clients and the distinction catches new QA off guard.
+
+| Firebase project | Who reads it | What it contains |
+|---|---|---|
+| **`ledger-live-production`** | The Wallet shell (desktop + mobile) | Wallet-wide feature flags, Wallet 4.0 toggles, manifest overrides, the Wallet's own configuration (`shouldShowSwap`, entry-point toggles, KYC gates, etc.) |
+| **`swap-live-app`** | The Swap Live App itself | Swap-specific flags: provider enablement per env, A/B experiments inside the Live App, per-pair overrides, UI experiments |
+
+In practice:
+
+- A flag that controls **whether the Swap entry point appears in the Wallet** is in `ledger-live-production`
+- A flag that controls **the layout of the quotes list inside the Live App** is in `swap-live-app`
+- If QA says "I cannot see Swap in the Wallet", check `ledger-live-production` first
+- If QA says "A provider is missing in Swap", check the `swap-live-app` Firebase first, then `swap-configuration`
+
+Each Firebase project has its own staging / prod split (typically separated by project or by remote-config condition). Credentials to these projects are distributed per-role; do not share.
+
+### 5.3.4 Feature Flags -- Where to Look
+
+Swap-related feature flags live in three places at once. When tracing a flag, check all three:
+
+| Source | Examples |
+|---|---|
+| **Firebase `ledger-live-production`** | `ptxSwap`, `ptxEarn`, manifest overrides, Swap entry-point toggles |
+| **Firebase `swap-live-app`** | Provider enablement (e.g., `changelly_enabled`), UI experiments, best-rate algorithm toggles |
+| **`swap-configuration` repo** | Pair enablement, min/max amounts, per-provider pair whitelist |
+
+Configuration wins in this order (most specific first):
+
+1. `swap-configuration` — a disabled pair is disabled, full stop
+2. Firebase `swap-live-app` — if enabled in config, a provider may still be hidden by a Firebase flag for an A/B test
+3. Firebase `ledger-live-production` — if the Wallet hides the Swap entry altogether, none of the above matter
+
+### 5.3.5 The Release Workflow in Practice
+
+A typical swap release (no release branch, Changesets-driven):
+
+```
+Ongoing │  PRs merge to develop; each carries a .changeset/*.md if user-facing
+Ongoing │  On every merge to develop: build.yml builds app image tagged `develop`
+Ongoing │  ArgoCD syncs the new `develop` image to stg (swap-live-app-stg.ledger-test.com)
+Day 0   │  prepare-release.yml runs → GitHub issue with next version + changelog preview
+Day 0   │  Scope agreed; optionally code-freeze.yml activates CODE_FREEZE to block new merges
+Day 1   │  QA regresses on ppr (the same develop-tracking image is promoted to ppr for the gate)
+Day 2   │  release-production.yml triggered manually → Changesets consumed, versions bumped,
+        │  commit pushed to develop, app@vX.Y.Z git tag created
+Day 2   │  Tag push triggers build.yml → Docker image tagged `app-vX.Y.Z` pushed to JFrog
+Day 2   │  ArgoCD prd picks up the new image; swap-live-app.ledger.com now serves the new version
+Day 2   │  Monitor #ptx-swap-prod and Datadog/Sentry for regressions
 ```
 
-**Warning:** Text locators break when translations change or text is dynamic. Use `getByTestId` whenever possible.
+QA's touchpoints on this timeline:
 
-#### `page.locator()` — CSS and XPath selectors
+- **Ongoing (stg)** — smoke + targeted regression as PRs merge; this is where most bugs are caught
+- **Day 1 (ppr)** — full regression against production-like data; this is the go/no-go gate
+- **Day 2 (prod)** — watchdog on Datadog, Sentry, Mixpanel dashboards for the first 2 hours after deploy
 
-For complex cases, you can use raw CSS selectors or XPath expressions:
+**Rollback:** to roll back production, run `rollback-production.yml` with the environment (`prd`) and the target version (e.g., `app@v1.8.0`). The workflow updates `IMAGE_UPDATE_OVERRIDE_TAG` in `argocd/prd/values.yaml` and commits it to `develop`; ArgoCD syncs within minutes. If the workflow is unavailable, edit `argocd/prd/values.yaml` directly, set `IMAGE_UPDATE_OVERRIDE_TAG: "app-v1.8.0"`, and merge to `develop` — same effect.
 
-```typescript
-// CSS selector — from portfolio.page.ts
-private operationList = this.page.locator("#operation-list");
-private assetRowElements = this.page.locator("[data-testid^='asset-row-']");
-private operationRows = this.page.locator("[data-testid^='operation-row-']");
+### 5.3.6 Monitoring and Observability
+
+When a swap bug is reported, the monitoring stack is where you start:
+
+| Tool | What it shows |
+|---|---|
+| **Datadog** | Service health, error rates, latency, alerts for the `swap` backend and completer |
+| **Sentry** | Client-side errors in the Live App (desktop webview + mobile webview) |
+| **Mixpanel** | Funnel metrics — how many users start a quote, how many complete a trade, drop-off per step; there are separate Mixpanel projects for desktop and mobile |
+| **Tableau** | Aggregated business metrics; revenue per provider, volume per pair, KYC pass-through |
+| **Runscope** | Synthetic uptime checks against the `swap` service endpoints |
+
+And Slack is where the humans are:
+
+| Channel | Purpose |
+|---|---|
+| **`#ptx-swap-build`** | Swap team engineering chatter, release announcements |
+| **`#ptx-swap-prod`** | Production-only: deploys, rollbacks, first-hour watchdog |
+| **`#alerts-swap`** | Automated alerts from Datadog and Sentry |
+| **`#consumer-service-alerts`** | Broader consumer-backend alerts that sometimes affect Swap |
+
+### 5.3.7 What Changes Across Environments -- Cheat Sheet
+
+| Concern | Staging | Pre-prod | Production |
+|---|---|---|---|
+| Backend URL | `swap-stg.ledger-test.com/v5` | `swap-ppr.ledger-test.com/v5` | `swap.ledger.com` |
+| Frontend URL (public) | `swap-live-app-stg.ledger-test.com` | `swap-live-app-ppr.ledger-test.com` | `swap-live-app.ledger.com` |
+| Frontend URL (AWS internal) | `swap-live-app.aws.stg.ldg-tech.com` | `swap-live-app.aws.ppr.ldg-tech.com` | `swap-live-app.aws.prd.ldg-tech.com` |
+| Image tag | `develop` (auto) | pinned `app-vX.Y.Z` | pinned `app-vX.Y.Z` |
+| Real funds | No (test seeds) | No (test seeds) | Yes — user funds |
+| Provider list | May be a subset, may include test providers | Same set as prod | Full production set |
+| Firebase project audience | Internal | Internal | External users |
+| Monitoring severity | Low | Medium | Critical — paging |
+| Broadcast in E2E | Gated by `DISABLE_TRANSACTION_BROADCAST=1` | Same | Never run E2E that broadcasts |
+
+The most common "works on stg, fails on ppr" pattern is a provider-enablement delta — always re-read `swap-configuration` and the `swap-live-app` Firebase flags side by side before assuming a code regression.
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Swap ships via <strong>trunk-based development</strong> — <code>develop</code> is the source of truth, Changesets drives versioning, and <code>release-production.yml</code> creates an <code>app@vX.Y.Z</code> tag that ArgoCD then syncs to EKS. Four environments (<code>stg</code> / <code>ppr</code> / <code>prd</code> / <code>prx</code>) each have their own public Cloudflare URL (e.g., <code>swap-live-app.ledger.com</code>) and internal AWS URL. Two Firebase projects split the flag responsibility: <code>ledger-live-production</code> (Wallet-side) and <code>swap-live-app</code> (Live-App-side). When a swap bug depends on environment, the answer is almost always in the URL map, the Firebase flags, or <code>swap-configuration</code> — and often in all three at once.
+</div>
+
+### 5.3.8 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz -- Swap Releases & Firebase</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> Which branching model does <code>swap-live-app</code> use?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Classic Gitflow with a <code>release/app@v1.3.xx</code> branch cut from <code>develop</code></button>
+<button class="quiz-choice" data-value="B">B) Trunk-based on <code>develop</code> — short-lived <code>feat/*</code> and <code>fix/*</code> branches merge back quickly; production is cut from <code>develop</code> by running <code>release-production.yml</code>, which consumes Changesets and creates an <code>app@vX.Y.Z</code> tag</button>
+<button class="quiz-choice" data-value="C">C) Semantic-release on every merge to <code>main</code></button>
+<button class="quiz-choice" data-value="D">D) One long-lived release branch per quarter</button>
+</div>
+<p class="quiz-explanation">The repo is <strong>trunk-based</strong>: <code>develop</code> is the single source of truth. There is no Gitflow, no <code>release/*</code> branch, and no separate <code>main</code>-as-trunk. Versions are managed by <strong>Changesets</strong> and the <code>release-production.yml</code> workflow; a production release is an <code>app@vX.Y.Z</code> tag cut directly from <code>develop</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> You need to toggle a feature flag that controls whether the <strong>Swap tab appears in the Wallet at all</strong>. Which Firebase project owns that flag?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>swap-live-app</code></button>
+<button class="quiz-choice" data-value="B">B) <code>ledger-live-production</code> — flags that affect the Wallet shell (including whether a Live App entry point is shown) live in the Wallet's Firebase</button>
+<button class="quiz-choice" data-value="C">C) Neither — only <code>swap-configuration</code></button>
+<button class="quiz-choice" data-value="D">D) A shared third Firebase project</button>
+</div>
+<p class="quiz-explanation">Wallet-side flags (including entry-point visibility, Wallet 4.0 toggles, manifest overrides) live in <code>ledger-live-production</code>. Flags inside the Live App UI itself (provider enablement in the Live App, UI experiments) live in the <code>swap-live-app</code> Firebase.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> What is the pre-prod backend URL for swap, and how is it different from the Live App frontend URL?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Backend: <code>swap-ppr.ledger-test.com/v5</code>; Frontend: <code>swap-live-app-ppr.ledger-test.com</code> (two separate services)</button>
+<button class="quiz-choice" data-value="B">B) Backend and Frontend are both <code>swap.ledger.com</code></button>
+<button class="quiz-choice" data-value="C">C) Backend: <code>swap-stg.ledger-test.com/v5</code>; Frontend: <code>swap-live-app-stg.ledger-test.com</code> (those are staging, not pre-prod)</button>
+<button class="quiz-choice" data-value="D">D) Backend: <code>swap-live-app.aws.ppr.ldg-tech.com</code>; Frontend: <code>swap-ppr.ledger-test.com/v5</code> (swapped roles)</button>
+</div>
+<p class="quiz-explanation">Pre-prod backend is <code>swap-ppr.ledger-test.com/v5</code>; pre-prod frontend Live App is <code>swap-live-app-ppr.ledger-test.com</code>. They are <strong>separate services on separate URLs</strong> — the Live App calls the backend over HTTPS. The <code>/v5</code> in the backend path is the backend API version, independent from the Live App version.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> A pair that works on staging fails silently in pre-prod. Where do you look first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Restart Speculos</button>
+<button class="quiz-choice" data-value="B">B) Redeploy the Live App</button>
+<button class="quiz-choice" data-value="C">C) Check the user's seed phrase</button>
+<button class="quiz-choice" data-value="D">D) Compare <code>swap-configuration</code> values (pair enablement, min/max) and the <code>swap-live-app</code> Firebase flags between stg and ppr — environment deltas usually explain it</button>
+</div>
+<p class="quiz-explanation">"Works in stg, fails in ppr" is almost always a configuration delta, not a code regression. Check pair and provider enablement in <code>swap-configuration</code>, then Firebase flags. If both match, escalate to the swap team with the comparison.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> Which Slack channel is the <strong>first</strong> place to watch for production swap regressions immediately after a deploy?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>#ptx-swap-build</code></button>
+<button class="quiz-choice" data-value="B">B) <code>#alerts-swap</code></button>
+<button class="quiz-choice" data-value="C">C) <code>#ptx-swap-prod</code> — production-focused channel for deploys, rollbacks, and first-hour watchdog</button>
+<button class="quiz-choice" data-value="D">D) <code>#consumer-service-alerts</code></button>
+</div>
+<p class="quiz-explanation"><code>#ptx-swap-prod</code> is the production watchdog channel. <code>#alerts-swap</code> carries automated alerts and is complementary. <code>#ptx-swap-build</code> is engineering chatter; <code>#consumer-service-alerts</code> is broader-than-swap.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Real Ticket Walkthrough -- QAA-1136 (Swap Coverage Gap)
+
+<div class="chapter-intro">
+This is your Part 5 capstone chapter, following the exact same pattern as Part 3 Chapter 3.8 (QAA-1139) and Part 3 Chapter 3.9 (QAA-1141). The ticket is <strong>QAA-1136</strong>, a coverage-gap ticket in the same parent epic as QAA-1141 (<code>QAA-1145 — [LWD-LWM] — coverage gap</code>). It asks us to close missing E2E coverage for several swap pairs on desktop. We will deep-dive on <strong>one representative pair — USDT → ETH (B2CQA-2752)</strong> — and then show how to apply the same technique to the rest.
+</div>
+
+### 5.4.1 Understanding the Ticket
+
+**Jira ticket:** QAA-1136 (child of QAA-1145 "[LWD-LWM] — coverage gap")
+**Representative Xray test case:** B2CQA-2752 — *Swap USDT (ERC-20) → ETH*
+**Scope:** Add desktop E2E coverage for swap pairs currently automated on mobile only
+
+**What the ticket asks:**
+1. Compare the desktop `send.swap.spec.ts` against the mobile swap specs and against the Xray coverage dashboard
+2. Identify which swap pairs have a `B2CQA-*` test case but no desktop automation
+3. Add a desktop test entry per missing pair, following the exact shape of the existing `swaps` array in `send.swap.spec.ts`
+
+**The 9 candidate B2CQA test cases** under QAA-1136 correspond to pairs that are automated on mobile but missing from the desktop spec. The one we will implement end-to-end is:
+
+| B2CQA | Pair | Mobile reference |
+|---|---|---|
+| **B2CQA-2752** | USDT (ERC-20) → ETH | `e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts` |
+
+The other pairs (ETH→SOL, BTC→SOL, USDT(ETH)→SOL, USDC→ETH, ETH→DOT, XRP→USDC, BTC→LTC, ...) follow the exact same pattern — 35.12 documents the reference block for each.
+
+> **Note:** Ticket IDs and the list of 9 B2CQA children are live Jira data. Re-check the ticket via Atlassian MCP before implementing: issue IDs, titles, and the exact pair list can change as the epic evolves.
+
+### 5.4.2 Why This Matters
+
+Coverage-gap tickets look small but carry real risk. Each missing pair is a swap flow that:
+
+- Ships to end users with money at stake
+- Is covered on one platform only, leaving the other platform regression-blind
+- Counts as an automated test case in the Xray coverage dashboard for one platform but not the other — stakeholders see misleading green
+
+For Swap specifically, the risk compounds because:
+
+- Swap is MiCA-regulated — untested pairs can surface in compliance audits
+- Provider routing differs per pair (DEX vs CEX, token approvals vs native), so a gap is rarely "just another currency"
+- The desktop and mobile codepaths diverge (Electron + Playwright vs React Native + Detox) — a pair that works on one does not guarantee the other
+
+Closing QAA-1136 means the Xray dashboard truthfully reports LLD coverage for these pairs.
+
+### 5.4.3 Analyzing Current Coverage
+
+Start by reading the desktop swap spec to see exactly what is already covered:
+
+```bash
+cd /Users/jerome.portier/src/tries/2026-04-08-LedgerHQ-ledger-live
+less e2e/desktop/tests/specs/send.swap.spec.ts
 ```
 
-The `^=` means "starts with" — so `[data-testid^='asset-row-']` matches any element whose `data-testid` starts with `asset-row-`.
+Focus on the `swaps` array near the top of the file. It looks like this (abridged):
 
-**XPath — from `abstractClasses.ts`:**
 ```typescript
-// XPath: find any element containing specific text
-protected optionWithText = (text: string) =>
-  this.page.locator(`//*[contains(text(),"${text}")]`).first();
-
-// XPath with following-sibling: find text then look for nearby text
-protected optionWithTextAndFollowingText = (text: string, followingText: string) =>
-  this.page.locator(
-    `//*[contains(text(),"${text}")]/following::span[contains(text(),"${followingText}")]`,
-  ).first();
+const swaps = [
+  {
+    fromAccount: Account.ETH_1,
+    toAccount: Account.BTC_NATIVE_SEGWIT_1,
+    xrayTicket: "B2CQA-2750, B2CQA-3135, B2CQA-620, B2CQA-3450",
+    tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+          "@ethereum", "@family-evm", "@bitcoin", "@family-bitcoin"],
+  },
+  {
+    fromAccount: Account.BTC_NATIVE_SEGWIT_1,
+    toAccount: Account.ETH_1,
+    xrayTicket: "B2CQA-2744, B2CQA-2432, B2CQA-3450",
+    tag: [/* ... */],
+  },
+  {
+    fromAccount: Account.ETH_1,
+    toAccount: TokenAccount.ETH_USDT_1,        // ETH → USDT exists
+    xrayTicket: "B2CQA-2749, B2CQA-3450",
+    tag: [/* ... */],
+  },
+  // ... more entries ...
+];
 ```
 
-XPath is powerful but fragile — it is used in the codebase only when simpler locators cannot work (typically for dropdown options that have no `data-testid`).
+Now grep for our target ticket:
 
-#### Dynamic locators (factory functions)
-
-Sometimes you need a locator that depends on a parameter. The codebase uses arrow functions for this:
-
-```typescript
-// From portfolio.page.ts — locator factory for any asset row
-private assetRow = (asset: string) =>
-  this.page.getByTestId(`asset-row-${asset.toLowerCase()}`);
-
-// From layout.component.ts — locator factory for topbar buttons
-private readonly topbarActionButton = (action: string) =>
-  this.page.getByTestId(`topbar-action-button-${action}`);
+```bash
+grep -rn "B2CQA-2752" e2e/
 ```
 
-Usage:
-```typescript
-await this.assetRow("bitcoin").click();          // -> getByTestId("asset-row-bitcoin")
-await this.topbarActionButton("settings").click(); // -> getByTestId("topbar-action-button-settings")
+Expected result: **matches in the mobile spec only** — `e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts` — and nothing in `e2e/desktop/tests/specs/`. That confirms the gap.
+
+Also grep for the pair direction:
+
+```bash
+grep -n "TokenAccount.ETH_USDT_1" e2e/desktop/tests/specs/send.swap.spec.ts
 ```
 
-#### The `.or()` combinator
+Expected result: matches where `TokenAccount.ETH_USDT_1` is the **source** of a swap (e.g., USDT → BTC with B2CQA-2753) and where it is the **destination** (e.g., ETH → USDT with B2CQA-2749). Neither of these is the USDT → ETH direction we need.
 
-When the same element has different `data-testid` values in different versions of the UI:
+**Conclusion:** USDT → ETH is a real gap. The fix is to add an entry to the `swaps` array.
+
+### 5.4.4 Picking the Representative Case
+
+We deep-dive on **USDT → ETH (B2CQA-2752)** for three reasons:
+
+1. **The mobile reference exists**: `e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts` is the canonical implementation. We mirror it on desktop.
+2. **The pair is non-trivial**: USDT (ERC-20) → ETH is a token-to-native swap on the EVM, which exercises ERC-20 approval + swap — a codepath the simpler ETH → ETH or BTC → BTC pairs would not.
+3. **The shape transfers**: once this one works, adding the 8 others (35.12) is mechanical.
+
+The mobile reference (for orientation):
 
 ```typescript
-// From layout.component.ts — handles both old and new testId
-readonly topbarSettingsButton = this.topbarActionButton("settings").or(
-  this.page.getByTestId("topbar-settings-button"),
+// e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { runSwapTest } from "./swap";
+
+const swap = new Swap(TokenAccount.ETH_USDT_1, Account.ETH_1, "40", undefined, Fee.MEDIUM);
+
+runSwapTest(
+  swap,
+  ["B2CQA-2752", "B2CQA-2048"],
+  ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5", "@ethereum", "@family-evm"]
 );
 ```
 
-This means: try `topbar-action-button-settings` first, OR fall back to `topbar-settings-button`. This pattern handles UI transitions between versions.
+Key points carried over to the desktop entry:
 
-#### Locator Priority Summary
+- `fromAccount = TokenAccount.ETH_USDT_1`
+- `toAccount = Account.ETH_1`
+- Xray ticket anchor: `B2CQA-2752`
+- Tags: all supported devices, `@ethereum`, `@family-evm`
+- No need for `@bitcoin` / `@family-bitcoin` tags — BTC is not involved
 
-| Priority | Strategy | When to use | Stability |
-|----------|----------|-------------|-----------|
-| 1 | `getByTestId` | Always when a `data-testid` exists | Highest |
-| 2 | `getByRole` | Accessible elements (buttons, links, options) | High |
-| 3 | `getByText` | Static, non-translatable text | Medium |
-| 4 | `locator` (CSS) | Complex structural selectors | Medium |
-| 5 | `locator` (XPath) | Last resort — sibling/ancestor traversal | Lowest |
+> **Note:** The desktop spec computes the minimum amount dynamically (`app.swap.getMinimumAmount(fromAccount, toAccount)`), so we do **not** hardcode `"40"` like mobile does. The framework handles that for us.
 
-### 22.3 Actions
+### 5.4.5 Create a Branch
 
-Once you have a locator, you perform actions on it. Here are every action used in the codebase:
-
-#### `click()` — The most common
-
-```typescript
-await this.addAccountButton.click();
-await this.showAllButton.click();
-await this.checkbox.click({ force: true }); // force: bypass visibility checks
-```
-
-The `{ force: true }` option skips Playwright's actionability checks. Used when elements are technically visible but covered by overlays.
-
-#### `fill()` — Type into an input
-
-```typescript
-// From add.account.modal.ts
-await this.selectAccountInput.fill(currency.name);
-```
-
-`fill()` clears the input first, then types the text. Unlike `type()`, it does not simulate individual keystrokes — it sets the value directly.
-
-#### `press()` — Press a keyboard key
-
-```typescript
-await this.selectAccountInput.press("Enter");
-```
-
-Common keys: `"Enter"`, `"Escape"`, `"Tab"`, `"ArrowDown"`, `"Backspace"`.
-
-#### `hover()` — Move mouse over element
-
-```typescript
-await this.page.mouse.move(0, 0); // Move mouse to top-left corner (dismiss tooltips)
-```
-
-#### `waitFor()` — Wait for element state
-
-```typescript
-// Wait for element to become visible
-await this.addAccountsButton.waitFor({ state: "visible" });
-
-// Wait for element to disappear
-await this.stopButton.waitFor({ state: "hidden" });
-await this.loadingSpinner.waitFor({ state: "hidden" });
-```
-
-States: `"visible"`, `"hidden"`, `"attached"`, `"detached"`.
-
-#### `scrollIntoViewIfNeeded()` — Scroll to element
-
-```typescript
-// From portfolio.page.ts
-await this.operationList.scrollIntoViewIfNeeded();
-```
-
-#### `evaluate()` — Run JavaScript in the browser
-
-```typescript
-// From portfolio.page.ts — wait for DOM element count to change
-await this.page.waitForFunction(() => {
-  return document.querySelectorAll("[data-testid^='asset-row-']").length > 6;
-});
-
-// From common.ts — save logs
-await page.evaluate(filePath => {
-  window.saveLogs(filePath);
-}, filePath);
-```
-
-`evaluate()` runs the given function inside the browser context. The second argument is passed as a parameter. This is the escape hatch for anything Playwright's API cannot do directly.
-
-#### `isVisible()` — Check without asserting
-
-```typescript
-if (await this.deselectAllButton.isVisible()) {
-  await this.deselectAllButton.click();
-}
-```
-
-Unlike `expect().toBeVisible()`, `isVisible()` returns a boolean and does not throw on failure. Used for conditional logic.
-
-### 22.4 Assertions
-
-Assertions verify that the application is in the expected state. Playwright's `expect` function comes with built-in auto-retry — it keeps checking until the assertion passes or times out.
-
-#### `toBeVisible()` — Element is on screen
-
-```typescript
-import { expect } from "@playwright/test";
-
-await expect(this.addAccountButton).toBeVisible();
-await expect(this.chart).toBeVisible();
-```
-
-This is the most used assertion in the codebase. It waits up to the configured timeout (41 seconds in our config).
-
-#### `not.toBeVisible()` — Element is NOT on screen
-
-```typescript
-await expect(this.portfolioTotalBalance).not.toBeVisible();
-await expect(this.portfolioTrend).not.toBeVisible();
-```
-
-#### `toContainText()` — Element contains text
-
-```typescript
-await expect(this.totalBalance).toContainText("$");
-await expect(this.toaster).toContainText("Transaction sent !");
-await expect(this.assetRowValue("bitcoin")).toContainText("0.001");
-```
-
-`toContainText` is a substring match. It passes if the text appears anywhere in the element.
-
-#### `toHaveText()` — Exact text match
-
-```typescript
-expect(await this.title.textContent()).toBe("Add accounts");
-```
-
-Note: `toBe()` is a Jest-style assertion (string equality), while `toHaveText()` is Playwright's locator assertion with auto-retry. Prefer `toHaveText()` for locators.
-
-#### `toHaveCount()` — Number of matching elements
-
-```typescript
-await expect(this.assetRowElements).toHaveCount(6);
-```
-
-Useful for verifying lists: "I expect exactly 6 asset rows."
-
-#### `toBeEnabled()` / `toBeDisabled()` — Button state
-
-```typescript
-await expect(this.quickActionButton("sell")).toBeDisabled();
-await expect(this.quickActionButton("send")).toBeEnabled();
-```
-
-#### `toHaveAttribute()` — Check HTML attributes
-
-```typescript
-await expect(this.drawerBuycryptoButton).toHaveAttribute("data-active", "true");
-```
-
-#### `toBeGreaterThan()` — Numeric comparison
-
-```typescript
-const numberOfOperationsAfter = await this.operationRows.count();
-expect(numberOfOperationsAfter).toBeGreaterThan(numberOfOperationsBefore);
-```
-
-Note: this is a plain value assertion (no auto-retry). The `count()` already resolved the value.
-
-### 22.5 Auto-Waiting — Playwright's Killer Feature
-
-This is what makes Playwright different from Selenium. When you call:
-
-```typescript
-await this.addAccountButton.click();
-```
-
-Playwright does NOT just click immediately. Behind the scenes, it:
-
-1. **Waits** for the element to be attached to the DOM
-2. **Waits** for the element to be visible (not `display: none`, not zero-size)
-3. **Waits** for the element to be stable (not animating)
-4. **Waits** for the element to receive pointer events (not covered by another element)
-5. **Waits** for the element to be enabled (not `disabled`)
-6. **Clicks** the element
-
-If any step fails, Playwright retries from the beginning. This continues until the `timeout` is reached (41 seconds in our config, 120 seconds for the default page timeout).
-
-**This means you almost never need `sleep()` or `waitForTimeout()`.** Instead of:
-
-```typescript
-// BAD — arbitrary wait
-await page.waitForTimeout(3000);
-await button.click();
-```
-
-You write:
-```typescript
-// GOOD — auto-wait handles everything
-await button.click();
-```
-
-The same auto-retry applies to assertions:
-
-```typescript
-// This will retry for up to 41 seconds until the text appears
-await expect(this.totalBalance).toContainText("$1,234.56");
-```
-
-**When you DO need explicit waits:**
-
-```typescript
-// Wait for a specific element state change
-await this.loadingSpinner.waitFor({ state: "hidden" });
-
-// Wait for the page to finish loading
-await page.waitForLoadState("domcontentloaded");
-
-// Wait for a specific selector to appear/disappear
-await page.waitForSelector("#loader-container", { state: "hidden" });
-
-// Wait for a DOM condition (escape hatch)
-await page.waitForFunction(() => {
-  return document.querySelectorAll("[data-testid^='asset-row-']").length > 6;
-});
-```
-
-### 22.6 Configuration — `playwright.config.ts` Line by Line
-
-Open `e2e/desktop/playwright.config.ts`. Here is every property explained:
-
-```typescript
-const config: PlaywrightTestConfig = {
-  // Where to find test files
-  testDir: "./tests/specs",
-
-  // Retry failed tests: 2 times in CI, never locally
-  retries: process.env.CI ? 2 : 0,
-
-  // Max time per test: 400s in CI, 1200s (20min) locally
-  // Local is higher because your machine may be slower
-  timeout: process.env.CI ? 400000 : 1200000,
-
-  // Where to save screenshots, videos, traces
-  outputDir: "./tests/artifacts/test-results",
-
-  // Max time for each expect() assertion: 41 seconds
-  expect: { timeout: 41000 },
-
-  // No global timeout (tests can run as long as needed)
-  globalTimeout: 0,
-
-  // Run this file once before ALL tests
-  globalSetup: require.resolve("./tests/utils/global.setup"),
-
-  // Run this file once after ALL tests
-  globalTeardown: require.resolve("./tests/utils/global.teardown"),
-
-  use: {
-    // Accept self-signed certificates
-    ignoreHTTPSErrors: true,
-    // We handle screenshots manually in captureArtifacts()
-    screenshot: "off",
-  },
-
-  // In CI, fail if someone left test.only() in code
-  forbidOnly: !!process.env.CI,
-
-  // In CI, only save artifacts for failed tests
-  preserveOutput: process.env.CI ? "failures-only" : "always",
-
-  // In CI, stop after 5 failures (don't waste time on cascading failures)
-  maxFailures: process.env.CI ? 5 : undefined,
-
-  // Report tests that take longer than 60 seconds
-  reportSlowTests: process.env.CI ? { max: 0, threshold: 60000 } : null,
-
-  // Run all tests in parallel (not sequentially)
-  fullyParallel: true,
-
-  // Use all available CPU cores
-  workers: "100%",
-
-  // Reporters: what format to output results in
-  reporter: process.env.CI
-    ? [
-        ["list"],                          // Console output
-        ["allure-playwright", { ... }],    // Allure HTML report
-        ["./tests/utils/customJsonReporter.ts"],  // Xray JSON for Jira
-      ]
-    : [["allure-playwright"]],  // Local: Allure only
-};
-```
-
-### 22.7 Running Tests from the CLI
+Following the branch naming convention from Chapter 6 and the `support/` prefix for test-coverage work:
 
 ```bash
-# Run ALL tests
-pnpm e2e:desktop test:playwright
-
-# Run a specific file
-pnpm e2e:desktop test:playwright add.account.spec.ts
-
-# Run tests matching a name pattern (grep)
-pnpm e2e:desktop test:playwright --grep "Add account"
-
-# Run tests with a specific tag
-pnpm e2e:desktop test:playwright --grep "@smoke"
-pnpm e2e:desktop test:playwright --grep "@bitcoin"
-
-# Run with the Playwright UI (interactive debugger)
-pnpm e2e:desktop test:playwright --ui
-
-# Run in debug mode (opens inspector, pauses on first action)
-PWDEBUG=1 pnpm e2e:desktop test:playwright add.account.spec.ts
-
-# Run with a single worker (no parallelism, easier to debug)
-pnpm e2e:desktop test:playwright -- --workers=1
-
-# Run a specific shard (for CI splitting)
-pnpm e2e:desktop test:playwright -- --shard=1/3
-```
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://playwright.dev/docs/locators">Playwright: Locators</a> — official locator guide with interactive examples</li>
-<li><a href="https://playwright.dev/docs/actionability">Playwright: Auto-waiting</a> — the actionability checks explained</li>
-<li><a href="https://playwright.dev/docs/test-assertions">Playwright: Assertions</a> — full assertion reference</li>
-<li><a href="https://playwright.dev/docs/test-configuration">Playwright: Configuration</a> — all config options</li>
-<li><a href="https://playwright.dev/docs/running-tests">Playwright: Running Tests</a> — CLI options</li>
-<li><a href="https://playwright.dev/docs/test-cli">Playwright: Command Line</a> — complete CLI reference</li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> Playwright gives you locators that find elements, actions that interact with them, and assertions that verify state — all with built-in auto-waiting. You never write <code>sleep()</code>. The configuration in <code>playwright.config.ts</code> controls timeouts, retries, parallelism, and reporting. Master these fundamentals and you can read any test in the codebase.
-</div>
-
-### 22.8 Visual Debugging with PWDEBUG
-
-When a test fails or you want to understand the test flow step by step, Playwright's **debug mode** is your best tool. Setting the `PWDEBUG=1` environment variable launches the **Playwright Inspector** — a GUI that pauses at each action and lets you step through the test interactively.
-
-**Launch a test in debug mode:**
-```bash
-PWDEBUG=1 pnpm e2e:desktop test:playwright e2e/desktop/tests/specs/add.account.spec.ts
-```
-
-This opens two windows: the **Electron app** (Ledger Live) and the **Playwright Inspector**:
-
-![Playwright Inspector](images/Playwright_Inspector.png)
-
-**The Inspector UI:**
-
-- **Left panel (Actions list)** — every `await` action from your test, listed in order. The currently executing action is highlighted. Completed actions show a green checkmark.
-- **Right panel (Browser)** — the live Electron app. You can see exactly what the user would see at each step.
-- **Locator input** — type a locator (e.g., `getByTestId("portfolio-empty-state-add-account-button")`) to see it highlighted live in the app.
-- **Step / Resume buttons** — click "Step over" to execute one action at a time, or "Resume" to run until the next breakpoint or failure.
-- **Locator picker** — click the crosshair icon, then click any element in the app to see its best locator suggestion. Invaluable for writing new tests.
-
-**When to use PWDEBUG:**
-- **Debugging a failure** — step to the failing action and inspect the DOM state
-- **Understanding a test flow** — watch what the app does at each step, especially useful when learning a new spec file
-- **Verifying locators** — use the locator picker to confirm your selectors match the right elements
-- **Writing new tests** — pause after each action to decide what the next step should be
-
-> **Tip:** You can also combine PWDEBUG with a single worker for easier debugging:
-> ```bash
-> PWDEBUG=1 pnpm e2e:desktop test:playwright add.account.spec.ts -- --workers=1
-> ```
-
-### 22.9 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Playwright Core Concepts</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q1.</strong> Which locator strategy should you prefer when a <code>data-testid</code> attribute exists on the element?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>getByTestId()</code> — it is the most stable because test IDs are never changed by designers or translators</button>
-<button class="quiz-choice" data-value="B">B) <code>getByText()</code> — text is always visible and easy to understand</button>
-<button class="quiz-choice" data-value="C">C) <code>locator()</code> with CSS — CSS selectors are more powerful</button>
-<button class="quiz-choice" data-value="D">D) <code>getByRole()</code> — ARIA roles are the web standard</button>
-</div>
-<p class="quiz-explanation"><code>getByTestId()</code> is the #1 priority in the locator strategy. Test IDs exist solely for testing and are never affected by design changes, translations, or accessibility refactors.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> What does Playwright do automatically BEFORE performing a <code>click()</code> action?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Takes a screenshot of the element</button>
-<button class="quiz-choice" data-value="B">B) Scrolls to the top of the page</button>
-<button class="quiz-choice" data-value="C">C) Waits for the element to be attached, visible, stable, able to receive events, and enabled</button>
-<button class="quiz-choice" data-value="D">D) Refreshes the page to ensure latest DOM</button>
-</div>
-<p class="quiz-explanation">Playwright's auto-waiting performs 5 checks before every action: attached to DOM, visible, stable (not animating), receives pointer events (not covered), and enabled. This is the "killer feature" that eliminates most <code>sleep()</code> calls.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> In our <code>playwright.config.ts</code>, what is the <code>expect.timeout</code> set to and what does it control?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) 120 seconds — how long each test can run</button>
-<button class="quiz-choice" data-value="B">B) 400 seconds — the CI test timeout</button>
-<button class="quiz-choice" data-value="C">C) 5 seconds — how long Playwright waits before failing</button>
-<button class="quiz-choice" data-value="D">D) 41 seconds — how long each <code>expect()</code> assertion retries before failing</button>
-</div>
-<p class="quiz-explanation"><code>expect.timeout: 41000</code> means every <code>expect(locator).toBeVisible()</code> (and similar assertions) will retry for up to 41 seconds. This is separate from the overall test timeout (400s CI / 1200s local).</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q4.</strong> What is the difference between <code>fill()</code> and <code>press()</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>fill()</code> is for buttons, <code>press()</code> is for inputs</button>
-<button class="quiz-choice" data-value="B">B) <code>fill()</code> clears the input and sets a text value directly, while <code>press()</code> simulates pressing a single keyboard key</button>
-<button class="quiz-choice" data-value="C">C) They are the same, just different naming conventions</button>
-<button class="quiz-choice" data-value="D">D) <code>fill()</code> is synchronous, <code>press()</code> is asynchronous</button>
-</div>
-<p class="quiz-explanation"><code>fill("Bitcoin")</code> clears the input field and types "Bitcoin" as a whole string. <code>press("Enter")</code> simulates pressing a single key. They serve different purposes and are often used together: <code>fill()</code> to type text, then <code>press("Enter")</code> to submit.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> When should you use <code>page.waitForFunction()</code> instead of regular Playwright locators?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Always — it is more reliable than locators</button>
-<button class="quiz-choice" data-value="B">B) When you want to add a sleep delay</button>
-<button class="quiz-choice" data-value="C">C) When you need to check a DOM condition that cannot be expressed as a locator assertion (e.g., counting elements after a dynamic change)</button>
-<button class="quiz-choice" data-value="D">D) When elements have no <code>data-testid</code></button>
-</div>
-<p class="quiz-explanation"><code>waitForFunction()</code> is the escape hatch for conditions that Playwright's locator API cannot express. For example, waiting for the count of dynamically-added elements to exceed a threshold, as seen in <code>portfolio.page.ts</code>.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Playwright Advanced -- Fixtures, POM & TypeScript Decorators
-
-<div class="chapter-intro">
-Chapter 22 taught you how Playwright finds elements and interacts with them. This chapter goes deeper into the three patterns that make the Ledger E2E suite maintainable at scale: <strong>fixtures</strong> (dependency injection for test setup), the <strong>Page Object Model</strong> (separation of test logic from UI details), and <strong>TypeScript decorators</strong> (the <code>@step</code> annotation for reporting). These are the patterns you will use in every test you write.
-</div>
-
-### 23.1 What Are Fixtures?
-
-In Playwright, a **fixture** is a reusable piece of setup that is automatically created before your test and cleaned up after. Think of it as dependency injection for tests.
-
-Without fixtures, you would write setup code in every test:
-
-```typescript
-// BAD — setup code repeated in every test
-test("test 1", async () => {
-  const app = await launchElectron();
-  const page = await app.firstWindow();
-  // ... test code ...
-  await app.close();
-});
-
-test("test 2", async () => {
-  const app = await launchElectron();  // repeated!
-  const page = await app.firstWindow();  // repeated!
-  // ... test code ...
-  await app.close();  // repeated!
-});
-```
-
-With fixtures, setup is declared once and injected:
-
-```typescript
-// GOOD — fixtures handle setup/teardown automatically
-test("test 1", async ({ app, page }) => {
-  // app and page are ready to use!
-  // cleanup happens automatically after the test
-});
-
-test("test 2", async ({ app, page }) => {
-  // fresh app and page for each test
-});
-```
-
-The magic: you just list what you need in the destructured parameter (`{ app, page }`), and Playwright creates it for you. When the test ends, Playwright tears it down.
-
-### 23.2 `base.extend<T>()` — Creating Custom Fixtures
-
-Playwright provides built-in fixtures (`page`, `context`, `browser`). To add your own, you use `base.extend<T>()`:
-
-```typescript
-import { test as base } from "@playwright/test";
-
-// Define the type of your custom fixtures
-type MyFixtures = {
-  greeting: string;
-  counter: number;
-};
-
-// Extend the base test with your fixtures
-const test = base.extend<MyFixtures>({
-  greeting: "hello",           // Simple value fixture
-  counter: async ({}, use) => {
-    // Setup
-    const value = await fetchCounterFromAPI();
-    // Provide the value to the test
-    await use(value);
-    // Teardown (runs after the test)
-    await resetCounter();
-  },
-});
-```
-
-**The `use()` callback pattern**: The `use` function is the key concept. Everything before `use()` is setup, the argument to `use()` is what the test receives, and everything after `use()` is teardown.
-
-```typescript
-myFixture: async ({}, use) => {
-  // SETUP: runs before the test
-  const resource = await createResource();
-
-  await use(resource);  // TEST RUNS HERE with this value
-
-  // TEARDOWN: runs after the test (even if test fails)
-  await resource.cleanup();
-},
-```
-
-### 23.3 The Ledger Live `TestFixtures` Type
-
-Open `e2e/desktop/tests/fixtures/common.ts`. Here is the `TestFixtures` type with every field explained:
-
-```typescript
-type TestFixtures = {
-  // ── UI Configuration ──
-  lang: string;                  // App language (default: "en-US")
-  theme: "light" | "dark" | "no-preference" | undefined;  // Color scheme (default: "dark")
-  env: Record<string, string>;   // Extra environment variables
-
-  // ── Test Data ──
-  userdata?: string;             // Name of JSON fixture (e.g., "skip-onboarding")
-  extraUserdataFiles?: Record<string, string>;  // Additional files to create
-  settings: Record<string, unknown>;   // App settings merged into app.json
-  userdataDestinationPath: string;     // Generated unique dir per test
-  userdataOriginalFile?: string;       // Full path to source JSON
-  userdataFile: string;                // Full path to app.json
-
-  // ── Feature Flags ──
-  featureFlags: OptionalFeatureMap;    // Override feature flags for this test
-
-  // ── Device Simulation ──
-  speculosApp: AppInfos;              // Which Speculos app to launch (e.g., "Bitcoin")
-  speculos: SpeculosFixtureHandle;    // Device handle with current + relaunch
-  simulateCamera: string;             // Fake video capture file path
-
-  // ── Injected Objects ──
-  electronApp: ElectronApplication;   // The launched Electron app
-  page: Page;                         // The app's main window
-  app: Application;                   // The POM hub (all page objects)
-
-  // ── CLI & Data Population ──
-  cliCommands?: CliCommand[];         // Commands to run after Speculos starts
-  cliCommandsOnApp?: { app: AppInfos; cmd: CliCommand }[];  // Commands with specific apps
-
-  // ── Reporting ──
-  teamOwner?: Team;                   // Allure team ownership
-  localManifestOverride?: LiveAppManifest[];  // Override Live App manifests
-};
-```
-
-**The fixture dependency graph:**
-
-```
-speculosApp (input)
-    ↓
-speculos (launches Docker container)
-    ↓
-electronApp (launches Electron with SPECULOS_API_PORT)
-    ↓
-page (gets first window from Electron)
-    ↓
-app (wraps page in Application POM hub)
-```
-
-Each fixture depends on the one above it. Playwright resolves these dependencies automatically — you never have to worry about the order.
-
-### 23.4 Overriding Fixtures with `test.use()`
-
-Tests configure their fixtures using `test.use()` inside a `describe` block:
-
-```typescript
-test.describe("Add Accounts", () => {
-  test.use({
-    teamOwner: Team.WALLET_XP,                       // For Allure reports
-    userdata: "skip-onboarding-with-last-seen-device", // Pre-configured state
-    speculosApp: Currency.BTC.speculosApp,             // Launch BTC device
-    featureFlags: {                                    // Override flags
-      currencyAleo: { enabled: true },
-    },
-  });
-
-  test("Add BTC account", async ({ app }) => {
-    // app is ready with BTC Speculos running
-  });
-});
-```
-
-**Rules:**
-- `test.use()` applies to ALL tests in the same `describe` block
-- Values in `test.use()` override defaults from the fixture definition
-- You can nest `describe` blocks with different `test.use()` for different configurations
-
-### 23.5 Page Object Model (POM) — The Architecture
-
-The **Page Object Model** is a design pattern where each screen (or major UI component) of the application gets its own class. This class encapsulates:
-1. **Locators** — how to find elements on that screen
-2. **Actions** — what a user can do on that screen
-3. **Assertions** — what you can verify on that screen
-
-**Why POM?**
-- If a `data-testid` changes, you update ONE file (the page object), not 50 tests
-- Tests read like user stories: `app.portfolio.clickAddAccountButton()`
-- Page objects can be reused across many tests
-
-**The Ledger implementation:**
-
-```
-PageHolder (base — holds the Page reference)
-    ↓
-Component (adds shared UI: spinner, toaster, dropdown options)
-    ↓
-AppPage (abstract — all concrete pages extend this)
-    ↓
-PortfolioPage, AccountPage, SettingsPage, ... (concrete pages)
-```
-
-And the **Application class** (hub) aggregates all page objects:
-
-```typescript
-// From e2e/desktop/tests/page/index.ts
-export class Application extends PageHolder {
-  public account = new AccountPage(this.page);
-  public accounts = new AccountsPage(this.page);
-  public portfolio = new PortfolioPage(this.page);
-  public addAccount = new AddAccountModal(this.page);
-  public send = new SendModal(this.page);
-  public receive = new ReceiveModal(this.page);
-  public speculos = new SpeculosPage(this.page);
-  public mainNavigation = new MainNavigationPage(this.page);
-  // ... 30+ more page objects
-}
-```
-
-In tests, you access everything through `app`:
-
-```typescript
-test("navigate and check", async ({ app }) => {
-  await app.portfolio.clickAddAccountButton();
-  await app.addAccount.selectCurrency(Currency.BTC);
-  await app.mainNavigation.openTargetFromMainNavigation("accounts");
-  await app.accounts.navigateToAccountByName("Bitcoin 1");
-});
-```
-
-**Rule: Tests never use locators directly.** Every interaction goes through a named method on a page object. This is what makes the suite maintainable.
-
-### 23.6 TypeScript Decorators — The `@step()` Pattern
-
-If you come from TypeScript without decorator experience, the `@` syntax may look mysterious. Here is what it means.
-
-**What is a decorator?** A decorator is a function that wraps another function, adding behavior before or after it runs. The `@` symbol is syntax sugar for applying that wrapper.
-
-```typescript
-// Without decorator:
-async clickButton() {
-  await test.step("Click button", async () => {
-    await this.button.click();
-  });
-}
-
-// With decorator — exactly the same behavior, cleaner syntax:
-@step("Click button")
-async clickButton() {
-  await this.button.click();
-}
-```
-
-**How `step.ts` works (the source code):**
-
-```typescript
-// From e2e/desktop/tests/misc/reporters/step.ts
-export function step<This extends HasConstructor, Args extends unknown[], Return>(
-  message?: string,
-) {
-  return function actualDecorator(
-    target: (this: This, ...args: Args) => Promise<Return>,
-    context: ClassMethodDecoratorContext,
-  ) {
-    async function replacementMethod(this: This, ...args: Args): Promise<Return> {
-      const ctorName = this.constructor.name;  // e.g., "PortfolioPage"
-
-      // Build the step name: custom message or "ClassName.methodName"
-      const name = message
-        ? message.replace(/\$(\d+)/g, (_, idx) => String(args[Number(idx)]))
-        : `${ctorName}.${String(context.name)}`;
-
-      // Wrap the method call in a Playwright test step
-      return await test.step(name, () => target.call(this, ...args), { box: true });
-    }
-    return replacementMethod;
-  };
-}
-```
-
-**Key details:**
-
-1. **`$N` placeholders** — The message can include `$0`, `$1`, etc. which get replaced with the function arguments:
-   ```typescript
-   @step("Click on asset row $0")
-   async clickOnSelectedAssetRow(asset: string) { ... }
-   // When called with "bitcoin", step name becomes: "Click on asset row bitcoin"
-   ```
-
-2. **`{ box: true }`** — This tells Playwright to "box" the step, meaning the step's internal details are collapsed in the report. The error points to the test line that called the method, not the internals.
-
-3. **Fallback for non-test contexts** — If `@step` is called outside a test (e.g., during fixture setup), it catches the error and runs the method without wrapping.
-
-4. **Auto-naming** — If no message is provided, the step name is `ClassName.methodName` (e.g., `PortfolioPage.clickAddAccountButton`).
-
-### 23.7 Tags and Annotations
-
-Tags and annotations are metadata attached to tests for filtering and reporting.
-
-**Tags — for filtering which tests run:**
-
-```typescript
-test("Add BTC account", {
-  tag: [
-    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",  // Device compatibility
-    "@bitcoin",                                                     // Currency
-    "@family-bitcoin",                                              // Blockchain family
-    "@smoke",                                                       // Test importance
-  ],
-}, async ({ app }) => { ... });
-```
-
-Run only tests with a specific tag:
-```bash
-pnpm e2e:desktop test:playwright --grep "@smoke"
-pnpm e2e:desktop test:playwright --grep "@bitcoin"
-pnpm e2e:desktop test:playwright --grep "@NanoSP"
-```
-
-**Annotations — for linking to external systems:**
-
-```typescript
-test("Add BTC account", {
-  annotation: {
-    type: "TMS",                                    // Test Management System
-    description: "B2CQA-2499, B2CQA-2644",         // Jira/Xray ticket IDs
-  },
-}, async ({ app }) => {
-  // Inside the test, link to Allure
-  await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-});
-```
-
-The annotation links the test to Xray test cases in Jira. The `addTmsLink()` call creates clickable links in the Allure report.
-
-### 23.8 Parallel Execution and Workers
-
-```typescript
-// In playwright.config.ts
-fullyParallel: true,  // All tests can run at the same time
-workers: "100%",      // Use all CPU cores
-```
-
-Each worker gets its own:
-- Speculos Docker container (on a random port)
-- Electron app instance
-- Userdata directory (unique UUID)
-- Isolated test state
-
-This is why the fixture system assigns random ports to Speculos — to prevent port conflicts between parallel workers.
-
-**In CI**, the suite is also **sharded** across multiple runners:
-```bash
-# Runner 1:
-pnpm e2e:desktop test:playwright -- --shard=1/3
-# Runner 2:
-pnpm e2e:desktop test:playwright -- --shard=2/3
-# Runner 3:
-pnpm e2e:desktop test:playwright -- --shard=3/3
-```
-
-### 23.9 Retry Strategy
-
-```typescript
-retries: process.env.CI ? 2 : 0,
-```
-
-- **Locally**: No retries. You see failures immediately and fix them.
-- **CI**: Up to 2 retries. A test must fail 3 times to be reported as failed.
-
-The `isLastRetry()` utility checks if the current run is the last attempt. Expensive operations like video capture only happen on the last retry:
-
-```typescript
-recordVideo: isLastRetry(testInfo),  // Only record video on the final attempt
-```
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://playwright.dev/docs/test-fixtures">Playwright: Test Fixtures</a> — the official fixture guide</li>
-<li><a href="https://playwright.dev/docs/pom">Playwright: Page Object Models</a> — official POM guide</li>
-<li><a href="https://playwright.dev/docs/test-parameterize">Playwright: Parameterize Tests</a> — data-driven testing patterns</li>
-<li><a href="https://playwright.dev/docs/test-parallel">Playwright: Parallelism</a> — workers and sharding</li>
-<li><a href="https://playwright.dev/docs/test-retries">Playwright: Retries</a> — retry configuration</li>
-<li><a href="https://www.typescriptlang.org/docs/handbook/decorators.html">TypeScript: Decorators</a> — the language feature behind <code>@step</code></li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> Fixtures are dependency injection for tests — declare what you need, Playwright creates it. The Page Object Model separates locators from test logic so changes propagate from a single place. The <code>@step</code> decorator wraps methods in Allure reporting steps with zero effort. Together, these patterns make a 26-file test suite manageable and a 100+ page object codebase navigable.
-</div>
-
-### 23.10 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Fixtures, POM & Decorators</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> In the <code>use()</code> callback pattern, what runs AFTER the test finishes?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Everything before <code>use()</code></button>
-<button class="quiz-choice" data-value="B">B) The argument passed to <code>use()</code></button>
-<button class="quiz-choice" data-value="C">C) Everything after <code>use()</code> — this is the teardown phase</button>
-<button class="quiz-choice" data-value="D">D) Nothing — teardown must be done manually</button>
-</div>
-<p class="quiz-explanation">The <code>use()</code> callback splits the fixture into three phases: before <code>use()</code> = setup, the argument to <code>use()</code> = what the test gets, after <code>use()</code> = teardown. The teardown runs even if the test fails.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q2.</strong> Why does the Ledger E2E suite import <code>test</code> from <code>"tests/fixtures/common"</code> instead of <code>"@playwright/test"</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The custom <code>test</code> extends Playwright's base with fixtures for Speculos, Electron, feature flags, page objects, and userdata</button>
-<button class="quiz-choice" data-value="B">B) It is a naming convention with no functional difference</button>
-<button class="quiz-choice" data-value="C">C) The standard Playwright import does not work with TypeScript</button>
-<button class="quiz-choice" data-value="D">D) To avoid a dependency on the Playwright package</button>
-</div>
-<p class="quiz-explanation">The custom <code>test</code> from <code>common.ts</code> uses <code>base.extend&lt;TestFixtures&gt;()</code> to add 20+ custom fixtures (app, electronApp, speculos, featureFlags, userdata, etc.). Using the standard import would miss all of these.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> What does <code>@step("Select currency $0")</code> produce when called with <code>selectCurrency("Bitcoin")</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) An error — <code>$0</code> is not valid syntax</button>
-<button class="quiz-choice" data-value="B">B) A step named "Select currency $0" (literal)</button>
-<button class="quiz-choice" data-value="C">C) A step named "AddAccountModal.selectCurrency"</button>
-<button class="quiz-choice" data-value="D">D) A step named "Select currency Bitcoin" — <code>$0</code> is replaced with the first argument</button>
-</div>
-<p class="quiz-explanation">The <code>@step</code> decorator's implementation uses <code>message.replace(/\$(\d+)/g, (_, idx) => String(args[Number(idx)]))</code> to replace <code>$N</code> placeholders with the corresponding function arguments. <code>$0</code> becomes the first argument.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q4.</strong> In the fixture dependency graph, which fixture must be created BEFORE <code>electronApp</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>page</code> — the window must exist before the app</button>
-<button class="quiz-choice" data-value="B">B) <code>speculos</code> — the Electron app needs the Speculos port number to connect to the device</button>
-<button class="quiz-choice" data-value="C">C) <code>app</code> — the Application must be ready first</button>
-<button class="quiz-choice" data-value="D">D) No dependencies — <code>electronApp</code> is created independently</button>
-</div>
-<p class="quiz-explanation">The <code>electronApp</code> fixture sets <code>SPECULOS_API_PORT</code> as an environment variable from <code>speculos.current.port</code>. Without the Speculos container running first, the app would not know how to reach the emulated device.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> Why should tests NEVER use locators directly (e.g., <code>page.getByTestId("button").click()</code>) and instead use page object methods?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is slower to use locators directly</button>
-<button class="quiz-choice" data-value="B">B) Playwright does not support direct locator usage in tests</button>
-<button class="quiz-choice" data-value="C">C) If a <code>data-testid</code> changes, you update one page object method instead of every test that uses it</button>
-<button class="quiz-choice" data-value="D">D) Direct locators cannot be used with <code>expect()</code></button>
-</div>
-<p class="quiz-explanation">The POM pattern's main benefit is maintainability. When a locator changes (e.g., a <code>data-testid</code> is renamed), you update the page object once. All tests that use that method automatically get the fix. Without POM, you would update every test file.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Electron -- Desktop App Testing
-
-<div class="chapter-intro">
-Ledger Live Desktop is an <strong>Electron</strong> application — a web app packaged as a native desktop program. This chapter explains what Electron is, how Playwright launches and controls it, and how the E2E fixture system bridges the two. Understanding this layer is essential because Electron introduces concepts (main process, renderer, webviews, environment variables) that do not exist in regular web testing.
-</div>
-
-### 24.1 What Is Electron?
-
-Electron is a framework that lets you build desktop applications using web technologies (HTML, CSS, JavaScript). It bundles:
-
-- **Chromium** — the same engine that powers Chrome (renders the UI)
-- **Node.js** — server-side JavaScript (for file system access, USB communication, etc.)
-
-The result: a cross-platform desktop app (macOS, Windows, Linux) built with web technologies. Slack, VS Code, Discord, and Ledger Live are all Electron apps.
-
-**Two processes:**
-- **Main process** — Node.js. Handles native things: file system, USB, system tray, window management
-- **Renderer process** — Chromium. Displays the UI. This is what Playwright controls
-
-When Playwright launches an Electron app, it gets access to the renderer process (the `Page` object) and can also interact with the main process via `electronApp.evaluate()`.
-
-### 24.2 How Playwright Launches the Electron App
-
-The `electronUtils.ts` file contains the `launchApp()` function:
-
-```typescript
-import { _electron as electron } from "@playwright/test";
-
-export async function launchApp({ env, lang, theme, userdataDestinationPath, ... }) {
-  return await electron.launch({
-    args: [
-      // The compiled app entry point
-      `${path.join(__dirname, "../../../../apps/ledger-live-desktop/.webpack/main.bundle.js")}`,
-      // Isolated userdata directory (unique per test)
-      `--user-data-dir=${userdataDestinationPath}`,
-      // Display consistency
-      "--force-device-scale-factor=1",
-      // Prevent shared memory issues in Docker
-      "--disable-dev-shm-usage",
-      // Required for CI environments
-      "--no-sandbox",
-      // Enable Chromium logging
-      "--enable-logging",
-    ],
-    env,                              // Environment variables (FEATURE_FLAGS, SPECULOS_API_PORT, etc.)
-    colorScheme: theme,               // "dark" or "light"
-    locale: lang,                     // "en-US", "fr-FR", etc.
-    executablePath: require("electron/index.js"),  // Path to the Electron binary
-    timeout: 120000,                  // 2 minutes to launch
-  });
-}
-```
-
-**Key points:**
-- The first `args` entry is the **webpack bundle** — the compiled Ledger Live Desktop code
-- `--user-data-dir` isolates each test's data (accounts, settings) in a unique directory
-- `env` is where feature flags, Speculos connection, and test configuration are passed
-- `require("electron/index.js")` finds the Electron binary installed by npm
-
-### 24.3 The Environment Variables
-
-When the `electronApp` fixture launches, it sets these environment variables:
-
-```typescript
-env = {
-  VERBOSE: true,                    // Enable detailed logging
-  MOCK: undefined,                  // Disable mocks (use real Speculos)
-  HIDE_DEBUG_MOCK: true,            // Hide mock indicators in UI
-  CI: process.env.CI,               // Are we in CI?
-  PLAYWRIGHT_RUN: true,             // Tell the app it is running in Playwright
-  CRASH_ON_INTERNAL_CRASH: true,    // Fail loudly on crashes
-  LEDGER_MIN_HEIGHT: 768,           // Minimum window height
-  FEATURE_FLAGS: JSON.stringify(mergedFeatureFlags),  // Feature flags JSON
-  MANAGER_DEV_MODE: true,           // Enable developer features
-  SPECULOS_API_PORT: String(speculos.current.port),   // Speculos connection
-  SPECULOS_ADDRESS: getSpeculosAddress(),              // Speculos host
-  DISABLE_TRANSACTION_BROADCAST: "1",  // Don't send real transactions
-};
-```
-
-The most important ones:
-- **`FEATURE_FLAGS`** — controls which UI features are enabled (modular drawer, Wallet 4.0, etc.)
-- **`SPECULOS_API_PORT`** — tells the app where to find the emulated device
-- **`DISABLE_TRANSACTION_BROADCAST`** — prevents tests from spending real crypto
-
-### 24.4 `ElectronApplication` vs `Page`
-
-After launch, you have two objects:
-
-```typescript
-const electronApp: ElectronApplication = await launchApp({ ... });
-const page: Page = await electronApp.firstWindow();
-```
-
-- **`electronApp`** — represents the whole application. Used for:
-  - Getting windows: `electronApp.firstWindow()`, `electronApp.windows()`
-  - Evaluating code in the main process: `electronApp.evaluate()`
-  - Closing the app: `electronApp.close()`
-
-- **`page`** — represents the main window. This is what you interact with 99% of the time:
-  - Finding elements: `page.getByTestId()`
-  - Clicking, typing, asserting: all the locator/action/assertion APIs
-  - Console logging: `page.on("console", msg => ...)`
-
-Some page objects need both — for example, `SwapPage` and `BuyAndSellPage` access webview windows through `electronApp`:
-
-```typescript
-export class SwapPage extends WebViewAppPage {
-  constructor(page: Page, electronApp?: ElectronApplication) {
-    super(page, electronApp);
-  }
-  // Access the webview window
-  const [, webview] = this.electronApp.windows();
-}
-```
-
-### 24.5 The Application Startup Sequence
-
-After the Electron app launches, the fixture waits for it to be ready:
-
-```typescript
-// Get the first window
-const page = await electronApp.firstWindow();
-
-// Set generous timeout (CI can be slow)
-page.setDefaultTimeout(120000);
-
-// Attach network logging
-attachNetworkLogging(page, testInfo);
-
-// Record all console messages to a log file
-page.on("console", msg => {
-  safeAppendFile(logFile, `${txt}\n`);
-});
-
-// Start collecting webview logs
-const webviewCollector = new WebviewLogCollector();
-webviewCollector.start(electronApp);
-
-// Wait for the page HTML to load
-await page.waitForLoadState("domcontentloaded");
-
-// Wait for the loading screen to disappear
-await page.waitForSelector("#loader-container", { state: "hidden" });
-
-// NOW the test can start
-```
-
-The `#loader-container` is Ledger Live's splash screen. Once it disappears, the portfolio or onboarding screen is visible and the test can begin.
-
-### 24.6 Webviews
-
-A **webview** is an embedded browser window inside the Electron app. Ledger Live uses webviews for:
-- **Swap** — the exchange interface is a separate web app loaded in a webview
-- **Earn** — staking providers run in webviews
-- **Buy/Sell** — external payment providers
-- **Discover** — Live Apps marketplace
-
-When testing webview content, you access the webview window through `electronApp.windows()`:
-
-```typescript
-// The first window is the main app, subsequent ones are webviews
-const windows = electronApp.windows();
-const mainPage = windows[0];
-const webview = windows[1];  // The webview window
-
-// Now interact with the webview
-await webview.getByTestId("swap-amount-input").fill("0.01");
-```
-
-The `WebviewLogCollector` automatically captures console and network logs from all webviews for debugging.
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://playwright.dev/docs/api/class-electron">Playwright: Electron API</a> — full Electron testing reference</li>
-<li><a href="https://www.electronjs.org/docs/latest/">Electron: Official Documentation</a> — understanding the framework</li>
-<li><a href="https://www.electronjs.org/docs/latest/tutorial/process-model">Electron: Process Model</a> — main vs renderer process</li>
-<li><a href="https://playwright.dev/docs/api/class-electronapplication">Playwright: ElectronApplication class</a> — methods and properties</li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> Electron bundles Chromium + Node.js into a desktop app. Playwright controls it by launching the compiled webpack bundle with isolated userdata and environment variables. The <code>page</code> object represents the main window, <code>electronApp</code> represents the whole app. Feature flags, Speculos ports, and test configuration all flow through environment variables at launch time.
-</div>
-
-### 24.7 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Electron Testing</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> What does the <code>--user-data-dir</code> flag do when launching the Electron app?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Sets the directory where the app binary is located</button>
-<button class="quiz-choice" data-value="B">B) Isolates each test's persistent data (accounts, settings, app.json) in a unique directory</button>
-<button class="quiz-choice" data-value="C">C) Specifies where to download updates</button>
-<button class="quiz-choice" data-value="D">D) Sets the working directory for the test runner</button>
-</div>
-<p class="quiz-explanation">Each test gets a unique UUID directory under <code>tests/artifacts/userdata/</code>. The <code>--user-data-dir</code> flag tells Electron to read/write its persistent state (like <code>app.json</code>) from that directory, ensuring complete test isolation.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> What is the purpose of <code>DISABLE_TRANSACTION_BROADCAST: "1"</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Disables network access entirely</button>
-<button class="quiz-choice" data-value="B">B) Prevents the app from connecting to Speculos</button>
-<button class="quiz-choice" data-value="C">C) Prevents the app from broadcasting real cryptocurrency transactions to the blockchain</button>
-<button class="quiz-choice" data-value="D">D) Disables test result reporting</button>
-</div>
-<p class="quiz-explanation">Without this flag, send transaction tests would actually broadcast transactions and spend real cryptocurrency (from the test seed). This flag ensures the app goes through the entire transaction flow but stops before the final broadcast step.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> How does Playwright know the app is ready for testing?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It waits for <code>domcontentloaded</code> and then waits for <code>#loader-container</code> to be hidden</button>
-<button class="quiz-choice" data-value="B">B) It uses a fixed 5-second delay</button>
-<button class="quiz-choice" data-value="C">C) It checks if the Electron process is running</button>
-<button class="quiz-choice" data-value="D">D) It sends a health check HTTP request to the app</button>
-</div>
-<p class="quiz-explanation">The fixture first waits for the HTML to load (<code>domcontentloaded</code>), then waits for the loading splash screen (<code>#loader-container</code>) to disappear. Only after both conditions are met does the test begin.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> When do you need the <code>electronApp</code> object instead of just <code>page</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Always — <code>page</code> alone is never enough</button>
-<button class="quiz-choice" data-value="B">B) Only when clicking buttons</button>
-<button class="quiz-choice" data-value="C">C) Only for taking screenshots</button>
-<button class="quiz-choice" data-value="D">D) When you need to access webview windows (Swap, Earn, Buy) or close the app</button>
-</div>
-<p class="quiz-explanation"><code>page</code> is the main window and handles 99% of interactions. <code>electronApp</code> is needed to: access additional windows (webviews), evaluate code in the main Node.js process, and close the application.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What is the <code>FEATURE_FLAGS</code> environment variable?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) A list of Playwright test tags</button>
-<button class="quiz-choice" data-value="B">B) A JSON string controlling which app features are enabled — merged from defaults, env overrides, and test-specific overrides</button>
-<button class="quiz-choice" data-value="C">C) The Firebase project configuration</button>
-<button class="quiz-choice" data-value="D">D) A comma-separated list of test file names to run</button>
-</div>
-<p class="quiz-explanation">Feature flags are JSON objects like <code>{"lldModularDrawer": {"enabled": true, "params": {...}}}</code>. They are merged from three sources: ENV (<code>E2E_FEATURE_FLAGS_JSON</code>), default flags in <code>common.ts</code>, and test-specific overrides via <code>test.use({ featureFlags: ... })</code>.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Speculos -- Device Emulation Mastery
-
-<div class="chapter-intro">
-As you learned in Chapter 10, Speculos is a QEMU-based emulator that runs Ledger device apps on your computer. In this chapter, we go inside the code that manages Speculos during test execution: how the fixture launches Docker containers, how the REST API is used programmatically, how the <code>SpeculosFixtureHandle</code> pattern works, and how to debug common issues. After this chapter, you will understand exactly what happens between "test starts" and "device is ready."
-</div>
-
-### 25.1 How Speculos Works (Quick Recap)
-
-Speculos emulates the ARM processor of a Ledger device using QEMU. It loads the actual `.elf` binary of a Nano app (Bitcoin, Ethereum, etc.) and runs it in a sandboxed environment. It exposes:
-
-- A **REST API** (default port 5000) for button presses, screenshots, APDU commands
-- A **TCP server** (default port 9999) for raw APDU communication
-- A **web UI** at `http://localhost:5000` for visual debugging
-
-In E2E tests, Speculos runs inside a **Docker container**. Each test gets its own container on a unique port.
-
-### 25.2 The Speculos Fixture in `common.ts`
-
-The `speculos` fixture in `common.ts` orchestrates the entire device lifecycle:
-
-```typescript
-speculos: async ({ speculosApp, cliCommands, userdataDestinationPath, cliCommandsOnApp }, use, testInfo) => {
-  let currentDevice: SpeculosDevice | undefined;
-
-  const handle: SpeculosFixtureHandle = {
-    // Getter that throws if no device exists
-    get current(): SpeculosDevice {
-      if (!currentDevice) throw new Error("No device (missing speculosApp?)");
-      return currentDevice;
-    },
-    // Method to stop current device and start a new one
-    relaunch: async (appName: string) => {
-      currentDevice = await launchSpeculos(appName, testInfo.title, currentDevice);
-      return currentDevice;
-    },
-  };
-
-  try {
-    // 1. If cliCommandsOnApp exists, launch temporary Speculos for CLI commands
-    if (cliCommandsOnApp?.length) {
-      for (const { app, cmd } of cliCommandsOnApp) {
-        currentDevice = await launchSpeculos(app.name, testInfo.title);
-        await executeCliCommand(cmd, userdataDestinationPath);
-        await cleanSpeculos(currentDevice);
-      }
-    }
-
-    // 2. Launch the main Speculos device
-    if (speculosApp) {
-      currentDevice = await launchSpeculos(speculosApp.name, testInfo.title);
-
-      // 3. Execute CLI commands to populate test data
-      if (cliCommands?.length) {
-        for (const cmd of cliCommands) {
-          await executeCliCommand(cmd, userdataDestinationPath);
-        }
-      }
-    }
-
-    // 4. Provide the handle to the test
-    await use(handle);
-
-  } finally {
-    // 5. Cleanup: stop the Docker container
-    if (currentDevice) await cleanSpeculos(currentDevice);
-  }
-},
-```
-
-**The flow:**
-1. If `cliCommandsOnApp` is set — launch temporary Speculos instances for data preparation, run CLI commands, then stop them
-2. Launch the main Speculos instance with the app specified in `speculosApp`
-3. Run any `cliCommands` to populate test data (accounts, balances)
-4. Hand the device handle to the test
-5. After the test, clean up the Docker container
-
-### 25.3 `speculosUtils.ts` — Launch and Cleanup
-
-```typescript
-export async function launchSpeculos(appName, testTitle?, previousDevice?) {
-  // Stop any previous device
-  if (previousDevice) await cleanSpeculos(previousDevice);
-
-  // Start a new Speculos container
-  const device = await startSpeculos(
-    testTitle ?? "cli_speculos",
-    specs[appName.replace(/ /g, "_")],
-    previousDevice?.port,
-  );
-
-  // For remote Speculos (CI): wait for the container to be ready
-  if (process.env.REMOTE_SPECULOS === "true") {
-    await waitForSpeculosReady(device.id);
-  }
-
-  // Register the Speculos port so the app can find the device
-  setEnv("SPECULOS_API_PORT", device.port);
-  CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());
-
-  // Add device info to Allure report
-  await allure.description("SPECULOS\nApp: " + device.appName + " (" + device.appVersion + ")");
-
-  return device;
-}
-
-export async function cleanSpeculos(speculos) {
-  // Stop the Docker container
-  await stopSpeculos(speculos.id);
-  // Unregister the transport module
-  unregisterTransportModule("speculos-http-" + String(speculos.port));
-}
-```
-
-### 25.4 The `SpeculosDevice` Object
-
-When a Speculos container starts, you get a `SpeculosDevice`:
-
-```typescript
-type SpeculosDevice = {
-  id: string;              // Docker container ID
-  port: number;            // REST API port (random, e.g., 5023)
-  appName: string;         // "Bitcoin", "Ethereum", etc.
-  appVersion: string;      // "2.1.0"
-  dependencies?: Array<{   // Side-loaded apps (e.g., for swaps)
-    name: string;
-    appVersion: string;
-  }>;
-};
-```
-
-The `port` is randomly assigned to enable parallel execution. No two tests share the same port.
-
-### 25.5 Supported Devices
-
-The `SPECULOS_DEVICE` environment variable selects which device model to emulate:
-
-| Value | Device Model | Screen Type |
-|-------|-------------|-------------|
-| `nanoSP` | Nano S Plus | Small OLED, 2 buttons |
-| `nanoX` | Nano X | Small OLED, 2 buttons |
-| `stax` | Stax | Touch screen |
-| `flex` | Flex | Touch screen |
-| `nanoGen5` | Nano Gen 5 | Next-gen Nano |
-
-Device tags in tests (`@NanoSP`, `@NanoX`, `@Stax`, etc.) indicate which devices a test supports. In CI, the matrix runs each device model.
-
-### 25.6 The Speculos REST API
-
-Even though the E2E tests interact with Speculos through the live-common library (not direct HTTP calls), understanding the REST API helps with debugging:
-
-```bash
-# Take a screenshot of the device display
-curl http://localhost:5023/screenshot -o device.png
-
-# Press the right button (navigate right on Nano)
-curl -d '{"action":"press-and-release"}' http://localhost:5023/button/right
-
-# Press both buttons (confirm on Nano)
-curl -d '{"action":"press-and-release"}' http://localhost:5023/button/both
-
-# Touch the screen at (x, y) — for Stax/Flex
-curl -d '{"action":"press-and-release","x":200,"y":300}' http://localhost:5023/finger
-
-# Send an APDU command (raw device protocol)
-curl -d '{"data":"e0c4000000"}' http://localhost:5023/apdu
-
-# Get the current screen text (for debugging)
-curl http://localhost:5023/events
-```
-
-### 25.7 Environment Variables for Speculos
-
-```bash
-# REQUIRED — set these before running tests
-export MOCK=0                    # Disable mocks, use real Speculos
-export SPECULOS_DEVICE=nanoSP    # Which device to emulate
-export SEED="your test seed"     # Recovery phrase (get from QAA team)
-export COINAPPS="/path/to/coin-apps"   # Repository with .elf binaries
-export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:master  # Docker image
-
-# OPTIONAL — usually managed by fixtures
-export SPECULOS_API_PORT=5023    # Auto-assigned by fixtures
-export SPECULOS_ADDRESS=http://localhost  # Speculos host
-export REMOTE_SPECULOS=true      # Use remote Speculos (CI)
-```
-
-### 25.8 Debugging Speculos Issues
-
-**"No Speculos device" or container timeout:**
-```bash
-# Check if Docker is running
-docker ps
-
-# Check for lingering containers from failed tests
-docker ps -a | grep speculos
-
-# Remove stuck containers
-docker rm -f $(docker ps -a -q --filter ancestor=ghcr.io/ledgerhq/speculos:master)
-```
-
-**"App not found" error:**
-```bash
-# Update your coin-apps repository
-cd $COINAPPS
-git pull origin develop
-```
-
-**Port conflicts:**
-```bash
-# Check what is using a port
-lsof -i :5000
-# Kill the process
-kill -9 <PID>
-```
-
-**View device screen during test:**
-Open `http://localhost:<port>` in your browser while the test is running (replace `<port>` with the Speculos port from the console output).
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://github.com/LedgerHQ/speculos">Speculos: GitHub Repository</a> — source code and documentation</li>
-<li><a href="https://github.com/LedgerHQ/speculos/blob/master/docs/user/api.md">Speculos: REST API Reference</a> — all endpoints</li>
-<li><a href="https://github.com/LedgerHQ/speculos/blob/master/docs/user/docker.md">Speculos: Docker Guide</a> — container setup</li>
-<li><a href="https://github.com/LedgerHQ/speculos/blob/master/docs/user/usage.md">Speculos: Command-Line Usage</a> — CLI options and models</li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> Speculos runs Ledger device apps in Docker containers, each on a unique port for parallel execution. The fixture system orchestrates the entire lifecycle: launch container, populate data via CLI, hand the device to the test, clean up after. When debugging, check Docker first (<code>docker ps</code>), then environment variables, then coin-apps freshness. See <strong>Appendix E: Troubleshooting FAQ</strong> for a complete list of common issues and fixes.
-</div>
-
-### 25.9 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Speculos Mastery</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> Why does each Speculos container get a random port number?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) For security — random ports are harder to attack</button>
-<button class="quiz-choice" data-value="B">B) To enable parallel execution — multiple test workers run simultaneously, each needing its own isolated Speculos instance</button>
-<button class="quiz-choice" data-value="C">C) Speculos requires random ports by design</button>
-<button class="quiz-choice" data-value="D">D) To avoid conflicts with the Ledger Live app's default port</button>
-</div>
-<p class="quiz-explanation">With <code>fullyParallel: true</code> and <code>workers: "100%"</code>, many tests run at the same time. Each gets its own Docker container on a unique port, preventing port conflicts.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q2.</strong> What is the purpose of <code>cliCommandsOnApp</code> in the fixture?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It launches temporary Speculos instances to run CLI commands (like data population) before the main test device starts</button>
-<button class="quiz-choice" data-value="B">B) It runs Playwright commands before the Electron app launches</button>
-<button class="quiz-choice" data-value="C">C) It installs npm packages needed by the test</button>
-<button class="quiz-choice" data-value="D">D) It configures feature flags via the command line</button>
-</div>
-<p class="quiz-explanation"><code>cliCommandsOnApp</code> is used when you need to run CLI commands against a different Speculos app than the test's main app. For example, a swap test might need to populate data for both the source and destination currencies using different Speculos instances.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> What should you check FIRST when Speculos fails to start?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The Playwright configuration file</button>
-<button class="quiz-choice" data-value="B">B) The test source code</button>
-<button class="quiz-choice" data-value="C">C) The Allure report</button>
-<button class="quiz-choice" data-value="D">D) Docker — is it running? Are there stuck containers from previous test runs?</button>
-</div>
-<p class="quiz-explanation">The #1 cause of Speculos failures is Docker issues: Docker Desktop not running, stuck containers from interrupted tests, or port conflicts. Always check <code>docker ps -a</code> first.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> What does <code>MOCK=0</code> do?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Enables mock data for faster tests</button>
-<button class="quiz-choice" data-value="B">B) Disables all network requests</button>
-<button class="quiz-choice" data-value="C">C) Disables mocked device responses so the app talks to a real Speculos emulator instead</button>
-<button class="quiz-choice" data-value="D">D) Turns off test assertions</button>
-</div>
-<p class="quiz-explanation"><code>MOCK=0</code> tells the Ledger Live app to NOT use mock device responses. Instead, it communicates with the actual Speculos emulator via the port specified in <code>SPECULOS_API_PORT</code>. This is required for Speculos-based E2E tests.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> What is the <code>SpeculosFixtureHandle</code> and why does it have a <code>relaunch()</code> method?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is a mutable wrapper around the current device. <code>relaunch()</code> allows a test to switch to a different Speculos app mid-test (e.g., for swap tests that need two different currency apps)</button>
-<button class="quiz-choice" data-value="B">B) It is a Playwright page object for device interaction</button>
-<button class="quiz-choice" data-value="C">C) It is a Docker container management utility</button>
-<button class="quiz-choice" data-value="D">D) It is used only for retry logic when Speculos crashes</button>
-</div>
-<p class="quiz-explanation">The <code>SpeculosFixtureHandle</code> wraps the current device with a <code>current</code> getter and a <code>relaunch()</code> method. The <code>relaunch()</code> method stops the current container and starts a new one with a different app — essential for tests that need multiple device apps (like swaps).</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Allure & Xray -- Test Reporting
-
-<div class="chapter-intro">
-Tests are only useful if their results are readable. Allure is the reporting framework that turns raw test output into interactive HTML reports with steps, screenshots, videos, and links to Jira. This chapter traces the entire pipeline: from <code>@step</code> decorators in code to the final Allure report you read in the browser, including the custom Xray JSON reporter that syncs results to Jira.
-</div>
-
-### 26.1 The Reporting Pipeline
-
-```
-Your Code                  Playwright                   Files                      Reports
-─────────                  ──────────                   ─────                      ───────
-@step decorators    →  test.step() calls          →  allure-results/*.json    →  allure-report/index.html
-addTmsLink()        →  allure.tms() metadata      →  allure-results/*.json    →  Clickable Jira links
-captureArtifacts()  →  testInfo.attach()          →  allure-results/*.png     →  Embedded screenshots
-                                                                                 
-customJsonReporter  →  onTestEnd() / onExit()     →  xray-report.json        →  Jira/Xray import
-```
-
-### 26.2 The `@step` Chain in Practice
-
-When you write:
-```typescript
-@step("Click add account button")
-async clickAddAccountButton() {
-  const selector = (await isWallet40Enabled(this.page))
-    ? this.portfolioAddAccountButton
-    : this.addAccountButton;
-  await selector.click();
-}
-```
-
-The execution chain is:
-1. The decorator wraps the method in `test.step("Click add account button", () => ...)`
-2. Playwright records the step start time and name
-3. The method body executes
-4. Playwright records the step end time and status (pass/fail)
-5. The `allure-playwright` reporter writes this as a step in the Allure JSON
-6. When you generate the report, this step appears in the test's step tree
-
-In the Allure report, you see a collapsible hierarchy:
-```
-✓ [Bitcoin] Add account (12.3s)
-  ├── Click add account button (0.8s)
-  ├── Select asset by ticker (1.2s)
-  ├── Select network (0.5s)
-  ├── Select first account (3.1s)
-  ├── Click close button (0.3s)
-  ├── Wait for balance to be visible (2.4s)
-  └── Expect accounts persisted in app.json (4.0s)
-```
-
-### 26.3 Artifact Capture on Failure
-
-When a test fails, `captureArtifacts()` collects debugging evidence:
-
-```typescript
-export async function captureArtifacts(page, testInfo, electronApp, takeSpeculosScreenshot, webviewCollector) {
-  // 1. Desktop screenshot
-  const screenshot = await page.screenshot();
-  await testInfo.attach("Screenshot", { body: screenshot, contentType: "image/png" });
-
-  // 2. Speculos device screenshots (what the emulated device screen shows)
-  if (takeSpeculosScreenshot) {
-    await attachSpeculosScreenshots(testInfo);  // Single image or HTML gallery
-  }
-
-  // 3. Test execution logs (on last retry only)
-  if (isLastRetry(testInfo)) {
-    await page.evaluate(filePath => window.saveLogs(filePath), filePath);
-    await testInfo.attach("Test logs", { path: filePath, contentType: "application/json" });
-    await attachIfExists(testInfo, "Network failures", "network.log", "text/plain");
-  }
-
-  // 4. Webview logs (for Swap/Earn/Buy debugging)
-  if (webviewCollector) {
-    await testInfo.attach("Webview Console Logs", { body: webviewCollector.getFormattedConsoleLogs(), ... });
-    await testInfo.attach("Webview Network Logs", { body: webviewCollector.getFormattedNetworkLogs(), ... });
-  }
-
-  // 5. Video recording (on last retry only)
-  const video = page.video();
-  if (video) {
-    await electronApp.close();
-    const videoData = await readFileAsync(await video.path());
-    await testInfo.attach("Test Video", { body: videoData, contentType: "video/webm" });
-  }
-}
-```
-
-### 26.4 TMS Links and Bug Links
-
-**Linking tests to Jira/Xray:**
-
-```typescript
-// In the test definition
-annotation: { type: "TMS", description: "B2CQA-2499, B2CQA-2644" },
-
-// Inside the test body
-await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-```
-
-This creates clickable links in the Allure report. The URL template in `playwright.config.ts` turns `B2CQA-2499` into `https://ledgerhq.atlassian.net/browse/B2CQA-2499`.
-
-**Bug links work the same way:**
-```typescript
-await addBugLink(["LIVE-12345"]);  // Links to a known bug ticket
-```
-
-### 26.5 Team Ownership
-
-```typescript
-test.use({ teamOwner: Team.WALLET_XP });
-
-// This calls:
-export async function addTeamOwner(team: Team) {
-  await allure.owner(team.toString());       // Sets the owner in report
-  await allure.parentSuite(team.toString()); // Groups tests by team
-  await allure.feature(team.toString());     // Categorizes in features view
-}
-```
-
-Teams: `WALLET_XP`, `QAA`, `SWAP`, `EARN`, `MARKET`, etc. In the Allure report, you can filter by team to see only your team's tests.
-
-### 26.6 Reading an Allure Report
-
-Generate and open the report:
-```bash
-cd e2e/desktop
-pnpm run allure:generate
-pnpm run allure:open
-# Or simply:
-allure serve allure-results
-```
-
-**The five views:**
-
-| View | What it shows | When to use it |
-|------|--------------|----------------|
-| **Overview** | Pass/fail summary, duration, severity | Quick health check |
-| **Suites** | Tests grouped by describe blocks | Find your test |
-| **Graphs** | Charts of pass/fail/broken/skipped | Trend analysis |
-| **Timeline** | When each test ran (parallel view) | Identify bottlenecks |
-| **Categories** | Failures grouped by error type | Find systematic issues |
-
-**Drilling into a failure:**
-1. Click the failed test in Suites view
-2. Read the **step trace** — which step failed?
-3. Check the **Screenshot** — what was on screen?
-4. Check the **Speculos Screenshot** — what was on the device?
-5. Watch the **Video** — replay the entire test
-6. Read **Network failures** — any 4xx/5xx errors?
-7. Read **Webview Console Logs** — any JavaScript errors in webviews?
-
-### 26.7 The Xray Custom Reporter
-
-The `customJsonReporter.ts` generates a JSON file that maps test results to Xray test cases:
-
-```typescript
-class JsonReporter implements Reporter {
-  onTestEnd(test, result) {
-    // Parse TMS annotations to get Xray ticket IDs
-    const tmsIds = getDescription(test.annotations, "TMS").split(", ");
-    // Map pass/fail to Xray status
-    for (const id of tmsIds) {
-      this.results.push({
-        testKey: id,
-        status: result.status === "passed" ? "PASSED" : "FAILED",
-      });
-    }
-  }
-
-  onExit() {
-    // Write xray-report.json for Jira import
-    writeFileSync("xray-report.json", JSON.stringify({
-      testExecutionKey: process.env.TEST_EXECUTION,
-      tests: this.results,
-    }));
-  }
-}
-```
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://allurereport.org/docs/playwright/">Allure: Playwright Integration</a> — official setup guide</li>
-<li><a href="https://allurereport.org/docs/how-it-works/">Allure: How It Works</a> — architecture overview</li>
-<li><a href="https://docs.getxray.app/display/XRAY/Import+Execution+Results">Xray: Import Results</a> — Jira integration</li>
-<li><a href="https://playwright.dev/docs/test-reporters">Playwright: Custom Reporters</a> — Reporter interface</li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> Allure turns <code>@step</code> decorators and <code>testInfo.attach()</code> calls into rich HTML reports with hierarchical steps, screenshots, videos, and Jira links. When a test fails, the Allure report is your forensic toolkit: step trace → screenshot → device screenshot → video → logs. The Xray reporter syncs results to Jira automatically.
-</div>
-
-### 26.8 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Allure & Xray Reporting</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> What does <code>addTmsLink(["B2CQA-2499"])</code> do?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Sends the test result to Jira immediately</button>
-<button class="quiz-choice" data-value="B">B) Creates a new Jira ticket</button>
-<button class="quiz-choice" data-value="C">C) Creates a clickable link in the Allure report that points to the Jira ticket <code>B2CQA-2499</code></button>
-<button class="quiz-choice" data-value="D">D) Tags the test with a device model</button>
-</div>
-<p class="quiz-explanation"><code>addTmsLink()</code> calls <code>allure.tms(id)</code> which creates a TMS (Test Management System) link in the report. The URL template in <code>playwright.config.ts</code> generates the full Jira URL.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> When investigating a test failure in Allure, what is the recommended debugging order?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Video → Screenshot → Code</button>
-<button class="quiz-choice" data-value="B">B) Step trace (which step failed?) → Screenshot → Speculos screenshot → Video → Network logs</button>
-<button class="quiz-choice" data-value="C">C) Network logs → Video → Screenshot</button>
-<button class="quiz-choice" data-value="D">D) Re-run the test immediately without reading the report</button>
-</div>
-<p class="quiz-explanation">Start with the step trace to identify WHERE the failure occurred. Then check screenshots (desktop and device) to see what was visible. Use video for complex interactions. Check network logs for API failures. This order goes from fastest to most detailed.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> Why is video only captured on the last retry?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) To save disk space — video files are large, and failed tests that pass on retry don't need video from earlier attempts</button>
-<button class="quiz-choice" data-value="B">B) Because Playwright cannot record video during retries</button>
-<button class="quiz-choice" data-value="C">C) Video is only available in CI environments</button>
-<button class="quiz-choice" data-value="D">D) The first retry is always too fast for video</button>
-</div>
-<p class="quiz-explanation">Recording produces large files. The <code>isLastRetry()</code> check ensures video is only captured on the final attempt — the one whose result will actually be reported. Earlier retries that fail don't need video since the test will be re-attempted.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> What does <code>teamOwner: Team.WALLET_XP</code> affect in the report?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Which Speculos device is used</button>
-<button class="quiz-choice" data-value="B">B) The test's retry count</button>
-<button class="quiz-choice" data-value="C">C) Which feature flags are enabled</button>
-<button class="quiz-choice" data-value="D">D) The test's owner, parent suite, and feature in Allure — allowing filtering by team</button>
-</div>
-<p class="quiz-explanation"><code>addTeamOwner()</code> sets three Allure metadata fields: <code>owner</code>, <code>parentSuite</code>, and <code>feature</code>. This allows filtering the report to show only one team's tests.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What is the purpose of <code>customJsonReporter.ts</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It generates the Allure HTML report</button>
-<button class="quiz-choice" data-value="B">B) It generates a <code>xray-report.json</code> file that maps test results to Xray/Jira ticket IDs for automated import</button>
-<button class="quiz-choice" data-value="C">C) It sends Slack notifications</button>
-<button class="quiz-choice" data-value="D">D) It captures screenshots on failure</button>
-</div>
-<p class="quiz-explanation">The custom reporter implements Playwright's <code>Reporter</code> interface. In <code>onTestEnd()</code>, it reads TMS annotations and maps them to pass/fail. In <code>onExit()</code>, it writes the JSON file that Xray can import to update test execution results in Jira.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Codebase Deep Dive -- Every File Explained
-
-<div class="chapter-intro">
-This is your reference chapter. It catalogs every file in <code>e2e/desktop/tests/</code> with its purpose and how it connects to the rest of the suite. Keep this chapter open when you encounter an unfamiliar file — it will tell you what it does, why it exists, and where to look next.
-</div>
-
-### 27.1 Configuration Files
-
-| File | Purpose |
-|------|---------|
-| `playwright.config.ts` | Test runner configuration (covered in Ch 22.6) |
-| `tsconfig.json` | TypeScript config. Maps `~/*` to the desktop app source for type-checking |
-| `package.json` | Dependencies and scripts: `test:playwright`, `allure:generate`, `lint`, `typecheck` |
-| `.oxlintrc.json` | Linting rules for code quality |
-
-### 27.2 The Fixture File
-
-| File | Purpose |
-|------|---------|
-| `tests/fixtures/common.ts` | **The most important file.** Defines all test fixtures (covered in Ch 23.2-23.4) |
-
-### 27.3 Page Objects — The Class Hierarchy
-
-| File | Class | Extends | Purpose |
-|------|-------|---------|---------|
-| `page/abstractClasses.ts` | `PageHolder` | — | Base: holds `page` and optional `electronApp` |
-| | `Component` | `PageHolder` | Adds shared UI: `loadingSpinner`, `toaster`, `dropdownOptions` |
-| | `AppPage` | `Component` | Abstract base for all concrete page objects |
-| `page/index.ts` | `Application` | `PageHolder` | Hub: aggregates all 30+ page objects into `app.*` |
-
-### 27.4 Main Page Objects
-
-| File | Class | Purpose | Key Methods |
-|------|-------|---------|------------|
-| `page/portfolio.page.ts` | `PortfolioPage` | Dashboard screen | `clickAddAccountButton()`, `expectBalanceVisibility()`, `checkOperationHistory()`, `expectAccountsPersistedInAppJson()` |
-| `page/account.page.ts` | `AccountPage` | Single account detail | `clickSend()`, `clickReceive()`, `expectAccountBalance()`, `expectLastOperationsVisibility()`, `clickOnLastOperationAndReturnStatus()` |
-| `page/accounts.page.ts` | `AccountsPage` | Accounts list | `navigateToAccountByName()`, `countAccounts()`, `showParentAccountTokens()` |
-| `page/settings.page.ts` | `SettingsPage` | Settings screen | `goToAccountsTab()`, `clickHideEmptyTokenAccountsToggle()`, `changeLanguage()`, `clearCache()` |
-| `page/market.page.ts` | `MarketPage` | Market/prices | Market data and navigation |
-| `page/onboarding.page.ts` | `OnboardingPage` | First launch | `waitForLaunch()` |
-| `page/mainNavigation.page.ts` | `MainNavigationPage` | Top-level nav | `openTargetFromMainNavigation()`, `openSettings()` |
-| `page/speculos.page.ts` | `SpeculosPage` | Device control | `signSendTransaction()`, `expectValidAddressDevice()`, `shareViewKey()` |
-| `page/swap.page.ts` | `SwapPage` | Swap/exchange | Webview-based, complex flow orchestration |
-| `page/earn.dashboard.page.ts` | `EarnPage` | Earn/staking v1 | Provider navigation |
-| `page/earn.v2.dashboard.page.ts` | `EarnV2Page` | Earn/staking v2 | New earn UI |
-| `page/buyAndSell.page.ts` | `BuyAndSellPage` | Buy/Sell | External provider integration |
-| `page/liveApp.page.ts` | `LiveApp` | Discover/marketplace | App launching |
-| `page/lockscreen.page.ts` | `LockscreenPage` | Lock screen | `login()`, `checkInputErrorVisibility()` |
-
-### 27.5 Component Classes
-
-| File | Class | Purpose |
-|------|-------|---------|
-| `component/layout.component.ts` | `Layout` | Sidebar buttons (Portfolio, Market, Accounts, etc.) and topbar buttons (Sync, Settings, Notifications) |
-| `component/drawer.component.ts` | `Drawer` | Generic side panel: `waitForDrawerToBeVisible()`, `closeDrawer()`, `selectAccountByName()` |
-| `component/modal.component.ts` | `Modal` | Generic modal: `continue()`, `close()`, `toggleMaxAmount()`, `scrollUntilOptionIsDisplayed()` |
-| `component/dialog.component.ts` | `Dialog` | Generic modular dialog |
-
-### 27.6 Modal, Drawer, and Dialog Objects
-
-**Modals** (overlay windows):
-
-| File | Class | Purpose |
-|------|-------|---------|
-| `modal/add.account.modal.ts` | `AddAccountModal` | Account creation (legacy flow) |
-| `modal/send.modal.ts` | `SendModal` | Send transaction |
-| `modal/new.send.modal.ts` | `NewSendModal` | Send transaction (Wallet 4.0) |
-| `modal/receive.modal.ts` | `ReceiveModal` | Receive address display |
-| `modal/delegate.modal.ts` | `DelegateModal` | Staking delegation |
-| `modal/settings.modal.ts` | `SettingsModal` | App settings |
-| `modal/passwordlock.modal.ts` | `PasswordlockModal` | Password setup/login |
-| `modal/private.balance.modal.ts` | `PrivateBalanceModal` | Privacy feature |
-
-**Drawers** (side panels):
-
-| File | Class | Purpose |
-|------|-------|---------|
-| `drawer/send.drawer.ts` | `SendDrawer` | Send confirmation details |
-| `drawer/operation.drawer.ts` | `OperationDrawer` | Transaction details |
-| `drawer/asset.drawer.ts` | `AssetDrawer` | Asset information |
-| `drawer/delegate.drawer.ts` | `DelegateDrawer` | Delegation details |
-| `drawer/swap.confirmation.drawer.ts` | `SwapConfirmationDrawer` | Swap verification |
-| `drawer/ledger.sync.drawer.ts` | `LedgerSyncDrawer` | Cloud sync |
-| `drawer/modular.scan.accounts.drawer.ts` | `ModularScanAccountsDrawer` | Device account scanning |
-| `drawer/choose.asset.drawer.ts` | `ChooseAssetDrawer` | Multi-asset selection |
-
-**Dialogs** (new modular UI):
-
-| File | Class | Purpose |
-|------|-------|---------|
-| `dialog/modular.dialog.ts` | `ModularDialog` | Routes to asset/network/account dialogs |
-| `dialog/modular.asset.dialog.ts` | `ModularAssetDialog` | Asset selection in new UI |
-| `dialog/modular.network.dialog.ts` | `ModularNetworkDialog` | Network selection in new UI |
-| `dialog/modular.account.dialog.ts` | `ModularAccountDialog` | Account selection in new UI |
-| `dialog/fearGreed.dialog.ts` | `FearAndGreedDialog` | Market sentiment |
-
-### 27.7 Utility Files
-
-| File | Purpose |
-|------|---------|
-| `utils/allureUtils.ts` | Allure helpers: `addTmsLink()`, `captureArtifacts()`, `addTeamOwner()` |
-| `utils/speculosUtils.ts` | `launchSpeculos()`, `cleanSpeculos()` |
-| `utils/electronUtils.ts` | `launchApp()` — Electron launch configuration |
-| `utils/featureFlagUtils.ts` | `isWallet40Enabled()`, flag presets |
-| `utils/featureFlagsJsonUtils.ts` | `parseExtraFeatureFlags()` — parse `E2E_FEATURE_FLAGS_JSON` |
-| `utils/cliUtils.ts` | `CLI.getAddress()`, `CLI.liveData()`, `CLI.tokenApproval()` |
-| `utils/customJsonReporter.ts` | Xray JSON report generation |
-| `utils/global.setup.ts` | Runs once before all tests: clean artifacts, get firmware version |
-| `utils/global.teardown.ts` | Runs once after all tests (CI): extract feature flags to env properties |
-| `utils/redux.ts` | `listenToReduxActions()`, `waitForReduxAction()` — state tracking |
-| `utils/userdata.ts` | `getUserdata()`, `waitForAccountsPersisted()` — app.json polling |
-| `utils/fileUtils.ts` | `safeAppendFile()`, `waitForFileToExist()`, file operations |
-| `utils/modularSelectorUtils.ts` | `getModularSelector()` — detects modular vs legacy UI |
-| `utils/networkLogging.ts` | `attachNetworkLogging()` — captures request failures |
-| `utils/webviewLogCollector.ts` | Collects console and network logs from webviews |
-| `utils/swapUtils.ts` | Swap test orchestration helpers |
-| `utils/waitFor.ts` | Custom wait helpers |
-| `utils/testInfoUtils.ts` | `isLastRetry()` and TestInfo helpers |
-
-### 27.8 Userdata JSON Files
-
-These are pre-configured app states that bypass setup steps:
-
-| File | State | Use When |
-|------|-------|----------|
-| `skip-onboarding.json` | Onboarding complete, no accounts | Testing account creation flows |
-| `skip-onboarding-with-last-seen-device.json` | Onboarding complete, device remembered | Most tests — skips device pairing |
-| `1AccountBTC1AccountETH.json` | Has 1 BTC + 1 ETH account | Testing with existing portfolio |
-| `1AccountDOT.json` | Has 1 Polkadot account | Polkadot-specific tests |
-| `speculos-tests-app.json` | Full Speculos test suite data | Complex multi-account tests |
-| `speculos-subAccount.json` | Parent + token accounts | Token/sub-account tests |
-| `erc20-0-balance.json` | ERC20 tokens with 0 balance | Token visibility tests |
-| `portfolioWithManyStablecoins.json` | Many stablecoin accounts | Performance/pagination tests |
-| `swap-history.json` | Pre-populated swap history | Swap history display tests |
-
-### 27.9 Test Data Enums (from `@ledgerhq/live-common`)
-
-| Enum | Location | Purpose |
-|------|----------|---------|
-| `Currency` | `live-common/e2e/enum/Currency` | Cryptocurrency definitions with `speculosApp`, `ticker`, `id`, `name` |
-| `Account` | `live-common/e2e/enum/Account` | Pre-defined accounts with addresses and currency references |
-| `AppInfos` | `live-common/e2e/enum/AppInfos` | Speculos app names and versions |
-| `Team` | `live-common/e2e/enum/Team` | Team names for Allure ownership |
-| `Device` | `live-common/e2e/enum/Device` | Device model identifiers |
-| `Fee` | `live-common/e2e/enum/Fee` | Fee strategies: SLOW, MEDIUM, FAST |
-
-### 27.10 The Modular Dialog System
-
-The codebase supports both **legacy** and **new modular** UI flows. The `getModularSelector()` function detects which is active:
-
-```typescript
-// From modularSelectorUtils.ts
-export async function getModularSelector(app, type: "ASSET" | "ACCOUNT") {
-  try {
-    // Wait up to 5 seconds for the modular dialog to appear
-    await app.modularDialog.waitForDialogToBeVisible(type, 5000);
-    return app.modularDialog;  // New UI is active
-  } catch {
-    return null;  // Fall back to legacy UI
-  }
-}
-```
-
-In tests, this creates a dual-path pattern:
-
-```typescript
-const selector = await getModularSelector(app, "ASSET");
-if (selector) {
-  // New modular flow
-  await selector.selectAssetByTicker(Currency.BTC);
-  await selector.selectNetwork(Currency.BTC);
-} else {
-  // Legacy modal flow
-  await app.addAccount.selectCurrency(Currency.BTC);
-}
-```
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> This chapter is your map. When you encounter an unfamiliar file, check the tables above to understand its role. The codebase has three layers: <strong>page objects</strong> (50+ files that encapsulate UI interactions), <strong>test specs</strong> (26 files that define test scenarios), and <strong>utilities</strong> (20+ files that handle infrastructure). The modular dialog system adds a dual-path pattern you will see in many tests.
-</div>
-
-### 27.11 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Codebase Deep Dive</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q1.</strong> What is the difference between <code>Modal</code>, <code>Drawer</code>, and <code>Dialog</code> in the codebase?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>Modal</code> is a centered overlay window, <code>Drawer</code> is a side panel that slides in, <code>Dialog</code> is the new modular UI system</button>
-<button class="quiz-choice" data-value="B">B) They are all the same thing with different names</button>
-<button class="quiz-choice" data-value="C">C) <code>Modal</code> is for errors, <code>Drawer</code> is for forms, <code>Dialog</code> is for confirmations</button>
-<button class="quiz-choice" data-value="D">D) <code>Modal</code> is legacy, <code>Drawer</code> and <code>Dialog</code> are the same new UI</button>
-</div>
-<p class="quiz-explanation">The three types represent different UI patterns: Modals are centered overlays (e.g., Add Account), Drawers slide in from the side (e.g., Operation details), and Dialogs are the newest modular UI system that replaces some legacy flows.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q2.</strong> What does <code>getModularSelector()</code> return when the new modular UI is NOT active?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) An error is thrown</button>
-<button class="quiz-choice" data-value="B">B) An empty object</button>
-<button class="quiz-choice" data-value="C">C) The legacy modal instance</button>
-<button class="quiz-choice" data-value="D">D) <code>null</code> — the test then uses the legacy flow</button>
-</div>
-<p class="quiz-explanation"><code>getModularSelector()</code> waits up to 5 seconds for the modular dialog. If it does not appear, it returns <code>null</code>, signaling the test to use the legacy modal flow. This creates the <code>if (selector) { ... } else { ... }</code> pattern.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q3.</strong> What is the purpose of the <code>skip-onboarding-with-last-seen-device.json</code> userdata file?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It creates a test account with Bitcoin</button>
-<button class="quiz-choice" data-value="B">B) It installs the Speculos app</button>
-<button class="quiz-choice" data-value="C">C) It provides pre-configured app state where onboarding is complete and the app remembers the last connected device</button>
-<button class="quiz-choice" data-value="D">D) It sets feature flags for the test</button>
-</div>
-<p class="quiz-explanation">Userdata files are Redux state snapshots. <code>skip-onboarding-with-last-seen-device</code> has <code>hasCompletedOnboarding: true</code> and remembers the last device. This is the most commonly used userdata because it skips the onboarding flow and device pairing, going straight to the portfolio.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q4.</strong> Which page objects receive <code>electronApp</code> in addition to <code>page</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) All page objects receive both</button>
-<button class="quiz-choice" data-value="B">B) Only those that need webview access: <code>SwapPage</code>, <code>BuyAndSellPage</code>, <code>EarnPage</code>, <code>EarnV2Page</code></button>
-<button class="quiz-choice" data-value="C">C) Only <code>SpeculosPage</code></button>
-<button class="quiz-choice" data-value="D">D) None — all use only <code>page</code></button>
-</div>
-<p class="quiz-explanation">In <code>page/index.ts</code>, most page objects are created with <code>new XxxPage(this.page)</code>. But Swap, Buy/Sell, and Earn need <code>new XxxPage(this.page, this.electronApp)</code> because they interact with webview windows, which require access to the ElectronApplication to get additional windows.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> Where do the <code>Currency</code>, <code>Account</code>, and <code>Team</code> enums live?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) In <code>@ledgerhq/live-common/e2e/enum/</code> — shared between desktop and mobile E2E suites</button>
-<button class="quiz-choice" data-value="B">B) In <code>e2e/desktop/tests/testdata/</code> — desktop-only</button>
-<button class="quiz-choice" data-value="C">C) In <code>playwright.config.ts</code></button>
-<button class="quiz-choice" data-value="D">D) In each individual test file</button>
-</div>
-<p class="quiz-explanation">Test data enums are defined in <code>@ledgerhq/live-common/e2e/enum/</code>, a shared package in the monorepo. This means both desktop and mobile E2E suites use the same currency, account, and team definitions, ensuring consistency.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Your Daily Workflow -- From Ticket to PR
-
-<div class="chapter-intro">
-You know the concepts, the architecture, and the codebase. Now it is time to learn the <strong>workflow</strong> — the exact sequence of steps from receiving a Jira ticket to having a merged PR. This chapter is procedural: follow these steps every time you work on an E2E test ticket.
-</div>
-
-### 28.1 Step 1: Read the Jira Ticket
-
-Every E2E task starts with a Jira ticket (e.g., `QAA-1139`). Read it carefully:
-
-- **What does it ask?** "Automate test X on desktop"
-- **Which Xray test cases?** Look for `B2CQA-XXXX` IDs — these are the test cases to link
-- **Is there a mobile reference?** Check if the test already exists in `e2e/mobile/`
-- **Which coins/devices?** The ticket or Xray case specifies supported platforms
-
-### 28.2 Step 2: Check What Already Exists
-
-Before writing anything, search the codebase:
-
-```bash
-# Search for similar test names
-grep -r "Add account" e2e/desktop/tests/specs/
-
-# Search for the currency
-grep -r "Currency.BTC" e2e/desktop/tests/specs/
-
-# Search for the Xray ticket
-grep -r "B2CQA-786" e2e/desktop/tests/
-
-# Check existing page objects for the feature
-ls e2e/desktop/tests/page/modal/
-ls e2e/desktop/tests/page/drawer/
-```
-
-You may find the test already partially exists, or that page objects already cover the flow.
-
-### 28.3 Step 3: Set Up Your Environment
-
-Run through this checklist before writing code:
-
-```bash
-# 1. Environment variables
-export MOCK=0
-export SPECULOS_DEVICE=nanoSP
-export SEED="your test seed phrase"
-export COINAPPS="/path/to/coin-apps"
-export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:master
-
-# 2. Docker is running
-docker info  # Should not error
-
-# 3. Update coin-apps
-cd $COINAPPS && git pull origin develop && cd -
-
-# 4. Install dependencies
-pnpm i
-
-# 4b. If CocoaPods lockfile error (mobile only):
-# You will see a cow ASCII art saying "CocoaPods lockfile is probably out of sync"
-rm -rf ~/.cocoapods/
-cd apps/ledger-live-mobile/ios/
-bundle install
-cd ../../..
-pnpm mobile pod
-# Then retry: pnpm i
-
-# 5. Build the app for testing
-pnpm build:lld:deps
-pnpm desktop build:testing
-
-# 6. Install Playwright dependencies
-pnpm e2e:desktop test:playwright:setup
-```
-
-### 28.4 Step 4: Explore the App Manually
-
-Launch the app and manually perform the flow you are automating:
-
-```bash
-pnpm desktop dev  # Launch in development mode
-```
-
-- Navigate to the feature
-- Open DevTools (`Cmd+Shift+I` on macOS, `Ctrl+Shift+I` on Linux/Windows)
-- Use the Elements panel to find `data-testid` attributes
-- Note which UI pattern is used: modal, drawer, or modular dialog
-- Write down the sequence of user actions
-
-### 28.5 Step 5: Plan Your Test Structure
-
-Before writing code, decide:
-
-| Decision | Options | How to Decide |
-|----------|---------|---------------|
-| **Userdata** | `skip-onboarding`, `skip-onboarding-with-last-seen-device`, etc. | Does your test need existing accounts? |
-| **speculosApp** | `Currency.BTC.speculosApp`, etc. | Which blockchain does the test interact with? |
-| **cliCommands** | `liveDataCommand(account)` or empty | Does the test need pre-populated account data? |
-| **featureFlags** | Specific overrides or none | Does the test need non-default features? |
-| **teamOwner** | `Team.WALLET_XP`, `Team.QAA`, etc. | Which team owns this feature? |
-| **Tags** | Device + currency + family + scope | Which devices and currencies does this test support? |
-
-### 28.6 Step 6: Write the Test
-
-Use this template:
-
-```typescript
-import { test } from "tests/fixtures/common";
-import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
-import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
-import { addTmsLink } from "tests/utils/allureUtils";
-import { getDescription } from "tests/utils/customJsonReporter";
-
-test.describe("YOUR FEATURE", () => {
-  test.use({
-    teamOwner: Team.QAA,
-    userdata: "skip-onboarding-with-last-seen-device",
-    speculosApp: Currency.BTC.speculosApp,
-  });
-
-  test("YOUR TEST DESCRIPTION", {
-    tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
-          "@bitcoin", "@family-bitcoin"],
-    annotation: { type: "TMS", description: "B2CQA-XXXX" },
-  }, async ({ app, userdataFile }) => {
-    await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-
-    // YOUR TEST STEPS HERE
-    await app.portfolio.clickAddAccountButton();
-    // ... more steps ...
-  });
-});
-```
-
-### 28.7 Step 7: Run Locally
-
-```bash
-# Run your specific test file
-pnpm e2e:desktop test:playwright your.spec.ts
-
-# Or filter by test name (alternative):
-pnpm e2e:desktop test:playwright --grep "YOUR TEST DESCRIPTION"
-
-# Run with debug mode (step-by-step) — see Chapter 22.8
-PWDEBUG=1 pnpm e2e:desktop test:playwright your.spec.ts
-
-# Run with single worker (easier to debug)
-pnpm e2e:desktop test:playwright your.spec.ts -- --workers=1
-```
-
-### 28.8 Step 8: Verify Stability
-
-**Run the test at least 3 times.** A test that passes once but fails on subsequent runs is **flaky** — and flaky tests are worse than no tests.
-
-```bash
-# Run 3 times
-for i in 1 2 3; do
-  echo "--- Run $i ---"
-  pnpm e2e:desktop test:playwright your.spec.ts
-done
-```
-
-Common flakiness causes:
-- Race conditions (element not ready)
-- Dynamic data (amounts change)
-- Network timing (API responses vary)
-- Selector instability (using text instead of testId)
-
-### 28.9 Step 9: Check the Allure Report
-
-```bash
-cd e2e/desktop
-allure serve allure-results
-```
-
-Verify:
-- Steps appear correctly in the report
-- TMS links are clickable and correct
-- Team ownership is set
-- Tags are correct
-- No unexpected warnings or errors
-
-### 28.10 Step 10: Commit, Push, Create PR
-
-```bash
-# Sync with develop and install dependencies
-git pull
-pnpm i
-# If install fails:
-pnpm clean
-pnpm i
-
-# Create a branch (following naming convention from Chapter 6)
-git checkout -b test/qaa-XXXX    # Replace XXXX with your Jira ticket number
-
-# Stage your changes
-git add e2e/desktop/tests/specs/your.spec.ts
-
-# Commit with conventional commit format (see Chapter 6.3)
-git commit -m "test(e2e): add first-time BTC account test for desktop"
-```
-
-Then use the Claude Code `/create-pr` command to create the PR with the correct structure:
-
-```
-/create-pr
-```
-
-This command will ask for your ticket URL, description, change type, scope, and test coverage. It creates a changeset, generates a structured PR body, pushes, creates a **draft PR**, and opens it in your browser. See Chapter 29.9 for a full walkthrough.
-
-**After the draft PR is created:**
-
-1. **Mark as ready** — In GitHub, click **"Ready for review"** at the bottom of the PR page to publish it
-2. **Merge after approval** — Once CI passes and the PR is approved, click the **"Merge pull request"** button in GitHub to merge your branch into `develop`
-3. **Update Xray** — If your change added or linked `xrayTicket` IDs (new or existing test), go to Xray in Jira:
-   - Search for the B2CQA ticket number (e.g., `B2CQA-786`)
-   - Set the **Status** flag to **Automated**
-   - In the **Automated In** field, specify the scope: `LLD` (Ledger Live Desktop), `LLM` (Ledger Live Mobile), `LLC` (Live Common), `Live App`, etc.
-4. Move the QAA Jira ticket to **Done** and add a comment linking the PR
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://playwright.dev/docs/debug">Playwright: Debugging</a> — PWDEBUG mode and trace viewer</li>
-<li><a href="https://playwright.dev/docs/test-ui-mode">Playwright: UI Mode</a> — interactive test debugging</li>
-<li><a href="https://www.conventionalcommits.org/">Conventional Commits</a> — commit message format</li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> The workflow is always the same: Read ticket → Check existing code → Set up environment → Explore manually → Plan fixtures → Write test → Run locally → Verify stability (3x) → Check Allure → Commit and PR. Following this sequence every time prevents common mistakes like missing TMS links, wrong userdata, or flaky tests.
-</div>
-
-### 28.11 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Daily Workflow</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> How many times should you run a new test locally before considering it stable?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) 1 time — if it passes, it is stable</button>
-<button class="quiz-choice" data-value="B">B) At least 3 times — to catch intermittent failures</button>
-<button class="quiz-choice" data-value="C">C) 10 times — the more the better</button>
-<button class="quiz-choice" data-value="D">D) 0 times — CI will catch issues</button>
-</div>
-<p class="quiz-explanation">The wiki explicitly states: "Run test at least 3 times to ensure it is not flaky." A test that passes once but fails intermittently is worse than no test — it creates false alarms in CI and erodes trust in the suite.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q2.</strong> Before writing a new test, what should you check first?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Whether the test or similar coverage already exists in the codebase</button>
-<button class="quiz-choice" data-value="B">B) Whether Playwright is installed</button>
-<button class="quiz-choice" data-value="C">C) Whether the CI pipeline is running</button>
-<button class="quiz-choice" data-value="D">D) Whether the Jira ticket has been assigned to you</button>
-</div>
-<p class="quiz-explanation">Always search the existing specs first. The test may already exist (just needs a new TMS link), or the page objects may already cover the flow (you just need to compose them). Duplicate coverage wastes maintenance effort.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> What is the correct commit message format for a new E2E test?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>Added new test for BTC account</code></button>
-<button class="quiz-choice" data-value="B">B) <code>fix: add BTC account test</code></button>
-<button class="quiz-choice" data-value="C">C) <code>WIP: BTC test</code></button>
-<button class="quiz-choice" data-value="D">D) <code>test(e2e): add first-time BTC account test for desktop</code></button>
-</div>
-<p class="quiz-explanation">The repo uses Conventional Commits: <code>&lt;type&gt;(&lt;scope&gt;): &lt;description&gt;</code>. For new tests, use <code>test(e2e):</code>. This format is required for consistent changelogs and CI automation.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> Which tool do you use to find <code>data-testid</code> attributes on a screen?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The Allure report</button>
-<button class="quiz-choice" data-value="B">B) The Playwright CLI</button>
-<button class="quiz-choice" data-value="C">C) The browser DevTools (Elements panel) in the running Electron app</button>
-<button class="quiz-choice" data-value="D">D) The Speculos REST API</button>
-</div>
-<p class="quiz-explanation">Launch the Ledger Live Desktop app (<code>pnpm desktop dev</code>), open DevTools with <code>Cmd+Shift+I</code>, and use the Elements panel to inspect DOM elements and find their <code>data-testid</code> attributes.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What is the purpose of <code>PWDEBUG=1</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It enables verbose Speculos logging</button>
-<button class="quiz-choice" data-value="B">B) It opens the Playwright Inspector, pausing before each action so you can step through the test interactively</button>
-<button class="quiz-choice" data-value="C">C) It writes debug information to a file</button>
-<button class="quiz-choice" data-value="D">D) It disables timeouts</button>
-</div>
-<p class="quiz-explanation"><code>PWDEBUG=1</code> opens the Playwright Inspector — a GUI tool that shows the test's actions step by step. You can pause, resume, inspect locators, and see what the test sees. This is the most powerful debugging tool for E2E tests.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Real Ticket Walkthrough -- QAA-1139 (Add Account BTC)
-
-<div class="chapter-intro">
-This is your capstone chapter. Everything you learned in Chapters 22-28 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
-</div>
-
-### 29.1 Understanding the Ticket
-
-**Jira ticket:** QAA-1139
-**Xray test case:** B2CQA-786
-**Description:** "Add account when no account exists before (BTC)" — a first-time add account flow for Bitcoin on Desktop
-
-**What this means:**
-1. The app starts with NO existing accounts (empty portfolio)
-2. The user adds a BTC account for the first time
-3. The test verifies the account appears in the portfolio and account list
-
-**Context:** This test already exists in mobile (`e2e/mobile/specs/addAccount/addAccountBTC.spec.ts`). We need to ensure the desktop version also links the Xray test case.
-
-#### What Are Xray Tickets?
-
-**Xray** is a test management plugin for Jira. It extends Jira with dedicated issue types for testing: **Test**, **Test Execution**, **Test Plan**, and **Test Set**. In our workflow, two types of Jira tickets matter:
-
-| Ticket type | Example | Purpose |
-|---|---|---|
-| **QAA ticket** | `QAA-1139` | A work item — "automate this test", "fix this flaky test", etc. |
-| **Xray test case** (B2CQA) | `B2CQA-786` | A test scenario — "Add account when no account exists (BTC)". Lives in Xray. |
-
-The `QAA-1139` ticket tells you **what to do**. The `B2CQA-786` test case tells you **what the test should verify**.
-
-#### How `xrayTicket` Strings Flow to Xray and Allure
-
-In the test code, each currency entry has an `xrayTicket` field — a comma-separated string of B2CQA IDs:
-
-```typescript
-{ currency: Currency.BTC, xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073" }
-```
-
-Here is how this string flows through the system:
-
-1. **Test runs** → the framework reads the `xrayTicket` string and calls `addTmsLink()` for each ID
-2. **Allure collects** → each ID appears as a **TMS link** (Test Management System) in the Allure report
-3. **CI uploads** → the `allure-results/` directory is uploaded to the Allure server after each CI run
-4. **Xray reads** → Xray imports the Allure results and updates the execution status of each B2CQA test case (pass/fail)
-5. **Traceability** → stakeholders can now trace: Jira ticket → Xray test case → automated test → CI execution → report
-
-#### Why Linking Matters
-
-- **Coverage tracking** — PMs and QA leads see which Xray test cases have automation in the Xray coverage dashboard
-- **Test execution linking** — each CI run automatically updates Xray with pass/fail per test case
-- **Gap analysis** — if a B2CQA ID is missing from the code, the test runs but **doesn't report to Xray** — it is invisible coverage
-
-In this ticket, `B2CQA-786` exists in the mobile test's ticket list but is **missing** from the desktop test. That is the gap we need to close.
-
-### 29.2 Analyzing Existing Coverage
-
-The existing `add.account.spec.ts` already tests adding BTC:
-
-```typescript
-const currencies = [
-  { currency: Currency.BTC, xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073" },
-  // ... 17 more currencies
-];
-
-for (const currency of currencies) {
-  test.describe("Add Accounts", () => {
-    test.use({
-      userdata: "skip-onboarding-with-last-seen-device",
-      speculosApp: currency.currency.speculosApp,
-    });
-    test(`[${currency.currency.name}] Add account`, ...);
-  });
-}
-```
-
-The existing test uses `userdata: "skip-onboarding-with-last-seen-device"` which starts with **zero accounts** (empty portfolio). It clicks "Add Account", selects BTC, completes the flow, and verifies the account appears. This is exactly the "first time add account" scenario that `B2CQA-786` describes.
-
-**Conclusion:** We do not need a new test. The existing test already covers the scenario — we just need to add `B2CQA-786` to the `xrayTicket` string so Xray knows this test case is covered.
-
-> **Note:** The mobile reference at `e2e/mobile/specs/addAccount/addAccountBTC.spec.ts` already has `B2CQA-786` in its `tmsLinks` array. The desktop test is the only one missing it.
-
-### 29.3 Create a Branch
-
-Following the branch naming convention from Chapter 6, create a branch from `develop`:
-
-```bash
+cd /Users/jerome.portier/src/tries/2026-04-08-LedgerHQ-ledger-live
 git checkout develop
 git pull
 pnpm i
-# If install fails:
+# if install failure:
 pnpm clean
 pnpm i
 
-git checkout -b test/qaa-1139
+git checkout -b support/qaa-1136-swap-usdt-eth
 ```
 
-The branch name uses the `<prefix>/qaa-<jira_ticket_number>` pattern. Since this ticket adds test coverage, the `test/` prefix is appropriate.
+We use `support/` because the work is test-coverage improvement (refactor / tests / improvements — see Chapter 6). `test/qaa-1136` is also valid per the Conventional-Commits rules the repo uses and matches chapters 29/30 — pick the convention the Swap team currently uses by checking recent merged PRs in the same area.
 
-### 29.4 Run the Test in Isolation
+### 5.4.6 Run the Existing Swap Suite in Isolation to Confirm the Baseline
 
-Before touching any code, run the existing BTC add account test to build your mental model and create a baseline.
+Before touching any code, reproduce the current green state.
 
-**Prerequisites** (one-time setup — skip if already done):
+**Prerequisites** (one-time):
+
 ```bash
-# Ensure Docker is running (Speculos needs it)
-docker info
+docker info                                  # Speculos needs Docker
 
-# Set environment variables in your shell (e.g. ~/.zshrc)
 export MOCK=0
-export COINAPPS="/path/to/coin-apps"        # your local coin-apps clone
+export COINAPPS="/path/to/coin-apps"          # your local coin-apps clone
 export SEED="your 24-word test seed"
 export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:master"
 export SPECULOS_DEVICE="nanoSP"
 
-# Build the desktop app for testing
 pnpm i
 pnpm build:lld:deps
 pnpm build:cli
 pnpm desktop build:testing
-pnpm e2e:desktop test:playwright:setup      # Install Playwright browsers
+pnpm e2e:desktop test:playwright:setup
 ```
 
-**Run the test file:**
+**Run the existing desktop swap spec in isolation** (ETH → USDT, which is the closest neighbor and uses the same DEX path):
+
 ```bash
 cd e2e/desktop
-pnpm test:playwright add.account.spec.ts
+pnpm test:playwright send.swap.spec.ts --grep "Swap Ethereum to Tether USD"
 ```
 
-This runs ALL currencies in the file. To isolate just the BTC test, you have two options:
+Or, to isolate the whole swap file and go faster with one worker:
 
-**Option A — Grep filter** (quick, no code changes):
 ```bash
-pnpm test:playwright --grep "Bitcoin.*Add account"
+pnpm test:playwright send.swap.spec.ts -- --workers=1
 ```
 
-**Option B — Comment out other currencies** (most isolated, recommended for debugging):
-Edit `add.account.spec.ts` and temporarily comment out all entries except BTC in the `currencies` array, then run the whole file. Remember to restore the file after.
+Expected: the existing neighbors pass. If they fail, stop and fix the environment first — your own changes should never be judged against a broken baseline.
 
-> **Tip:** Use Playwright's debug mode to step through the test visually — see Chapter 22.8 for details:
+> **Tip:** Use Playwright's debug mode to step through the flow visually before adding your own entry:
 > ```bash
-> PWDEBUG=1 pnpm test:playwright add.account.spec.ts
+> PWDEBUG=1 pnpm test:playwright send.swap.spec.ts --grep "Swap Ethereum to Tether USD"
 > ```
 
-**What you should observe:**
-1. Playwright launches Electron (Ledger Live Desktop)
-2. The app starts with empty portfolio (no accounts)
-3. The test clicks "Add Account" → modular drawer opens
-4. BTC is selected → Speculos scans and finds "Bitcoin 1"
-5. Account is added → portfolio shows balance and operations
-6. Navigation to Accounts → Bitcoin 1 → verifies details
-7. Test passes
+### 5.4.7 Implement the Change
 
-### 29.5 Implement the Change
-
-Open `e2e/desktop/tests/specs/add.account.spec.ts` and add `B2CQA-786` to the BTC entry's `xrayTicket` string:
+Open `e2e/desktop/tests/specs/send.swap.spec.ts` and **add one entry to the `swaps` array** for USDT → ETH. Do not touch imports, helpers, or the `for` loop — they all already handle this shape.
 
 ```typescript
-const currencies = [
+// e2e/desktop/tests/specs/send.swap.spec.ts
+
+const swaps = [
+  // ... existing entries unchanged ...
+
   {
-    currency: Currency.BTC,
-    xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073, B2CQA-786",
-    //                                                              ^^^^^^^^^^
-    //                                                    Added B2CQA-786 here
+    fromAccount: TokenAccount.ETH_USDT_1,
+    toAccount: Account.ETH_1,
+    xrayTicket: "B2CQA-2752, B2CQA-3450",
+    tag: [
+      "@NanoSP",
+      "@LNS",
+      "@NanoX",
+      "@Stax",
+      "@Flex",
+      "@NanoGen5",
+      "@swapSmoke",
+      "@ethereum",
+      "@family-evm",
+    ],
   },
-```
 
-That is the only code change. The `xrayTicket` field is a comma-separated string — the framework's `addTmsLink()` helper splits it and registers each ID with Allure. After this change, `B2CQA-786` will appear in the Allure report and flow to Xray on the next CI run.
-
-### 29.6 Rerun the Tests
-
-Run the test again to confirm your change did not break anything:
-
-```bash
-pnpm test:playwright add.account.spec.ts
-```
-
-Then run it at least 3 times for stability:
-```bash
-pnpm test:playwright --grep "Bitcoin.*Add account" --repeat-each=3
-```
-
-All 3 runs should pass. If any run fails, investigate — it may be a flaky test or an environment issue (Docker not running, Speculos timeout, etc.). You only changed metadata, not behavior, so failures indicate an existing issue.
-
-### 29.7 Verify with Allure
-
-Generate and open the Allure report to confirm the new ticket ID appears:
-
-**Option A — Serve directly (recommended for quick checks):**
-```bash
-allure serve allure-results
-```
-
-**Option B — Generate a persistent report:**
-```bash
-pnpm allure:generate
-open allure-report/index.html        # macOS
-```
-
-In the report, navigate to **Suites** → **Add Accounts** → **[Bitcoin] Add account** and check the **Links** section. You should now see:
-- `B2CQA-2499`
-- `B2CQA-2644`
-- `B2CQA-2672`
-- `B2CQA-2073`
-- `B2CQA-786` — **this is the new one you just added**
-
-Each link is clickable and points to the Xray test case in Jira. If you ran the test before your change (in step 29.4), compare the reports — `B2CQA-786` was missing before and is now present.
-
-Press `Ctrl+C` in the terminal to stop the Allure server when done.
-
-### 29.8 Commit the Change
-
-Stage and commit following the Conventional Commits format from Chapter 6:
-
-```bash
-git add e2e/desktop/tests/specs/add.account.spec.ts
-git commit -m "test(e2e): link B2CQA-786 to BTC add account test on desktop"
-```
-
-The commit type is `test` (adding test coverage), the scope is `e2e`, and the description explains what was done and why.
-
-### 29.9 Create the PR with Claude Code
-
-The team uses a Claude Code command to create PRs with the correct structure, changeset, and Slack announcement. In your terminal, run:
-
-```
-/create-pr
-```
-
-Claude Code will ask you for:
-
-1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1139`
-2. **Ticket description** — "Link Xray test case B2CQA-786 to existing BTC add account test on desktop"
-3. **Change type** — `test`
-4. **Change scope** — `e2e/desktop`
-5. **Test coverage** — `yes` (the change itself is test metadata)
-6. **QA focus areas** — "BTC add account test, Allure TMS links"
-7. **UI changes** — `no`
-
-The command then:
-1. Reads `.claude/rules/git-workflow.md` to enforce commit conventions
-2. Creates a **changeset** via the `create-changeset` skill
-3. Generates a structured PR body with checklist, description, and context link
-4. Pushes the branch and creates a **draft PR** via `gh pr create --draft`
-5. Opens the PR in your browser
-6. Generates a Slack announcement via the `slack-pr-message` skill
-
-> **Reference:** The full `/create-pr` command is defined in `~/.claude/commands/create-pr.md`. It uses:
-> - `~/.claude/rules/git-workflow.md` — commit and branch naming conventions
-> - `~/.claude/skills/slack-pr-message/SKILL.md` — Slack message formatting
-
-### 29.10 Mark the PR as Ready and Merge
-
-After CI passes and your PR has been reviewed:
-
-1. In GitHub, navigate to your draft PR
-2. Click **"Ready for review"** at the bottom of the PR page — this publishes the PR and makes it mergeable
-3. Once the PR is approved, click the **"Merge pull request"** button in GitHub to merge your branch into `develop`
-4. **Update Xray:** Since you added `B2CQA-786` to an `xrayTicket` string, go to Xray in Jira:
-   - Search for `B2CQA-786`
-   - Set the **Status** flag to **Automated**
-   - In the **Automated In** field, select **LLD** (Ledger Live Desktop)
-5. Move `QAA-1139` to **Done** in Jira and add a comment: "Linked B2CQA-786 to existing desktop BTC add account test in PR #XXXX"
-6. The next CI run will automatically upload Allure results to Xray, updating `B2CQA-786` with the test execution status
-
-### 29.11 Reference: Writing a New Test from Scratch
-
-For this ticket, we only needed to add a ticket ID to an existing test. But for cases where a new test file is required, here is the full template with all patterns you need:
-
-```typescript
-import { test } from "tests/fixtures/common";
-import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
-import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
-import { addTmsLink } from "tests/utils/allureUtils";
-import { getDescription } from "tests/utils/customJsonReporter";
-import { getModularSelector } from "tests/utils/modularSelectorUtils";
-
-test.describe("Add Account - First Time BTC", () => {
-  test.use({
-    teamOwner: Team.WALLET_XP,
-    userdata: "skip-onboarding-with-last-seen-device",  // No existing accounts
-    speculosApp: Currency.BTC.speculosApp,               // Bitcoin device app
-  });
-
-  test(
-    "Add BTC account when no account exists (first time)",
-    {
-      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
-            "@bitcoin", "@family-bitcoin"],
-      annotation: {
-        type: "TMS",
-        description: "B2CQA-786",
-      },
-    },
-    async ({ app, userdataFile }) => {
-      // Link to Xray
-      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-
-      // Step 1: From empty portfolio, click Add Account
-      await app.portfolio.clickAddAccountButton();
-
-      // Step 2: Select BTC (modular dialog or legacy)
-      const selector = await getModularSelector(app, "ASSET");
-      if (selector) {
-        await selector.selectAssetByTicker(Currency.BTC);
-        await selector.selectNetwork(Currency.BTC);
-        await app.scanAccountsDrawer.selectFirstAccount();
-        await app.scanAccountsDrawer.clickCloseButton();
-      } else {
-        await app.addAccount.expectModalVisibility();
-        await app.addAccount.selectCurrency(Currency.BTC);
-        await app.addAccount.addAccounts();
-        await app.addAccount.done();
-      }
-
-      // Step 3: Verify account was created
-      await app.portfolio.expectBalanceVisibility();
-      await app.portfolio.expectAccountsPersistedInAppJson(userdataFile, 1, 5000);
-
-      // Step 4: Navigate to the new account
-      await app.mainNavigation.openTargetFromMainNavigation("accounts");
-      await app.accounts.navigateToAccountByName("Bitcoin 1");
-      await app.account.expectAccountVisibility("Bitcoin 1");
-      await app.account.expectAccountBalance();
-    },
-  );
-});
-```
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> The workflow is always: understand ticket → create branch (<code>&lt;prefix&gt;/qaa-&lt;number&gt;</code>) → run test in isolation → implement → rerun 3x → verify Allure → commit (Conventional Commits) → <code>/create-pr</code> → mark ready → merge → update Xray automation flag. Real E2E work is not always writing new tests — sometimes the right answer is linking an Xray ticket to existing coverage. Always check what exists before writing new code.
-</div>
-
-### 29.12 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Real Ticket Walkthrough</h3>
-<p class="quiz-subtitle">4 questions · 75% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> For QAA-1139, why was the correct approach to add the ticket ID to existing code instead of writing a new test?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because writing new tests is not allowed</button>
-<button class="quiz-choice" data-value="B">B) Because the existing <code>add.account.spec.ts</code> already covers the "first time BTC add account" flow — the <code>skip-onboarding-with-last-seen-device</code> userdata starts with zero accounts</button>
-<button class="quiz-choice" data-value="C">C) Because BTC is not supported by Speculos</button>
-<button class="quiz-choice" data-value="D">D) Because the mobile test already provides coverage</button>
-</div>
-<p class="quiz-explanation">The existing test already starts with no accounts (empty portfolio), adds BTC, and verifies the result. Adding a duplicate test would waste maintenance effort. The correct action is to link the Xray ticket (<code>B2CQA-786</code>) to the existing test so it appears in coverage reports.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> In the test template, why is <code>getModularSelector()</code> used instead of directly calling <code>app.addAccount.selectCurrency()</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>selectCurrency()</code> does not exist</button>
-<button class="quiz-choice" data-value="B">B) The modular selector is faster</button>
-<button class="quiz-choice" data-value="C">C) The app has two UI paths (modular dialog and legacy modal) controlled by feature flags, and the test must handle both</button>
-<button class="quiz-choice" data-value="D">D) The modular selector is required for Speculos</button>
-</div>
-<p class="quiz-explanation">The <code>lldModularDrawer</code> feature flag controls whether the new modular dialog or the legacy modal is shown. Since feature flags can change between environments, the test detects which is active and follows the appropriate path.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> What userdata file would you use for a test that requires an EXISTING BTC account with balance?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>1AccountBTC1AccountETH.json</code> — it has pre-populated BTC and ETH accounts</button>
-<button class="quiz-choice" data-value="B">B) <code>skip-onboarding.json</code> — it has onboarding complete</button>
-<button class="quiz-choice" data-value="C">C) <code>skip-onboarding-with-last-seen-device.json</code> — it has no accounts</button>
-<button class="quiz-choice" data-value="D">D) No userdata — the test creates accounts from scratch</button>
-</div>
-<p class="quiz-explanation"><code>1AccountBTC1AccountETH.json</code> contains pre-configured state with 1 BTC account and 1 ETH account with balances. Use this when your test starts from a portfolio that already has accounts (e.g., send, receive, account details tests).</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> After merging your PR, what should you do in Jira?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Delete the ticket</button>
-<button class="quiz-choice" data-value="B">B) Reassign it to someone else</button>
-<button class="quiz-choice" data-value="C">C) Leave it as-is — CI will update it</button>
-<button class="quiz-choice" data-value="D">D) Move the ticket to Done and add a comment linking the PR</button>
-</div>
-<p class="quiz-explanation">After merge, move the ticket to Done and add a comment with the PR link. This closes the loop and provides traceability: anyone looking at the ticket can find the implementation.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Real Ticket Walkthrough -- QAA-1141 (Market Filter Starred)
-
-<div class="chapter-intro">
-This is your second real ticket walkthrough. Where Chapter 29 walked through a simple <strong>Add Account</strong> ticket, this one covers a different feature area — the <strong>Market page</strong> — and introduces new concepts: <strong>Wallet 4.0 feature flags</strong>, <strong>cross-platform coverage gaps</strong>, and <strong>the filter dropdown pattern</strong>. The workflow is the same; the context is new.
-</div>
-
-### 30.1 Understanding the Ticket
-
-**Jira ticket:** QAA-1141 (child of QAA-1145 "[LWD-LWM] — coverage gap")
-**Xray test case:** B2CQA-1879
-**Description:** "Market — filter starred asset" — verify that a user can star a coin on the market page and filter the list to show only starred assets
-
-**What this means:**
-1. The user navigates to the Market page
-2. Stars a coin (e.g., ETH or BTC)
-3. Activates the "starred" filter
-4. The list shows only starred coins
-
-**Context:** This test currently exists in `e2e/mobile/specs/market.spec.ts` but the Jira platform field indicates it should also be covered on Desktop (Windows/macOS/Linux). This is a **cross-platform coverage gap** — the scenario is automated on mobile but has no corresponding Xray link on desktop.
-
-#### What Is a Cross-Platform Coverage Gap?
-
-The QAA-1145 epic ("[LWD-LWM] — coverage gap") tracks scenarios that are automated on one platform (e.g., LLM — Ledger Live Mobile) but missing on another (e.g., LLD — Ledger Live Desktop). These gaps are discovered by comparing the Xray coverage dashboard across platforms:
-
-| Platform | B2CQA-1879 linked? | Test exists? |
-|----------|-------------------|-------------|
-| **LLM** (Mobile) | Yes — in `e2e/mobile/specs/market.spec.ts` | Yes |
-| **LLD** (Desktop) | **No** — not in any desktop test's TMS annotation | **Possibly** — need to check |
-
-Your job is to determine whether the desktop test already covers the scenario (in which case you just add the Xray link) or whether you need to write a new test.
-
-### 30.2 Analyzing Existing Coverage
-
-#### The Mobile Test (Reference)
-
-Open `e2e/mobile/specs/market.spec.ts` — this is the test we need to replicate on desktop:
-
-```typescript
-const tags: string[] = [
-  "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
-  "@ethereum", "@family-evm",
+  // ... other existing entries unchanged ...
 ];
-
-describe("Market page for user with no device", () => {
-  const nanoApp = AppInfos.ETHEREUM;
-  const ticker = "ETH";
-
-  beforeAll(async () => {
-    await app.init({
-      speculosApp: nanoApp,
-      cliCommands: [
-        async (userdataPath?: string) => {
-          return CLI.liveData({
-            currency: nanoApp.name,
-            index: 0,
-            appjson: userdataPath,
-            add: true,
-          });
-        },
-      ],
-    });
-    await app.portfolio.waitForPortfolioPageToLoad();
-  });
-
-  $TmsLink("B2CQA-1879");
-  tags.forEach(tag => $Tag(tag));
-  it("should filter starred asset in the list", async () => {
-    await app.walletTabNavigator.navigateToMarket();
-    await app.market.searchAsset(ticker);
-    await app.market.expectMarketRowTitle(ticker);
-    await app.market.openAssetPage(ticker);
-    await app.market.starFavoriteCoin();
-    await app.market.backToAssetList();
-    await app.market.filterStaredAsset();
-    await app.market.expectMarketRowTitle(ticker);
-  });
-});
 ```
 
-**What the mobile test does, step by step:**
-1. Initializes the app with an ETH Speculos app and pre-populated account data
-2. Navigates to the Market page
-3. Searches for "ETH"
-4. Opens the ETH asset page
-5. Taps the star button to mark ETH as a favorite
-6. Goes back to the market list
-7. Taps the "starred" filter toggle
-8. Verifies ETH is still visible (it should be — it is starred)
+**What this does, walk-through:**
 
-**Key observation:** The mobile test uses `$TmsLink("B2CQA-1879")` (Jest/Detox syntax). On desktop, the equivalent is the `annotation.description` field in the Playwright test options.
+1. The outer `for (const { fromAccount, toAccount, xrayTicket, tag } of swaps)` loop iterates over every entry, including ours.
+2. `setupEnv(true)` installs Speculos setup with transaction-broadcast disabled.
+3. `setExchangeDependencies` is called in `beforeEach` with the source and destination Speculos apps — for our entry, that means Ethereum (for USDT ERC-20) and Ethereum (for ETH).
+4. `test.use({ speculosApp: exchangeApp, teamOwner: Team.SWAP, ... })` wires the fixture: the Exchange app is primary, accounts are pre-populated via `cliCommandsOnApp` using `liveDataWithAddressCommand`.
+5. Inside the test: `getMinimumAmount(fromAccount, toAccount)` asks the swap backend for the min, a `Swap` instance is built, and `performSwapUntilQuoteSelectionStep` drives the UI up to the quotes list.
+6. `selectExchangeWithoutKyc(electronApp, swap)` picks a no-KYC provider (typically a DEX like 1inch or Paraswap for USDT → ETH on EVM).
+7. `ensureTokenApproval(fromAccount, provider, minAmount)` handles the ERC-20 approval — **this is why USDT → ETH is the interesting case**, because native-to-native pairs skip this step entirely.
+8. Depending on whether the provider is in-app (`provider.app === exchangeApp`) or not, the right device-signing dance is triggered, Speculos accepts, and the test asserts on the final toaster (or the exchange-completed drawer text).
 
-#### The Desktop Test (Already Exists!)
+That single entry is the entire code change.
 
-Now search the desktop codebase:
+> **Why `B2CQA-3450` alongside `B2CQA-2752`?** `B2CQA-3450` is the umbrella "swap generic flow" Xray test case that most entries in this spec carry. Attach both so the Xray coverage updates correctly for both the generic flow and the specific pair.
 
-```bash
-grep -r "star" e2e/desktop/tests/specs/market.spec.ts
-```
+### 5.4.8 Rerun Just That Test
 
-Open `e2e/desktop/tests/specs/market.spec.ts`:
+Use Playwright's test-name filter to run only our new entry:
 
-```typescript
-import { test } from "tests/fixtures/common";
-import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
-import { addTmsLink } from "tests/utils/allureUtils";
-import { getDescription } from "tests/utils/customJsonReporter";
-import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
-import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
-
-test.describe("Market", () => {
-  test.use({
-    teamOwner: Team.WALLET_XP,
-    userdata: "speculos-tests-app",
-    featureFlags: LWD_WALLET_40_FF_ENABLED,
-  });
-
-  test(
-    "Market list content",
-    {
-      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
-      annotation: {
-        type: "TMS",
-        description: "B2CQA-4316",
-      },
-    },
-    async ({ app }) => {
-      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-      await app.marketBanner.clickExploreMarketHeader();
-      await app.market.validateMarketList();
-    },
-  );
-
-  test(
-    "Filters behavior",
-    {
-      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
-      annotation: {
-        type: "TMS",
-        description: "B2CQA-4315",           // <-- Only B2CQA-4315 here
-      },
-    },
-    async ({ app }) => {
-      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-      await app.marketBanner.clickExploreMarketHeader();
-      await app.market.validateMarketList();
-      await app.market.starCoin(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
-      await app.market.expectFilterDropdownToBeVisible();
-      await app.market.selectStarredAssetsFilter();
-      await app.market.expectCoinToBeVisible(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
-      await app.market.expectCoinToNotBeVisible(Account.ETH_1.currency.ticker);
-    },
-  );
-});
-```
-
-**What the desktop "Filters behavior" test does:**
-1. Navigates to the Market page via the market banner header
-2. Waits for the market list to load (BTC and ETH rows visible)
-3. Stars BTC
-4. Opens the filter dropdown
-5. Selects "Starred Assets"
-6. Verifies BTC **is** visible
-7. Verifies ETH is **not** visible (it was not starred)
-
-**Conclusion:** The desktop test covers **exactly** the same scenario as B2CQA-1879: star a coin → filter by starred → verify the list. The difference is cosmetic (mobile uses ETH, desktop uses BTC; mobile opens the asset page to star, desktop stars directly from the list). The functional behavior being tested — "filter starred asset" — is identical.
-
-We do **not** need a new test. We need to add `B2CQA-1879` to the existing annotation so Xray knows the desktop test covers this case.
-
-#### Mobile vs. Desktop: Key Differences
-
-| Aspect | Mobile | Desktop |
-|--------|--------|---------|
-| **Framework** | Detox + Jest | Playwright + Electron |
-| **TMS linking** | `$TmsLink("B2CQA-1879")` | `annotation: { type: "TMS", description: "B2CQA-1879" }` |
-| **Navigation** | `walletTabNavigator.navigateToMarket()` | `marketBanner.clickExploreMarketHeader()` |
-| **Starring** | Open asset page → tap star button | Click star icon directly on market row |
-| **Filtering** | `filterStaredAsset()` (toggle button) | `selectStarredAssetsFilter()` (dropdown select) |
-| **Coin used** | ETH | BTC |
-| **Assertion** | Verify starred coin row visible | Verify starred coin visible AND non-starred coin NOT visible |
-
-> **Note:** The desktop test is actually **more thorough** — it verifies both that the starred coin is visible AND that a non-starred coin is hidden. The mobile test only checks the positive case.
-
-### 30.3 Understanding the Desktop Market Architecture
-
-Before implementing, let us understand the key architectural elements this test uses. These are different from the Add Account flow in Chapter 29.
-
-#### Wallet 4.0 Feature Flags
-
-The desktop market test uses a feature flag:
-
-```typescript
-import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
-
-test.use({
-  featureFlags: LWD_WALLET_40_FF_ENABLED,
-});
-```
-
-Open `e2e/desktop/tests/utils/featureFlagUtils.ts` to see what this enables:
-
-```typescript
-export const LWD_WALLET_40_FF_ENABLED: OptionalFeatureMap = {
-  lwdWallet40: {
-    enabled: true,
-    params: {
-      marketBanner: true,      // Shows market banner on portfolio page
-      graphRework: true,       // New graph rendering
-      quickActionCtas: true,   // Quick action buttons
-      mainNavigation: true,    // New navigation layout
-      assetSection: true,      // New asset section
-    },
-  },
-};
-```
-
-**Why this matters:** Wallet 4.0 changes the UI significantly. The market page is now accessed via a **Market Banner** on the portfolio page (clicking "Explore Market") rather than through the old sidebar navigation. The test must enable this feature flag so the banner and new UI are present.
-
-**What happens if you forget the feature flag?** The test will fail because:
-- `app.marketBanner.clickExploreMarketHeader()` looks for a `market-banner-button` element that only exists when `lwdWallet40.marketBanner` is `true`
-- The filter dropdown uses a different UI pattern in the Wallet 4.0 market page
-
-#### The `speculos-tests-app` Userdata
-
-Unlike the Add Account test (Chapter 29) which used `skip-onboarding-with-last-seen-device` (empty portfolio), the market test uses `speculos-tests-app`. This userdata file contains:
-- Onboarding already completed
-- A pre-configured app state suitable for Speculos-based tests
-- Pre-populated accounts (the test references `Account.BTC_NATIVE_SEGWIT_1` and `Account.ETH_1`)
-
-The market filter test does not interact with the blockchain (no send, receive, or device signing), so Speculos is not actively used during the test. The userdata simply provides the initial app state.
-
-#### Page Objects: MarketPage
-
-The `MarketPage` (`e2e/desktop/tests/page/market.page.ts`) encapsulates all market list interactions:
-
-```typescript
-export class MarketPage extends AppPage {
-  // Elements
-  private searchInput = this.page.getByTestId("market-search-input");
-  private coinRow = (ticker: string) => this.page.getByTestId(`market-${ticker}-row`);
-  private filterDropdown = this.page.getByText("Show").first();
-  private starButton = (ticker: string) => this.page.getByTestId(`market-${ticker}-star-button`);
-  private starredOptionFilter = this.page.getByRole("option", { name: "Starred Assets" });
-
-  // Key methods used in our test:
-  async starCoin(ticker: string) { ... }                // Click star icon on a row
-  async expectFilterDropdownToBeVisible() { ... }       // Assert dropdown exists
-  async selectStarredAssetsFilter() { ... }             // Open dropdown → click "Starred Assets"
-  async expectCoinToBeVisible(ticker: string) { ... }   // Assert a coin row is visible
-  async expectCoinToNotBeVisible(ticker: string) { ... } // Assert a coin row is NOT visible
-}
-```
-
-**Important selector detail:** The filter dropdown uses `this.page.getByText("Show").first()` — a text-based selector because the react-select component does not forward `data-testid`. The option uses `getByRole("option", { name: "Starred Assets" })` — a role-based selector. This is a real-world compromise you will encounter: sometimes `data-testid` is not available and you must use alternative selectors.
-
-#### Page Objects: MarketBannerPage
-
-The `MarketBannerPage` (`e2e/desktop/tests/page/marketBanner.page.ts`) handles the Wallet 4.0 banner on the portfolio page:
-
-```typescript
-export class MarketBannerPage extends AppPage {
-  private marketBannerHeader = this.page.getByTestId("market-banner-button");
-
-  async clickExploreMarketHeader() {
-    await this.marketBannerHeader.click();
-  }
-}
-```
-
-This page object navigates from the portfolio to the market page by clicking the banner. It replaces the old `layout.goToMarket()` method used in the legacy market spec.
-
-#### Page Object Registration
-
-Both page objects are registered in `e2e/desktop/tests/page/index.ts`:
-
-```typescript
-import { MarketPage } from "./market.page";
-import { MarketBannerPage } from "./marketBanner.page";
-
-export class Application extends PageHolder {
-  public market = new MarketPage(this.page);           // → app.market.*
-  public marketBanner = new MarketBannerPage(this.page); // → app.marketBanner.*
-  // ...
-}
-```
-
-This is why the test can call `app.market.starCoin(...)` and `app.marketBanner.clickExploreMarketHeader()` — the Application hub wires everything together.
-
-### 30.4 Create a Branch
-
-Following the branch naming convention from Chapter 6:
-
-```bash
-git pull
-pnpm i 
-// if install failure : 
-pnpm clean
-pnpm i
-
-git checkout -b test/qaa-1141
-```
-
-The `test/` prefix is appropriate because this ticket adds test coverage metadata (an Xray link).
-
-### 30.5 Run the Test in Isolation
-
-Before changing anything, run the existing test to build your mental model and create a baseline.
-
-**Run the market test file:**
-```bash
-PWDEBUG=1 pnpm e2e:desktop test:playwright e2e/desktop/tests/specs/market.spec.ts
-```
-
-To isolate the "Filters behavior" test specifically:
 ```bash
 cd e2e/desktop
-PWDEBUG=1 pnpm test:playwright --grep "Filters behavior"
+pnpm test:playwright send.swap.spec.ts --grep "Swap Tether USD \(ERC-20\) to Ethereum"
 ```
 
-> **Note:** Unlike the Add Account test in Chapter 29, the market test does **not** require an active Speculos instance. It uses the `speculos-tests-app` userdata for initial state but does not perform any device interactions (no signing, no address verification). Docker must be running (the fixture still initializes Speculos as part of the standard setup), but the test itself only interacts with the market UI.
+> **Note:** The test name comes from `` `Swap ${fromAccount.currency.name} to ${toAccount.currency.name}` `` in the `for` loop. The exact string depends on how `TokenAccount.ETH_USDT_1.currency.name` is set in `live-common`. Run the test once to see Playwright's exact output, then copy-paste the name into `--grep` for targeted reruns.
 
-**What you should observe:**
-1. Playwright launches Electron (Ledger Live Desktop) with Wallet 4.0 enabled
-2. The portfolio page shows the market banner
-3. The test clicks "Explore Market" on the banner → navigates to the market page
-4. The market list loads with BTC and ETH visible
-5. The test clicks the star icon next to BTC → BTC is now starred
-6. The test opens the "Show" dropdown and selects "Starred Assets"
-7. Only BTC remains visible; ETH disappears from the list
-8. Test passes
-
-### 30.6 Implement the Change
-
-Open `e2e/desktop/tests/specs/market.spec.ts` and add `B2CQA-1879` to the "Filters behavior" test's TMS annotation:
-
-```typescript
-  test(
-    "Filters behavior",
-    {
-      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
-      annotation: {
-        type: "TMS",
-        description: "B2CQA-4315, B2CQA-1879",
-        //                       ^^^^^^^^^^^^^^
-        //                  Added B2CQA-1879 here
-      },
-    },
-```
-
-That is the only code change. The `description` field is a comma-separated string — the framework's `addTmsLink()` helper splits it and registers each ID with Allure. After this change, `B2CQA-1879` will appear in the Allure report alongside `B2CQA-4315` and flow to Xray on the next CI run.
-
-#### How It Works Under the Hood
-
-The annotation flows through the system like this:
-
-1. **Test runs** → inside the test body, `addTmsLink(getDescription(test.info().annotations, "TMS").split(", "))` reads the annotation, splits `"B2CQA-4315, B2CQA-1879"` into `["B2CQA-4315", "B2CQA-1879"]`, and calls `addTmsLink()` for each
-2. **Allure collects** → each ID appears as a TMS link in the Allure report
-3. **CI uploads** → Allure results are uploaded to the reporting server
-4. **Xray reads** → Xray imports the results and updates the execution status of both `B2CQA-4315` and `B2CQA-1879`
-5. **Coverage dashboard** → `B2CQA-1879` now shows as "Automated" on LLD
-
-> **Comparison with Chapter 29:** In the Add Account test (Chapter 29), the TMS IDs were in an `xrayTicket` field on a data-driven currency object: `xrayTicket: "B2CQA-2499, B2CQA-2644, ..."`. Here, the IDs are in the Playwright `annotation.description` field. Both approaches end up calling `addTmsLink()` — they are just two patterns for attaching Xray IDs to tests. The annotation pattern is more common in newer tests; the `xrayTicket` pattern is used in data-driven tests with many currencies.
-
-### 30.7 Rerun the Tests and Verify Allure
-
-Run the test again to confirm nothing broke:
+**Run three times for stability** — chapter 28 rule:
 
 ```bash
-pnpm test:playwright market.spec.ts
+pnpm test:playwright send.swap.spec.ts --grep "Swap Tether USD" --repeat-each=3
 ```
 
-Run it at least 3 times for stability:
-```bash
-pnpm test:playwright --grep "Filters behavior" --repeat-each=3
-```
+All three runs should pass. If they do not, the most common failures on a DEX token swap are:
 
-All 3 runs should pass. You only changed metadata, so failures indicate an existing issue (environment, Docker, network timing), not a regression from your change.
+- Speculos did not switch apps between Exchange and Ethereum → check `setExchangeDependencies` and `speculos.relaunch`
+- Token approval was not granted → `ensureTokenApproval` failed silently; add a wait and re-run
+- Provider returned `INSUFFICIENT_LIQUIDITY` → try a different minimum or wait for provider liquidity to recover (backend concern, not a test bug)
 
-**Verify the Allure report:**
+### 5.4.9 Verify with Allure
+
+Generate and open the Allure report:
 
 ```bash
 allure serve allure-results
 ```
 
-Navigate to **Suites** → **Market** → **Filters behavior** and check the **Links** section. You should see:
-- `B2CQA-4315` — the existing link
-- `B2CQA-1879` — **the new one you just added**
+Navigate to **Suites** → **Swap - Accepted (without tx broadcast)** → **Swap Tether USD (ERC-20) to Ethereum** and confirm:
 
-Each link is clickable and points to the Xray test case in Jira. If you ran the test before your change (in step 30.5), compare the reports — `B2CQA-1879` was missing before and is now present.
+- **Links** section shows `B2CQA-2752` and `B2CQA-3450` as TMS links, each clickable and pointing to Jira
+- **Steps** show the full sequence: build swap, perform up to quote selection, select provider, ensure token approval, sign on Speculos, final assertion
+- **Screenshots** captured at key steps (start, quote list, device signing, completion)
+- **Team ownership** is `Team.SWAP` (consistent with the rest of the file)
+- Tags match what you set: `@NanoSP`, `@LNS`, ..., `@ethereum`, `@family-evm`, `@swapSmoke`
 
-Press `Ctrl+C` to stop the Allure server when done.
+Press `Ctrl+C` to stop the Allure server.
 
-### 30.8 Commit and Create PR
+### 5.4.10 Commit the Change
 
-Stage and commit following the Conventional Commits format:
+Follow the Conventional Commits style — test scope, concise description:
 
 ```bash
-git add e2e/desktop/tests/specs/market.spec.ts
-git commit -m "test(e2e): link B2CQA-1879 to market filter starred test on desktop"
+git add e2e/desktop/tests/specs/send.swap.spec.ts
+git commit -m "test(desktop): add swap USDT (ERC-20) to ETH coverage (QAA-1136)"
 ```
 
-The commit type is `test` (adding test coverage), the scope is `e2e`, and the description explains what was done.
+Why this shape:
 
-Then use the Claude Code command to create the PR:
+- `test` — commit type for tests (not `feat`, not `fix`)
+- `(desktop)` — scope is the desktop E2E suite
+- Description is imperative and lowercase
+- The Jira ticket (`QAA-1136`) is referenced in the subject to make the history searchable
+
+If you want, add the `B2CQA-2752` ticket in the body:
+
+```bash
+git commit -m "test(desktop): add swap USDT (ERC-20) to ETH coverage (QAA-1136)" \
+           -m "Closes coverage gap for B2CQA-2752. Mirrors mobile spec swapETH_USDT_ETH.spec.ts."
+```
+
+### 5.4.11 Open the PR with `/create-pr`, Mark Ready, and Link Xray
+
+Use the Claude Code command (see Chapter 3.8.9):
 
 ```
 /create-pr
 ```
 
-Claude Code will ask you for:
+Answer the prompts:
 
-1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1141`
-2. **Ticket description** — "Link Xray test case B2CQA-1879 to existing market filter starred test on desktop"
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1136`
+2. **Ticket description** — "Add desktop E2E coverage for swap USDT (ERC-20) → ETH, mirroring mobile coverage"
 3. **Change type** — `test`
 4. **Change scope** — `e2e/desktop`
-5. **Test coverage** — `yes` (the change itself is test metadata)
-6. **QA focus areas** — "Market page filter starred, Allure TMS links"
+5. **Test coverage** — `yes`
+6. **QA focus areas** — "Swap USDT → ETH on DEX path, ERC-20 token approval, Speculos Ethereum app switching"
 7. **UI changes** — `no`
 
-### 30.9 Mark Ready, Merge, and Update Xray
-
-After CI passes and your PR is reviewed:
+After the draft PR is created and CI passes:
 
 1. In GitHub, click **"Ready for review"** to publish the PR
-2. Once approved, click **"Merge pull request"** to merge into `develop`
+2. Once approved, **"Merge pull request"** into `develop`
 3. **Update Xray:**
-   - Search for `B2CQA-1879` in Jira
-   - Set the **Status** flag to **Automated**
-   - In the **Automated In** field, add **LLD** (Ledger Live Desktop) — do not remove LLM, since both platforms now cover it
-4. Move `QAA-1141` to **Done** in Jira and add a comment: "Linked B2CQA-1879 to existing desktop market filter test in PR #XXXX"
-5. The next CI run will automatically upload Allure results to Xray, updating `B2CQA-1879` with the desktop test execution status
+   - Open `B2CQA-2752` in Jira
+   - Set **Status** to **Automated**
+   - In **Automated In**, **add** LLD next to the existing LLM entry (do not replace — see chapter 30.9)
+4. Move `QAA-1136` to **Done** (or the team's equivalent status once **all** 9 B2CQA children are landed) and link the PR
+5. The next CI run uploads Allure → Xray updates automatically
 
-> **Important:** When updating Xray's **Automated In** field, you are adding LLD alongside the existing LLM — not replacing it. This test case is now automated on **both** platforms.
+### 5.4.12 Reference -- Applying the Same Fix to the Other Missing Pairs
 
-### 30.10 Reference: Writing a New Market Filter Test from Scratch
-
-For this ticket, we only needed to add a ticket ID to an existing test. But for cases where no desktop market filter test existed, here is the full template with all patterns you would need:
+The 8 other missing pairs under QAA-1136 all take the same shape. Each one is a single new object in the `swaps` array. Pair → ticket → entry:
 
 ```typescript
-import { test } from "tests/fixtures/common";
+// USDT (ERC-20) → ETH — implemented in 35.7
+{
+  fromAccount: TokenAccount.ETH_USDT_1,
+  toAccount: Account.ETH_1,
+  xrayTicket: "B2CQA-2752, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@swapSmoke", "@ethereum", "@family-evm"],
+},
+
+// ETH → SOL — cross-family, EVM → Solana
+{
+  fromAccount: Account.ETH_1,
+  toAccount: Account.SOL_1,
+  xrayTicket: "B2CQA-<ETH_SOL>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@ethereum", "@family-evm", "@solana", "@family-solana"],
+},
+
+// BTC → SOL — cross-family, BTC → Solana
+{
+  fromAccount: Account.BTC_NATIVE_SEGWIT_1,
+  toAccount: Account.SOL_1,
+  xrayTicket: "B2CQA-<BTC_SOL>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@bitcoin", "@family-bitcoin", "@solana", "@family-solana"],
+},
+
+// USDT (ERC-20) → SOL — token on EVM → Solana
+{
+  fromAccount: TokenAccount.ETH_USDT_1,
+  toAccount: Account.SOL_1,
+  xrayTicket: "B2CQA-<USDT_SOL>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@swapSmoke", "@ethereum", "@family-evm", "@solana", "@family-solana"],
+},
+
+// USDC (ERC-20) → ETH
+{
+  fromAccount: TokenAccount.ETH_USDC_1,
+  toAccount: Account.ETH_1,
+  xrayTicket: "B2CQA-<USDC_ETH>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@swapSmoke", "@ethereum", "@family-evm"],
+},
+
+// ETH → DOT
+{
+  fromAccount: Account.ETH_1,
+  toAccount: Account.DOT_1,
+  xrayTicket: "B2CQA-<ETH_DOT>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@ethereum", "@family-evm", "@polkadot", "@family-polkadot"],
+},
+
+// XRP → USDC (ERC-20)
+{
+  fromAccount: Account.XRP_1,
+  toAccount: TokenAccount.ETH_USDC_1,
+  xrayTicket: "B2CQA-<XRP_USDC>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@xrp", "@family-xrp", "@ethereum", "@family-evm"],
+},
+
+// BTC → LTC
+{
+  fromAccount: Account.BTC_NATIVE_SEGWIT_1,
+  toAccount: Account.LTC_1,
+  xrayTicket: "B2CQA-<BTC_LTC>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@bitcoin", "@family-bitcoin", "@litecoin", "@family-litecoin"],
+},
+```
+
+**Process per pair:**
+
+1. Confirm the Xray ID on the Jira ticket (`QAA-1136` has the full list under its children)
+2. Confirm the `Account` / `TokenAccount` enum name exists in `libs/live-common/src/e2e/enum/Account.ts` — if a currency enum is missing, adding it is a separate PR on `live-common` first
+3. Confirm the device tags match what the pair actually supports (not every pair runs on every device — some are Nano-S-Plus-only, some exclude LNS)
+4. Add the entry, rerun `send.swap.spec.ts` with `--grep "Swap <From> to <To>"`, verify Allure
+5. Commit per pair or batch by family — the Swap team usually prefers one PR per 2-3 pairs to keep reviews small
+
+> **Guardrail:** Do **not** copy-paste all 9 entries in one PR without running each. Each pair exercises different provider routes, and a single unrelated failure (e.g., a DEX liquidity problem for DOT) will block the entire batch. Land them in small PRs.
+
+### 5.4.13 Reference -- Writing a Swap Test from Scratch
+
+You will rarely write a swap test from scratch — almost every new pair goes through the `swaps` array pattern above. But for the case where you need a custom flow (a swap with a specific provider override, a KYC variant, a swap-to-swap edge case), here is the canonical template:
+
+```typescript
+import test from "tests/fixtures/common";
 import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
-import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { Account, TokenAccount } from "@ledgerhq/live-common/e2e/enum/Account";
+import { AppInfos } from "@ledgerhq/live-common/e2e/enum/AppInfos";
+import { setExchangeDependencies } from "@ledgerhq/live-common/e2e/speculos";
+import { Swap } from "@ledgerhq/live-common/e2e/models/Swap";
 import { addTmsLink } from "tests/utils/allureUtils";
 import { getDescription } from "tests/utils/customJsonReporter";
-import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+import { setupEnv, performSwapUntilQuoteSelectionStep } from "tests/utils/swapUtils";
+import { liveDataWithAddressCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";
 
-test.describe("Market - Starred Filter", () => {
+const exchangeApp: AppInfos = AppInfos.EXCHANGE;
+
+test.describe("Swap -- USDT (ERC-20) to ETH (custom flow)", () => {
+  setupEnv(true);
+
+  const fromAccount = TokenAccount.ETH_USDT_1;
+  const toAccount = Account.ETH_1;
+
+  const accPair: string[] = [fromAccount, toAccount].map(acc =>
+    acc.currency.speculosApp.name.replace(/ /g, "_"),
+  );
+
+  test.beforeEach(async () => {
+    setExchangeDependencies(accPair.map(appName => ({ name: appName })));
+  });
+
   test.use({
-    teamOwner: Team.WALLET_XP,
-    userdata: "speculos-tests-app",               // Pre-populated app state
-    featureFlags: LWD_WALLET_40_FF_ENABLED,        // Wallet 4.0 UI (market banner)
+    teamOwner: Team.SWAP,
+    userdata: "skip-onboarding-with-last-seen-device",
+    speculosApp: exchangeApp,
+    cliCommandsOnApp: [
+      [
+        { app: fromAccount.currency.speculosApp, cmd: liveDataWithAddressCommand(fromAccount) },
+        { app: toAccount.currency.speculosApp, cmd: liveDataWithAddressCommand(toAccount) },
+      ],
+      { scope: "test" },
+    ],
   });
 
   test(
-    "Filter starred asset in market list",
+    "Swap Tether USD (ERC-20) to Ethereum",
     {
-      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
-      annotation: {
-        type: "TMS",
-        description: "B2CQA-1879",
-      },
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+            "@swapSmoke", "@ethereum", "@family-evm"],
+      annotation: { type: "TMS", description: "B2CQA-2752, B2CQA-3450" },
     },
-    async ({ app }) => {
-      // Link to Xray
+    async ({ app, electronApp, speculos }) => {
       await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
 
-      // Step 1: Navigate to the Market page via Wallet 4.0 banner
-      await app.marketBanner.clickExploreMarketHeader();
+      const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
+      const swap = new Swap(fromAccount, toAccount, minAmount);
 
-      // Step 2: Wait for the market list to load
-      await app.market.validateMarketList();
+      await performSwapUntilQuoteSelectionStep(app, electronApp, swap, minAmount);
+      const provider = await app.swap.selectExchangeWithoutKyc(electronApp, swap);
+      swap.setProvider(provider);
+      await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
 
-      // Step 3: Star BTC from the market list
-      await app.market.starCoin(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
-
-      // Step 4: Open filter dropdown and select "Starred Assets"
-      await app.market.expectFilterDropdownToBeVisible();
-      await app.market.selectStarredAssetsFilter();
-
-      // Step 5: Verify only starred coin is visible
-      await app.market.expectCoinToBeVisible(
-        Account.BTC_NATIVE_SEGWIT_1.currency.ticker,
-      );
-      await app.market.expectCoinToNotBeVisible(
-        Account.ETH_1.currency.ticker,
-      );
+      if (provider.app) {
+        if (provider.app !== exchangeApp) {
+          await speculos.relaunch(provider.app.name);
+        }
+        await app.swap.clickExchangeButton(electronApp);
+        await app.swap.clickExecuteSwapButton(electronApp);
+        await app.swap.clickContinueButton();
+        await app.speculos.verifyAmountsAndAcceptSwap(swap, minAmount);
+        await app.swap.expectTransactionSentToasterToBeVisible();
+      } else {
+        await app.swap.clickExchangeButton(electronApp);
+        await app.speculos.verifyAmountsAndAcceptSwap(swap, minAmount);
+        await app.swapDrawer.verifyExchangeCompletedTextContent(
+          swap.accountToCredit.currency.name,
+        );
+      }
     },
   );
 });
 ```
 
-**Key decisions in this template:**
-
-| Decision | Choice | Why |
-|----------|--------|-----|
-| **Userdata** | `speculos-tests-app` | Market tests need pre-populated state, not an empty portfolio |
-| **Feature flags** | `LWD_WALLET_40_FF_ENABLED` | Required for market banner navigation and new filter UI |
-| **Navigation** | `marketBanner.clickExploreMarketHeader()` | Wallet 4.0 pattern — no sidebar navigation |
-| **Coin to star** | BTC via `Account.BTC_NATIVE_SEGWIT_1` | Uses the shared `Account` enum for consistency |
-| **Negative assertion** | `expectCoinToNotBeVisible(ETH)` | Proves the filter actually hides non-starred coins |
-| **No Speculos interaction** | No `speculosApp` in `test.use()` | This test does not interact with the device |
-
-### 30.11 Key Concepts Summary
-
-This walkthrough introduced several concepts not covered in Chapter 29:
-
-| Concept | What You Learned |
-|---------|-----------------|
-| **Cross-platform coverage gaps** | How to identify when a test exists on mobile but not desktop (or vice versa) by checking Xray links |
-| **Wallet 4.0 feature flags** | The `LWD_WALLET_40_FF_ENABLED` flag and how it changes the UI (market banner, navigation, filter patterns) |
-| **TMS annotation pattern** | Using `annotation: { type: "TMS", description: "..." }` instead of `xrayTicket` strings |
-| **Text and role selectors** | When `data-testid` is unavailable (react-select), use `getByText()` or `getByRole()` as fallbacks |
-| **Negative assertions** | `expectCoinToNotBeVisible()` — proving something is absent is as important as proving something is present |
-| **Automated In (multi-platform)** | When updating Xray, add the new platform alongside the existing one — do not replace |
+Compared to the `swaps`-array approach this is verbose, but it is the right escape hatch when a pair needs a variation the loop cannot express.
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Cross-platform coverage gaps are common in Ledger Live because mobile and desktop share the same Xray test cases but have independent test suites. The investigation workflow is always: read the Jira ticket → find the mobile test → search for an equivalent desktop test → if it exists, add the Xray link; if not, write a new test using the mobile test as a behavioral reference. Always verify with Allure before submitting.
+<strong>Key takeaway:</strong> QAA-1136 is a coverage-gap ticket in the same epic as QAA-1141. Closing it is not about writing new tests from scratch — it is about <strong>adding one object to an existing <code>swaps</code> array per missing pair</strong>. The workflow is identical to chapters 29/30: understand the ticket → analyze existing coverage → create branch (<code>support/</code>) → baseline run → add entry → rerun 3x → verify Allure → commit (Conventional Commits) → <code>/create-pr</code> → mark ready → update Xray <strong>Automated In</strong> per pair. Always ship per pair or in small batches — never a 9-entry mega-PR.
 </div>
 
-### 30.12 Quiz
+### 5.4.14 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — Market Filter Starred Walkthrough</h3>
-<p class="quiz-subtitle">4 questions · 75% to pass</p>
+<h3>Quiz -- QAA-1136 Walkthrough</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> Why does the desktop market test use <code>LWD_WALLET_40_FF_ENABLED</code> as a feature flag?</p>
+<p><strong>Q1.</strong> For QAA-1136, what is the minimal correct implementation of the USDT → ETH coverage?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is required for Speculos to start</button>
-<button class="quiz-choice" data-value="B">B) It enables the legacy market page layout</button>
-<button class="quiz-choice" data-value="C">C) It enables the Wallet 4.0 UI which provides the market banner navigation and the new filter dropdown pattern</button>
-<button class="quiz-choice" data-value="D">D) It disables the market page for testing purposes</button>
+<button class="quiz-choice" data-value="A">A) A new spec file <code>swap.usdt.eth.spec.ts</code> with a full custom <code>test.describe</code> block</button>
+<button class="quiz-choice" data-value="B">B) A patch to <code>performSwapUntilQuoteSelectionStep</code> to handle ERC-20</button>
+<button class="quiz-choice" data-value="C">C) One new object appended to the <code>swaps</code> array in <code>send.swap.spec.ts</code>, reusing every existing helper</button>
+<button class="quiz-choice" data-value="D">D) A Firebase feature flag flip in <code>swap-live-app</code></button>
 </div>
-<p class="quiz-explanation">The <code>lwdWallet40</code> feature flag enables the Wallet 4.0 UI. With <code>marketBanner: true</code>, the portfolio page shows the "Explore Market" banner used for navigation. Without this flag, the market banner does not exist and <code>app.marketBanner.clickExploreMarketHeader()</code> would fail.</p>
+<p class="quiz-explanation">The <code>swaps</code> array + <code>for</code> loop pattern in <code>send.swap.spec.ts</code> already handles the entire flow (fixtures, Speculos setup, token approval, provider selection, assertion). Adding a pair is a single new object. Writing a new spec or patching helpers would duplicate existing code.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> The mobile market test uses <code>$TmsLink("B2CQA-1879")</code>. What is the desktop equivalent?</p>
+<p><strong>Q2.</strong> Why is USDT → ETH a more interesting test case than BTC → BTC would be?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>test.use({ tmsLink: "B2CQA-1879" })</code></button>
-<button class="quiz-choice" data-value="B">B) <code>annotation: { type: "TMS", description: "B2CQA-1879" }</code> in the test options, combined with <code>addTmsLink()</code> in the test body</button>
-<button class="quiz-choice" data-value="C">C) <code>xrayTicket: "B2CQA-1879"</code> in the test data</button>
-<button class="quiz-choice" data-value="D">D) There is no desktop equivalent — Xray only works with mobile</button>
+<button class="quiz-choice" data-value="A">A) It uses a different provider</button>
+<button class="quiz-choice" data-value="B">B) It exercises the ERC-20 <strong>token approval</strong> codepath via <code>ensureTokenApproval</code>, which native-to-native swaps skip entirely</button>
+<button class="quiz-choice" data-value="C">C) It does not need a device</button>
+<button class="quiz-choice" data-value="D">D) It bypasses Speculos</button>
 </div>
-<p class="quiz-explanation">Desktop tests use Playwright's annotation system: the <code>annotation.description</code> field stores the B2CQA IDs, and <code>addTmsLink(getDescription(test.info().annotations, "TMS").split(", "))</code> registers them with Allure. This is different from the Jest/Detox <code>$TmsLink()</code> helper used on mobile, but both achieve the same result: linking the test to Xray.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> The desktop market page object uses <code>this.page.getByText("Show").first()</code> for the filter dropdown instead of <code>getByTestId()</code>. Why?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The react-select component does not forward <code>data-testid</code>, so a text-based selector is used as a pragmatic fallback</button>
-<button class="quiz-choice" data-value="B">B) Text selectors are always preferred over test IDs in Playwright</button>
-<button class="quiz-choice" data-value="C">C) The filter dropdown was recently added and nobody set up a test ID yet</button>
-<button class="quiz-choice" data-value="D">D) <code>getByTestId()</code> does not work in Electron apps</button>
-</div>
-<p class="quiz-explanation">Some third-party React components (like react-select) do not forward <code>data-testid</code> attributes to the rendered DOM. In these cases, the best alternative is to use <code>getByText()</code> or <code>getByRole()</code> selectors. The comment in the page object explains this explicitly: "using text selector because react-select doesn't forward data-testid".</p>
+<p class="quiz-explanation">Token swaps on DEXs require an ERC-20 <code>approve()</code> before the swap can happen. <code>ensureTokenApproval</code> handles that step. Native-to-native pairs (BTC → BTC, ETH → ETH) do not exercise this codepath, so they are not good representatives for token-swap coverage.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> After merging the PR, what should you set in Xray for B2CQA-1879's "Automated In" field?</p>
+<p><strong>Q3.</strong> What is the correct way to update Xray after merging the PR for B2CQA-2752?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Replace LLM with LLD</button>
+<button class="quiz-choice" data-value="A">A) Replace LLM with LLD in <strong>Automated In</strong></button>
 <button class="quiz-choice" data-value="B">B) Remove LLM since desktop now covers it</button>
-<button class="quiz-choice" data-value="C">C) Set it to LLD only</button>
-<button class="quiz-choice" data-value="D">D) Add LLD alongside the existing LLM — both platforms now automate this test case</button>
+<button class="quiz-choice" data-value="C">C) Leave Automated In unchanged</button>
+<button class="quiz-choice" data-value="D">D) Add LLD alongside the existing LLM in <strong>Automated In</strong> — both platforms now automate this test case</button>
 </div>
-<p class="quiz-explanation">B2CQA-1879 was already automated on LLM (mobile). By adding the Xray link to the desktop test, it is now automated on both platforms. The "Automated In" field should reflect both: LLM and LLD. Never remove an existing platform when adding a new one.</p>
+<p class="quiz-explanation">Desktop coverage does not invalidate mobile coverage. Both platforms now automate <code>B2CQA-2752</code>, so <strong>Automated In</strong> should reflect both — same rule as chapter 30.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q4.</strong> A teammate proposes to land all 9 missing pairs in a single PR. What is the right pushback?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Ship per pair or in small batches (2-3 entries per PR) — each pair exercises different provider routes and one unrelated DEX failure would block the entire batch</button>
+<button class="quiz-choice" data-value="B">B) It is fine — land everything at once</button>
+<button class="quiz-choice" data-value="C">C) Only Senior QAs can merge swap changes</button>
+<button class="quiz-choice" data-value="D">D) Do it in a single commit on <code>main</code></button>
+</div>
+<p class="quiz-explanation">Each pair can fail independently (provider liquidity, token approval, Speculos app switching). Small PRs isolate failures and keep reviews fast. This is consistent with the Git workflow rules: small, isolated, meaningful commits.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> You run the new USDT → ETH test and it fails with <code>INSUFFICIENT_LIQUIDITY</code>. What is the correct first action?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Open a bug in <code>ledger-live</code></button>
+<button class="quiz-choice" data-value="B">B) Check the provider status (this is a provider-side issue, not a test regression) — investigate on Datadog or the swap backend before changing test code</button>
+<button class="quiz-choice" data-value="C">C) Delete the test entry</button>
+<button class="quiz-choice" data-value="D">D) Switch to a different currency</button>
+</div>
+<p class="quiz-explanation"><code>INSUFFICIENT_LIQUIDITY</code> is a provider-side response, not a test bug. Check provider health (Datadog, the <code>swap</code> backend, Slack) before changing code. If it is transient, wait and retry. If it is persistent, escalate to the Swap team with the observed behavior.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -3364,289 +1422,144 @@ This walkthrough introduced several concepts not covered in Chapter 29:
 
 ---
 
-## Exercises & Challenges
-
-<div class="chapter-intro">
-Reading is not enough — you need to practice. These exercises progress from read-only analysis to hands-on code writing. Each has a clear objective, estimated time, and verification method. Complete them in order.
-</div>
-
-### 31.1 Exercise 1: Trace the Fixture Lifecycle (30 min)
-
-**Objective:** Understand how fixtures wire together.
-
-**Instructions:**
-1. Open `e2e/desktop/tests/fixtures/common.ts`
-2. For each fixture (`userdataDestinationPath`, `speculos`, `electronApp`, `page`, `app`), identify:
-   - What other fixtures it depends on (appears in its parameter list)
-   - What setup it performs (before `use()`)
-   - What it provides to the test (argument to `use()`)
-   - What teardown it performs (after `use()`)
-3. Draw the dependency graph on paper or in a text file
-
-**Expected output:** A diagram like:
-```
-userdata → userdataOriginalFile → userdataDestinationPath
-                                          ↓
-speculosApp → speculos ←── cliCommands
-                  ↓
-              electronApp ←── featureFlags, env, lang, theme
-                  ↓
-                page ←── teamOwner
-                  ↓
-                 app
-```
-
-**Verification:** Compare your diagram against the fixture code. Every arrow should correspond to a fixture name appearing in another fixture's parameter list.
-
-### 31.2 Exercise 2: Add an Assertion to a Page Object (30 min)
-
-**Objective:** Practice the `@step` decorator and page object pattern.
-
-**Instructions:**
-1. Open `e2e/desktop/tests/page/portfolio.page.ts`
-2. Add a new method `expectNoAccountsMessage()` that:
-   - Uses the `@step` decorator with a descriptive message
-   - Checks that the "empty state" UI is visible (use `addAccountButton` as a proxy)
-   - Uses `expect().toBeVisible()`
-3. Save the file (do NOT commit yet — this is practice)
-
-**Template:**
-```typescript
-@step("Expect empty portfolio state")
-async expectNoAccountsMessage() {
-  // YOUR CODE HERE
-}
-```
-
-**Verification:** The method should follow the exact same pattern as `checkAddAccountButtonVisibility()` in the same file.
-
-### 31.3 Exercise 3: Read and Explain a Test (45 min)
-
-**Objective:** Prove you can read any test in the codebase.
-
-**Instructions:**
-1. Open `e2e/desktop/tests/specs/settings.spec.ts`
-2. Pick the first test in the file
-3. Write a line-by-line explanation of:
-   - What each import does
-   - What `test.use()` configures and why
-   - What each `tag` means
-   - What the annotation does
-   - What each `await app.*` call does in the user flow
-   - What the test verifies
-
-**Verification:** Your explanation should match the test's actual behavior. Run the test to confirm: `pnpm e2e:desktop test:playwright settings.spec.ts`
-
-### 31.4 Exercise 4: Debug a Broken Test (45 min)
-
-**Objective:** Practice identifying and fixing common test bugs.
-
-**Instructions:** Copy this test into a scratch file and find ALL the bugs:
-
-```typescript
-import { test } from "@playwright/test";  // BUG 1: wrong import
-import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
-import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
-
-test.describe("Broken Test", () => {
-  test.use({
-    teamOwner: Team.WALLET_XP,
-    userdata: "skip-onboarding",  // BUG 2: might need device-aware userdata
-    speculosApp: Currency.BTC.speculosApp,
-  });
-
-  test("Add BTC account", {
-    tag: ["@NanoSP"],
-    annotation: { type: "TMS", description: "B2CQA-XXXX" },
-  }, async ({ app }) => {
-    // BUG 3: missing addTmsLink call
-    app.portfolio.clickAddAccountButton();  // BUG 4: missing await
-    await app.addAccount.selectCurrency(Currency.BTC);
-    await app.addAccount.addAccounts();
-    await app.addAccount.done();
-    // BUG 5: no assertions — test never verifies the account was created
-  });
-});
-```
-
-**Bugs to find:**
-1. Wrong import source
-2. Userdata might not have last-seen device
-3. Missing `addTmsLink()` call
-4. Missing `await` on an async call
-5. No assertions after the flow
-
-**Verification:** Fix all 5 bugs and compare against the template in Chapter 28.6.
-
-### 31.5 Exercise 5: Write a Test from Scratch (60 min)
-
-**Objective:** Write a complete test for an existing flow.
-
-**Instructions:**
-1. Open `e2e/desktop/tests/specs/rename.account.spec.ts` and read it
-2. Write a NEW test in the same file (or a scratch file) that:
-   - Renames a BTC account (instead of the currency used in the existing test)
-   - Uses the correct userdata (needs an existing account)
-   - Has proper tags, annotations, and TMS links
-   - Verifies the rename persisted
-3. Run your test locally
-
-**Hints:**
-- You will need `cliCommands` to populate BTC account data
-- Look at how the existing rename test sets up its userdata
-- Check `app.account` for rename-related methods
-
-### 31.6 Exercise 6: Extend the Add Account Test (45 min)
-
-**Objective:** Add new assertions to an existing test.
-
-**Instructions:**
-1. After successfully understanding the add account test (Ch 29), add these verifications:
-   - After adding the account, check that the operation history shows at least one operation
-   - Verify the account name matches "Bitcoin 1"
-   - Click on the last operation and verify the operation drawer opens with correct info
-
-**Hint:** The existing test already does most of this. Study the assertions at the bottom of the `add.account.spec.ts` test and understand what each one verifies.
-
-### 31.7 Challenge: Write a Complete Send BTC Test (90 min)
-
-**Objective:** Write a full E2E test with no guidance.
-
-**Task:** Write a test that:
-1. Starts with an existing BTC account (pre-populated via CLI)
-2. Opens the Send flow from the account page
-3. Fills in a recipient address and amount
-4. Signs the transaction on Speculos
-5. Verifies the "Transaction sent" toaster appears
-6. Verifies the transaction appears in the operation list
-
-**No hints.** Use everything you learned in Chapters 22-30. Refer to:
-- `send.tx.spec.ts` for existing send test patterns
-- `send.modal.ts` for page object methods
-- `speculos.page.ts` for device signing
-- The daily workflow checklist (Ch 28)
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> These exercises progress from reading to writing. Complete Exercises 1-4 first — they build the analytical skills you need. Then tackle 5-6, which require code changes. The Challenge is your graduation test: if you can write a complete Send BTC test from zero, you are ready to work independently on E2E tickets.
-</div>
-
----
 
 ## Part 5 Final Assessment
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 5 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions · 80% to pass · Covers all Part 5 chapters</p>
+<p class="quiz-subtitle">12 questions · 80% to pass · Covers all Part 5 chapters</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> What does Playwright's auto-waiting mechanism do before a <code>click()</code> action?</p>
+<p><strong>Q1.</strong> A Live App is loaded into the Wallet via...</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Waits a fixed 1 second</button>
-<button class="quiz-choice" data-value="B">B) Checks that the element is attached, visible, stable, able to receive events, and enabled — retrying until timeout</button>
-<button class="quiz-choice" data-value="C">C) Refreshes the page</button>
-<button class="quiz-choice" data-value="D">D) Takes a screenshot</button>
+<button class="quiz-choice" data-value="A">A) A native module compiled into the installer</button>
+<button class="quiz-choice" data-value="B">B) A sandboxed webview pointing at a remote URL declared in the manifest</button>
+<button class="quiz-choice" data-value="C">C) A command-line plugin</button>
+<button class="quiz-choice" data-value="D">D) An Electron IPC channel</button>
 </div>
-<p class="quiz-explanation">Playwright's auto-waiting performs 5 actionability checks before every action, retrying the entire check until the timeout is reached. This eliminates manual sleep calls.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q2.</strong> What is the fixture dependency order from first to last?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) app → page → electronApp → speculos</button>
-<button class="quiz-choice" data-value="B">B) page → electronApp → app → speculos</button>
-<button class="quiz-choice" data-value="C">C) electronApp → speculos → page → app</button>
-<button class="quiz-choice" data-value="D">D) speculos → electronApp → page → app</button>
-</div>
-<p class="quiz-explanation">Speculos must start first (Docker container). Then Electron launches with the Speculos port. Then the page is obtained from Electron. Finally, the Application hub wraps the page. Each depends on the previous.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> What is the purpose of Electron's <code>--user-data-dir</code> flag in the E2E context?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It isolates each test's persistent data in a unique directory, enabling parallel execution without data conflicts</button>
-<button class="quiz-choice" data-value="B">B) It sets the download directory for the app</button>
-<button class="quiz-choice" data-value="C">C) It specifies the Speculos connection</button>
-<button class="quiz-choice" data-value="D">D) It configures the test reporter</button>
-</div>
-<p class="quiz-explanation">Each test gets a UUID-named directory under <code>tests/artifacts/userdata/</code>. The <code>--user-data-dir</code> flag points Electron to this directory so each parallel test has isolated state (accounts, settings, etc.).</p>
+<p class="quiz-explanation">A Live App is a remote web app loaded into a sandboxed webview. The URL, permissions, and icon come from the manifest declared in <code>ledger-live</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> How does the <code>@step("Click on asset $0")</code> decorator handle the <code>$0</code> placeholder?</p>
+<p><strong>Q2.</strong> Which Wallet-API invariant protects users against a misbehaving Live App?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is ignored — <code>$0</code> appears literally in the step name</button>
-<button class="quiz-choice" data-value="B">B) It is replaced with the test name</button>
-<button class="quiz-choice" data-value="C">C) It is replaced with the first argument of the decorated method at runtime</button>
-<button class="quiz-choice" data-value="D">D) It triggers a special Allure report section</button>
+<button class="quiz-choice" data-value="A">A) The Live App cannot access the internet</button>
+<button class="quiz-choice" data-value="B">B) The Live App cannot render UI</button>
+<button class="quiz-choice" data-value="C">C) Every privileged action (accounts, signing, network) is brokered by the Wallet shell and checked against the manifest's declared permissions</button>
+<button class="quiz-choice" data-value="D">D) The Live App is rebuilt locally before launch</button>
 </div>
-<p class="quiz-explanation">The step decorator uses <code>message.replace(/\$(\d+)/g, (_, idx) => String(args[Number(idx)]))</code> to substitute placeholders with function arguments. <code>$0</code> = first arg, <code>$1</code> = second arg, etc.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What does <code>DISABLE_TRANSACTION_BROADCAST: "1"</code> prevent?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Network access during tests</button>
-<button class="quiz-choice" data-value="B">B) Real cryptocurrency transactions from being sent to the blockchain</button>
-<button class="quiz-choice" data-value="C">C) Speculos from starting</button>
-<button class="quiz-choice" data-value="D">D) Test results from being reported</button>
-</div>
-<p class="quiz-explanation">Without this flag, send tests would broadcast real transactions using the test seed's funds. This flag ensures the app completes the entire send flow but stops before the final broadcast step.</p>
+<p class="quiz-explanation">The Wallet-API bridge enforces permissions at the shell. A Live App cannot escalate beyond what its manifest declares.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q6.</strong> What is the recommended order for debugging a test failure in Allure?</p>
+<p><strong>Q3.</strong> The Swap backend is composed of two processes. Which pair?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Step trace → Screenshot → Speculos screenshot → Video → Network logs</button>
-<button class="quiz-choice" data-value="B">B) Video → Screenshot → Logs</button>
-<button class="quiz-choice" data-value="C">C) Re-run immediately without investigation</button>
-<button class="quiz-choice" data-value="D">D) Read the source code first</button>
+<button class="quiz-choice" data-value="A">A) The <code>swap</code> service (REST, quotes, trade creation) and the <code>swap</code> completer (status poller) — with PostgreSQL and RabbitMQ between them</button>
+<button class="quiz-choice" data-value="B">B) <code>swap-live-app</code> and <code>exchange-sdk</code></button>
+<button class="quiz-choice" data-value="C">C) Firebase and Vercel</button>
+<button class="quiz-choice" data-value="D">D) Speculos and the Ledger device</button>
 </div>
-<p class="quiz-explanation">Start with the step trace (fastest — which step failed?), then check screenshots (what was visible?), then Speculos screenshot (what was on the device?), then video (for complex flows), then network logs (for API issues).</p>
+<p class="quiz-explanation">The <code>swap</code> service handles synchronous quote/trade requests; the completer polls providers asynchronously for long-running trade statuses. RabbitMQ decouples them; PostgreSQL is the system of record.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q7.</strong> What does <code>getModularSelector(app, "ASSET")</code> return when the legacy UI is active?</p>
+<p><strong>Q4.</strong> Which repo holds the declarative rules about which swap pairs are enabled per provider and per environment?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) An error</button>
-<button class="quiz-choice" data-value="B">B) The legacy modal object</button>
-<button class="quiz-choice" data-value="C">C) An empty object</button>
-<button class="quiz-choice" data-value="D">D) <code>null</code> — signaling the test to use the legacy flow path</button>
+<button class="quiz-choice" data-value="A">A) <code>swap-live-app</code></button>
+<button class="quiz-choice" data-value="B">B) <code>ledger-live</code></button>
+<button class="quiz-choice" data-value="C">C) <code>ledger-live-assets</code></button>
+<button class="quiz-choice" data-value="D">D) <code>swap-configuration</code> — Rust tooling over CSV configuration files</button>
 </div>
-<p class="quiz-explanation"><code>getModularSelector()</code> waits 5 seconds for the modular dialog. If it doesn't appear, it catches the timeout and returns <code>null</code>. The test uses <code>if (selector) { ... } else { ... }</code> to handle both UI paths.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q8.</strong> Why should you run a new test at least 3 times before submitting it?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) To generate more Allure data</button>
-<button class="quiz-choice" data-value="B">B) Because Playwright requires multiple runs</button>
-<button class="quiz-choice" data-value="C">C) To catch flaky behavior — a test that passes once but fails intermittently is worse than no test</button>
-<button class="quiz-choice" data-value="D">D) To warm up the Docker cache</button>
-</div>
-<p class="quiz-explanation">Flaky tests erode trust in the test suite. A test that passes 1/3 times will cause false alarms in CI. Running 3 times catches race conditions, timing issues, and dynamic data problems before they reach the main branch.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q9.</strong> Where do the <code>Currency</code> and <code>Account</code> enums live, and why?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) In each test file — for test isolation</button>
-<button class="quiz-choice" data-value="B">B) In <code>@ledgerhq/live-common/e2e/enum/</code> — shared between desktop and mobile so both suites use identical test data definitions</button>
-<button class="quiz-choice" data-value="C">C) In <code>playwright.config.ts</code> — for centralized configuration</button>
-<button class="quiz-choice" data-value="D">D) In the Speculos repository — because they represent device apps</button>
-</div>
-<p class="quiz-explanation">Test data enums are in the shared <code>live-common</code> package so both desktop (Playwright) and mobile (Detox/Jest) E2E suites use the same currency, account, and team definitions. This prevents inconsistencies between platforms.</p>
+<p class="quiz-explanation"><code>swap-configuration</code> is the declarative ruleset. Pair availability, min/max, fee tiers, provider enablement — all live there. Check it before assuming a code bug.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q10.</strong> What is the correct commit message format for adding a new desktop E2E test?</p>
+<p><strong>Q5.</strong> Swap follows which branching model?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>test(e2e): add first-time BTC account test for desktop</code></button>
-<button class="quiz-choice" data-value="B">B) <code>Added BTC test</code></button>
-<button class="quiz-choice" data-value="C">C) <code>feat: new test for BTC</code></button>
-<button class="quiz-choice" data-value="D">D) <code>WIP test BTC</code></button>
+<button class="quiz-choice" data-value="A">A) Trunk-based on <code>develop</code> — short-lived <code>feat/*</code> and <code>fix/*</code> branches, Changesets-driven versioning, <code>release-production.yml</code> creates an <code>app@vX.Y.Z</code> tag from <code>develop</code></button>
+<button class="quiz-choice" data-value="B">B) Gitflow with a dedicated <code>release/app@v1.3.xx</code> branch cut from <code>develop</code>, merged to both <code>main</code> and <code>develop</code> when tagged</button>
+<button class="quiz-choice" data-value="C">C) Continuous deployment from <code>main</code> with no tags</button>
+<button class="quiz-choice" data-value="D">D) None — Swap releases are manual</button>
 </div>
-<p class="quiz-explanation">The repo uses Conventional Commits: <code>&lt;type&gt;(&lt;scope&gt;): &lt;description&gt;</code>. For test additions, use <code>test(e2e):</code> as the type and scope. This ensures consistent changelogs and follows the repository's contribution guidelines.</p>
+<p class="quiz-explanation">Swap is <strong>trunk-based</strong>. <code>develop</code> is the single source of truth; there is no release branch and no Gitflow. Production tags (<code>app@vX.Y.Z</code>) are created by the <code>release-production.yml</code> workflow, which consumes pending Changesets. Hotfixes branch from the latest tag and are merged back into <code>develop</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> Swap has <strong>two</strong> Firebase projects. What is the responsibility split?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) One for Android, one for iOS</button>
+<button class="quiz-choice" data-value="B">B) One for pre-prod, one for production</button>
+<button class="quiz-choice" data-value="C">C) <code>ledger-live-production</code> holds Wallet-side flags (including whether the Swap entry appears in the Wallet); <code>swap-live-app</code> holds Live-App-side flags (provider enablement inside the app, UI experiments)</button>
+<button class="quiz-choice" data-value="D">D) One is public, one is private</button>
+</div>
+<p class="quiz-explanation">The split is Wallet-side vs. Live-App-side. Remembering this split is essential when tracing why a swap feature is (in)visible for a given user — the flag may be in one project or the other.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q7.</strong> The Swap production backend URL is...</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>swap.ledger.com</code></button>
+<button class="quiz-choice" data-value="B">B) <code>swap-prod.ledger-test.com/v5</code></button>
+<button class="quiz-choice" data-value="C">C) <code>swap-live-app.ledger.com</code></button>
+<button class="quiz-choice" data-value="D">D) <code>swap-live-app.aws.prd.ldg-tech.com</code></button>
+</div>
+<p class="quiz-explanation">Production backend (the <code>swap</code> service) is <code>swap.ledger.com</code>. Production frontend (the Live App) is <code>swap-live-app.ledger.com</code> (public Cloudflare) or <code>swap-live-app.aws.prd.ldg-tech.com</code> (internal AWS). <code>ledger-test.com</code> is the public test domain used for stg/ppr only.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q8.</strong> On QAA-1136, what is the correct analysis step before writing code?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Rewrite <code>send.swap.spec.ts</code> from scratch</button>
+<button class="quiz-choice" data-value="B">B) Open a Jira sub-task per missing pair</button>
+<button class="quiz-choice" data-value="C">C) Upgrade <code>exchange-sdk</code></button>
+<button class="quiz-choice" data-value="D">D) <code>grep</code> each B2CQA ID under QAA-1136 in <code>e2e/desktop/tests/specs/</code> to confirm the gap — then cross-check against the mobile specs to get the canonical reference</button>
+</div>
+<p class="quiz-explanation">Never add tests without confirming the gap first. <code>grep</code> the ID in the desktop specs (no match = real gap) and confirm the mobile reference exists — that gives you the canonical flow to mirror.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q9.</strong> Which helper handles the ERC-20 approval step required before a DEX token swap?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>app.swap.ensureTokenApproval(fromAccount, provider, minAmount)</code></button>
+<button class="quiz-choice" data-value="B">B) <code>app.swap.getMinimumAmount(fromAccount, toAccount)</code></button>
+<button class="quiz-choice" data-value="C">C) <code>performSwapUntilQuoteSelectionStep()</code></button>
+<button class="quiz-choice" data-value="D">D) <code>setExchangeDependencies()</code></button>
+</div>
+<p class="quiz-explanation"><code>ensureTokenApproval</code> performs the ERC-20 approval before the swap. Without it, DEX token swaps will fail. Native-to-native pairs do not need this step.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q10.</strong> The <code>completer</code> lets the Swap backend do something the Live App alone could not. What?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Broadcast transactions</button>
+<button class="quiz-choice" data-value="B">B) Track the status of a trade asynchronously until it reaches a terminal state, even if the user closes the Live App</button>
+<button class="quiz-choice" data-value="C">C) Sign transactions</button>
+<button class="quiz-choice" data-value="D">D) Add new providers</button>
+</div>
+<p class="quiz-explanation">The completer decouples user-facing trade creation (fast, synchronous) from provider status tracking (slow, asynchronous). It is why a trade can reach its terminal state even after the user closes Swap.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q11.</strong> You see a swap failing in pre-prod but not in staging. What is the most likely cause?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A Speculos version mismatch</button>
+<button class="quiz-choice" data-value="B">B) A Node version mismatch in CI</button>
+<button class="quiz-choice" data-value="C">C) A configuration delta — <code>swap-configuration</code> rules, or a Firebase flag in <code>swap-live-app</code>, differing between stg and ppr</button>
+<button class="quiz-choice" data-value="D">D) A Chrome auto-update</button>
+</div>
+<p class="quiz-explanation">"Works in stg, fails in ppr" is almost always a configuration delta. Start with <code>swap-configuration</code> (pair/provider enablement) and the <code>swap-live-app</code> Firebase flags side by side.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q12.</strong> After merging the PR for B2CQA-2752 on QAA-1136, what is the correct Jira/Xray hygiene?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Close QAA-1136 immediately</button>
+<button class="quiz-choice" data-value="B">B) Delete the original mobile test</button>
+<button class="quiz-choice" data-value="C">C) Nothing — CI handles everything</button>
+<button class="quiz-choice" data-value="D">D) Set B2CQA-2752 Status=Automated, add LLD to Automated In (keeping LLM); only move QAA-1136 to Done when <strong>all</strong> its B2CQA children are landed</button>
+</div>
+<p class="quiz-explanation">Per child: mark Automated in Xray and add LLD to Automated In without removing LLM. The parent QAA-1136 stays in progress until every child is landed; otherwise the coverage dashboard will lie.</p>
 </div>
 
 <div class="quiz-score"></div>

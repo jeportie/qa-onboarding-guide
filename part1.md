@@ -728,47 +728,11 @@ pnpm e2e:desktop test:playwright:setup
 
 ### 5.6 Build for Mobile E2E Testing
 
-```bash
-# Build shared dependencies
-pnpm build:llm:deps
+Mobile E2E setup is significantly more involved than desktop (Xcode, Android Studio, Ruby/CocoaPods, AVDs, simulators, ENVFILE variants, Detox configs). To keep this chapter focused on the baseline dev environment, the full mobile toolchain walkthrough lives in its own place.
 
-# Build CLI
-pnpm build:cli
+**Baseline mac requirement:** you need an Apple Silicon Mac with at least 32 GB RAM and 100 GB free disk for a comfortable iOS + Android setup. Older Intel Macs will struggle with the iOS simulator + Metro + Speculos combination.
 
-# For iOS: install CocoaPods
-cd apps/ledger-live-mobile && pnpm mobile pod && cd ../..
-
-# Build the app for testing
-# iOS:
-pnpm mobile e2e:build -c ios.sim.debug
-
-# Android:
-pnpm mobile e2e:build -c android.emu.debug
-```
-
-**Troubleshooting: CocoaPods lockfile out of sync**
-
-If `pnpm i` fails with a cow ASCII art error saying *"CocoaPods lockfile is probably out of sync"*, run:
-
-```bash
-rm -rf ~/.cocoapods/
-cd apps/ledger-live-mobile/ios/
-bundle install
-cd ../../..
-pnpm mobile pod
-```
-
-Then retry `pnpm i`. This clears stale CocoaPods cache, reinstalls the Ruby bundler dependencies, and regenerates the `Podfile.lock`.
-
-**Android emulator setup:**
-1. Open Android Studio → Tools → AVD Manager
-2. Create Virtual Device → Pixel 7 → API 34
-3. Name it `Android_Emulator` (exact name required)
-
-**iOS simulator setup:**
-1. Open Xcode → Developer Tool → Simulator
-2. Device → Manage Devices → Click `+`
-3. Name: `iOS Simulator`, Type: `iPhone 15`, iOS 17+
+> **See Part 4 Ch 4.4 "Mobile Toolchain & Env Setup"** for the complete walkthrough: Xcode + Android Studio install, Ruby 3.3 + bundler, CocoaPods, AVD creation, iOS simulator naming, ENVFILE variants (`.env.mock`, `.env.mock.prerelease`, release variants), and the CocoaPods lockfile troubleshooting recipe.
 
 ### 5.7 Run Your First Test
 
@@ -928,14 +892,14 @@ If your first test runs — even if it fails — your setup is correct. Most fai
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q9.</strong> Where should a new QA engineer look first for documentation and help?</p>
+<p><strong>Q9.</strong> In the monorepo, where do E2E page objects, fixtures, and specs for the Desktop app live?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Stack Overflow</button>
-<button class="quiz-choice" data-value="B">B) The README.md in the repo root</button>
-<button class="quiz-choice" data-value="C">C) The Ledger Live Wiki, the QAA Slack channel, and this onboarding guide</button>
-<button class="quiz-choice" data-value="D">D) The Playwright documentation</button>
+<button class="quiz-choice" data-value="A">A) `apps/ledger-live-desktop/tests/` — colocated with the app source</button>
+<button class="quiz-choice" data-value="B">B) `libs/ledger-live-common/e2e/` — inside the shared library layer</button>
+<button class="quiz-choice" data-value="C">C) `e2e/desktop/tests/` — top-level E2E directory with `specs/`, `page/`, and `fixtures/` subfolders</button>
+<button class="quiz-choice" data-value="D">D) `tools/e2e/desktop/` — alongside the build tools</button>
 </div>
-<p class="quiz-explanation">The wiki contains team-specific guides (LLD:E2ETesting, LLM:End-to-end-testing). The QAA Slack channel is your team's communication hub. This guide provides structured onboarding.</p>
+<p class="quiz-explanation">The top-level `e2e/` directory is owned by `@ledgerhq/qaa` and holds desktop/ (Playwright) and mobile/ (Detox) test trees. Under `e2e/desktop/tests/` you find specs, page objects, fixtures, and userdata profiles — separate from the app source.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">

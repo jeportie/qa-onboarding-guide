@@ -779,7 +779,7 @@ bundle install
 cd ../../..
 pnpm mobile pod
 ```
-Then retry `pnpm i`. See also Chapter 5.6 and Chapter 28.3.
+Then retry `pnpm i`. See also Chapter 5.6 and Chapter 3.7.3.
 
 **Q: `TypeError: Invalid Version: DS_Store` in coin-apps directory**
 A: macOS `.DS_Store` files in the coin-apps folder confuse version parsing. Remove them:
@@ -928,30 +928,44 @@ If the name doesn't match, rename it in Android Studio (Device Manager → Edit 
 |------|------------|
 | **APDU** | Application Protocol Data Unit. The low-level binary protocol used for all communication between a host application and a smartcard/secure element (Ledger device). Commands are sent as byte arrays. |
 | **Allure** | An open-source test reporting framework that generates interactive HTML reports with step traces, screenshots, videos, and environment information. |
+| **Alpaca** | Generic adapter layer for coin integrations. 4 of 29 coin families are "alpacaized" as of 2026-04 (evm, stellar, tezos, xrp). Only xrp is fully extracted into `alpaca-coin-module`. |
+| **B2CQA** | Jira project holding Xray test case definitions. Test types: 10756 Test Plan, 10759 Test Case, 10760 Precondition. |
 | **BAGL** | Ledger's display framework for non-touch devices (Nano S, Nano S Plus, Nano X). Renders UI on small monochrome screens (128x32 or 128x64 pixels). |
 | **BIP39** | Bitcoin Improvement Proposal 39. Defines the standard for mnemonic seed phrases (12 or 24 words) used to derive cryptographic keys deterministically. |
+| **BOLOS** | Blockchain Open Ledger Operating System. The SE OS running on Ledger hardware devices. |
 | **Bot (Ledger Live Bot)** | A stateless, autonomous test engine that crawls all accounts in a seed, discovers possible operations, and executes randomized mutations. Uses 7 named seeds (Mere Denis through Nitrogen). |
 | **Changeset** | A small markdown file (in `.changeset/`) describing changes to a published package. Used by the changesets tool to generate changelogs and version bumps. |
+| **Changesets** | Ledger Live's release-versioning tooling (`@changesets/cli`). Every behavior-changing PR ships a `.changeset/*.md` file. NOT semantic-release. |
 | **CI/CD** | Continuous Integration / Continuous Deployment. Automated pipeline that builds, tests, and deploys code on every change. Ledger Live uses GitHub Actions. |
 | **CLI** | Command-Line Interface. Ledger Live's CLI tool (`apps/cli/`) is used in E2E tests to populate test data (accounts, transactions). |
-| **CODEOWNERS** | A GitHub file (`.github/CODEOWNERS`) that defines which team must review PRs touching specific file paths. Enforces team ownership. |
+| **CODEOWNERS** | `.github/CODEOWNERS` file mapping path patterns to GitHub teams that auto-review PRs touching those paths. |
 | **Coin App** | A compiled firmware application (`.elf` binary) that runs on a Ledger device to support a specific cryptocurrency (e.g., the Ethereum app, Bitcoin app). |
 | **Coin Family** | A group of related blockchains sharing the same transaction model and coin module. E.g., the EVM family includes Ethereum, Polygon, BSC, Arbitrum, etc. |
 | **Content-Addressable Store** | pnpm's storage mechanism where every package version is stored exactly once, identified by its content hash. Saves disk space in monorepos. |
 | **Conventional Commits** | A commit message standard: `type(scope): description`. Enables automated changelog generation and semantic versioning. |
 | **Detox** | A grey-box E2E testing framework for React Native by Wix. "Grey-box" means it has visibility into app internals for synchronization. |
+| **Donjon** | Ledger's security research team. Operates the public bug bounty at donjon.ledger.com. |
 | **E2E** | End-to-End testing. Tests that simulate real user interactions across the full application stack, from UI to backend to device. |
+| **EAL** | Evaluation Assurance Level (Common Criteria). Ledger Stax/Flex/Nano S+ are EAL6+; Nano X is EAL5+. |
 | **ELF** | Executable and Linkable Format. The binary format used for compiled Ledger coin applications that run inside Speculos. |
 | **Electron** | A framework for building cross-platform desktop applications using web technologies (Chromium + Node.js). Ledger Live Desktop is an Electron app. |
+| **ENVFILE** | Environment file passed to Detox builds. Mobile E2E uses `.env.mock` (staging Firebase) and `.env.mock.prerelease` (prod Firebase). Release builds use a different set (`.env`, `.env.testing`, `.env.staging`, `.env.production`). |
 | **Feature Flag** | A configuration toggle stored in Firebase Remote Config that enables or disables features without deploying new code. Supports gradual rollouts and kill switches. |
 | **Firebase Remote Config** | Google's cloud service used by Ledger Live to store and serve feature flags. Four environments: Ledger Wallet, Swap, Earn, Buy Sell. |
 | **Fixture** | In Playwright, a mechanism for declaring reusable test setup and teardown logic. Fixtures are injected into tests via parameter destructuring. The Ledger Live fixture system handles Speculos, Electron, page objects, and feature flags. |
 | **Flaky Test** | A test that intermittently passes or fails without any code changes. Usually caused by timing issues, race conditions, or shared state. |
+| **Flex** | Ledger hardware device, flat E-Ink, EAL6+, internal codename "Europa". |
 | **Grey-Box Testing** | Testing approach where the test framework has some visibility into the application's internals (e.g., synchronization with React Native bridge). Detox uses this approach. |
 | **hk** | A modern pre-commit hook manager (alternative to Husky) used in the Ledger Live repo. Configured via `hk.pkl`. Runs `gitleaks` to scan for secrets. |
 | **IPC** | Inter-Process Communication. In Electron, the mechanism for communication between the main process (Node.js) and renderer process (Chromium). Uses `ipcMain` and `ipcRenderer`. |
 | **Jest** | A JavaScript testing framework by Meta (Facebook). Used for unit and integration tests in Ledger Live. Also serves as the test runner for Detox mobile E2E tests. |
 | **Ledger Live** | Ledger's official companion application for managing crypto assets. Available as Desktop (Electron), Mobile (React Native), and CLI. |
+| **LIVE** | Jira project key for Ledger Wallet product work and bugs. LLM and LLD are LABELS on LIVE tickets, not separate projects. |
+| **LWD** | Shorthand for Ledger Live Desktop (also sometimes LLD). |
+| **LWM** | Shorthand for Ledger Live Mobile (also sometimes LLM). |
+| **Manifest API** | GitHub repo hosting per-environment Live App manifests. |
+| **Manifest V2** | Current Live App manifest schema. Fields include `type` (`dapp | walletApp | webBrowser`) and `visibility`. |
+| **MCU** | Microcontroller Unit. The non-secure chip handling screen, USB, buttons. STM32WB35/55 on most current devices. Distinct from the SE. |
 | **Mise** | A development tool version manager (alternative to nvm, asdf). Used in Ledger Live to manage Node.js, pnpm, and other tool versions consistently. |
 | **Mnemonic Seed** | A set of words (usually 24) that encodes a master cryptographic key per BIP39. The same seed always generates the same accounts, enabling deterministic test data. |
 | **Monorepo** | A single Git repository containing multiple related projects and packages. Ledger Live is a monorepo with 2 apps, 40+ libraries, 2 E2E suites, and CI tools. |
@@ -959,18 +973,26 @@ If the name doesn't match, rename it in Android Studio (Device Manager → Edit 
 | **Mutation (Bot)** | A single operation the Ledger Live Bot attempts on an account (e.g., send max, send sub-max, delegate, swap). Each mutation has preconditions, a transaction builder, and assertion checks. |
 | **MVVM** | Model-View-ViewModel. An architecture pattern used in newer Ledger Live code. Components are split into Container (wiring), ViewModel (logic), and View (pure UI). |
 | **NBGL** | New BAGL. Ledger's modern display framework for touch-screen devices (Stax, Flex, Nano Gen 5). Supports full-color touchscreen interactions. |
+| **OSU** | Operating System Update. The SE OS update flow. |
 | **Page Object Model (POM)** | A design pattern where each UI page or component is represented as a class with locators (element selectors) and methods (user actions). Reduces test code duplication. |
+| **Part 0 Welcome** | Orientation part of this guide (ecosystem, hardware, teams, release cycle, ticket flow, security). |
 | **Playwright** | A browser automation framework by Microsoft. Used for Ledger Live Desktop E2E testing. Supports Chromium, Firefox, WebKit, and Electron applications. |
 | **pnpm** | A fast, disk-efficient package manager optimized for monorepos. Uses a content-addressable store and symlinks instead of copying files. |
+| **PTX** | Post-Transaction eXperience tribe at Ledger. Owns Buy/Sell, Swap, Earn, Recover. NOT a Jira project key. |
+| **QAA** | Quality Assurance Automation. The team writing this guide. Also the Jira project key for automation work items. |
+| **Recover** | Ledger's opt-in self-custody seed-recovery service. SE-side code + Trust orchestrator + 3 backup providers. |
 | **RTK Query** | A data fetching and caching tool built on Redux Toolkit. Provides auto-generated React hooks for API calls with built-in caching and invalidation. |
 | **Rspack** | A Rust-based web bundler that's a drop-in replacement for Webpack, offering 5-10x faster build times. Used for the Ledger Live Desktop build. |
+| **SE** | Secure Element. The certified chip holding cryptographic secrets. ST33 on Stax/Flex/Nano S+; STM32WB55 on Nano X. |
 | **SEED** | In the context of E2E tests, the BIP39 mnemonic phrase used to generate deterministic test accounts and addresses in Speculos. Stored as a CI secret. |
 | **Sharding** | Splitting a test suite into multiple parallel groups (shards) to reduce total execution time. Ledger Live CI shards desktop E2E tests across multiple runners by device model. |
 | **Speculos** | Ledger's open-source device emulator. Runs real device firmware inside a Docker container, exposing a REST API for automated testing without physical hardware. |
 | **Team-Split Convention** | A repo convention where multi-team folders are split into `team-<slug>/` subfolders, each owned by a specific team in CODEOWNERS. |
 | **TMS** | Test Management System. In Ledger Live, refers to Jira/Xray test case IDs (e.g., `B2CQA-817`). Tests link to TMS IDs via annotations for traceability. |
+| **Train QA / Train Engineer / Train Delivery** | The three roles per release train (one Desktop train, one Mobile train). |
 | **Turbo / Turborepo** | A high-performance monorepo build orchestration tool by Vercel. Manages task dependencies, caching, and parallel execution across packages. |
 | **Userdata** | Pre-configured JSON files (in `e2e/desktop/tests/userdata/`) containing serialized app state. Used to start tests from a known state without going through onboarding. |
+| **Wallet XP** | Tribe at Ledger covering Live Hub and Devices Experience teams. |
 | **WebSocket Bridge** | A communication channel between the mobile E2E test harness (Jest/Detox) and the React Native app. Enables commands like `importAccounts`, `overrideFeatureFlag`, and `navigate`. |
 | **Xray** | A Jira plugin for test management. Tracks test cases, test execution, and links automated test results back to Jira tickets. Results exported as JSON. |
 

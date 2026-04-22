@@ -1,20 +1,10 @@
-
-
-# PART 2 -- TOOLS IN CONTEXT
-
-<div class="chapter-intro">
-Part 1 gave you the mental model — what you are testing, how the pieces fit together, and where things live. Now it is time to learn the tools you will use every day. Each chapter in this part explains how a specific tool is <strong>used in the Ledger Live repository</strong>, not just its generic features. You will learn the commands, file paths, configuration, and patterns that matter for your daily E2E work. By the end of Part 2, you will be comfortable with the entire workflow: branching, building, running tests, emulating devices, managing feature flags, and reading reports.
-</div>
-
----
-
 ## Git Workflow, Hooks & Changesets
 
 <div class="chapter-intro">
 Every contribution you make — whether it is a new E2E test, a bug fix, or a page object refactor — flows through Git. This chapter covers the branching model, naming conventions, commit format, pre-commit hooks, and the changeset system that Ledger Live uses for versioning its 200+ packages. Getting this right from day one prevents friction in code review and CI.
 </div>
 
-### 6.1 Branch Strategy
+### 2.1.1 Branch Strategy
 
 ```
 develop (main integration branch -- your base for all work)
@@ -58,7 +48,7 @@ pnpm changeset pre enter experimental-bitcoin
 
 > **Important**: Pre-release commits should be dropped before merging back to avoid polluting `develop`.
 
-### 6.2 Branch Naming Convention
+### 2.1.2 Branch Naming Convention
 
 ```bash
 # Pattern: <prefix>/qaa-<jira-ticket-number>
@@ -75,7 +65,7 @@ git checkout -b chore/qaa-1500
 | `support/` | Refactors, test improvements | `support/qaa-987` |
 | `chore/` | Tooling, configs, dependencies | `chore/qaa-1500` |
 
-### 6.3 Commit Message Format (Conventional Commits)
+### 2.1.3 Commit Message Format (Conventional Commits)
 
 ```bash
 # Format: <type>(<scope>): <description>
@@ -100,7 +90,7 @@ pnpm commit
 
 **Scope** is optional but recommended: `desktop`, `mobile`, `e2e`, `coin`, `common`.
 
-### 6.4 Pre-Commit Hooks
+### 2.1.4 Pre-Commit Hooks
 
 The repo uses **hk** (a modern Husky alternative) configured in `hk.pkl`. A single pre-commit hook runs:
 
@@ -114,7 +104,7 @@ The repo uses **hk** (a modern Husky alternative) configured in `hk.pkl`. A sing
 # 4. Try committing again
 ```
 
-### 6.5 Changesets
+### 2.1.5 Changesets
 
 Every PR that modifies a **published** package needs a changeset — a small markdown file describing the change and its semver bump type.
 
@@ -150,7 +140,7 @@ Changesets accumulate in the `develop` branch in the `.changeset/` folder until 
 
 **For E2E-only changes** (files in `e2e/`), you usually **don't need** a changeset because E2E packages are private and not published to npm.
 
-### 6.6 PR Workflow
+### 2.1.6 PR Workflow
 
 1. Create a feature branch from `develop`
 2. Make your changes, commit with Conventional Commits
@@ -160,7 +150,7 @@ Changesets accumulate in the `develop` branch in the `.changeset/` folder until 
 6. Request review from CODEOWNERS team (your team: `@ledgerhq/qaa` for E2E)
 7. Merge when approved + CI green
 
-### 6.7 Common Git Issues in the Monorepo
+### 2.1.7 Common Git Issues in the Monorepo
 
 #### pnpm-lock.yaml Conflicts
 
@@ -204,9 +194,9 @@ pnpm mobile pod
 <strong>Key takeaway:</strong> The Git workflow is strict for a reason — 200+ packages, multiple teams, and a release train that ships to millions of users. Conventional commits feed into changelogs, changesets feed into version bumps, and the <code>@Gate</code> job protects <code>develop</code>. Internalize these patterns now and you will never block a PR on process issues.
 </div>
 
-### 6.8 Quiz
+### 2.1.8 Quiz
 
-<!-- ── Chapter 6 Quiz ── -->
+<!-- ── Chapter 2.1 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz</h3>
@@ -273,13 +263,14 @@ pnpm mobile pod
 
 ---
 
+
 ## pnpm, Turbo & Build Pipeline
 
 <div class="chapter-intro">
 A monorepo with 200+ packages needs a fast package manager and an intelligent build orchestrator. This chapter covers <strong>pnpm</strong> (the package manager), <strong>Turborepo</strong> (the build system), and the practical commands you will use daily to install, build, and run packages. You will also learn how to deal with dependency duplicates — a recurring challenge in large monorepos.
 </div>
 
-### 7.1 pnpm Basics
+### 2.2.1 pnpm Basics
 
 pnpm is the package manager. Unlike npm, it uses a **content-addressable store** and **symlinks**, making it fast and disk-efficient for monorepos. A single copy of each package version exists on disk, and all projects link to it.
 
@@ -297,7 +288,7 @@ pnpm --filter ledger-live-desktop test:jest
 pnpm clean
 ```
 
-### 7.2 Package Aliases
+### 2.2.2 Package Aliases
 
 The root `package.json` defines shortcuts so you don't need to type long filter expressions:
 
@@ -308,7 +299,7 @@ pnpm e2e:desktop ...   # = pnpm --filter ledger-live-desktop-e2e-tests ...
 pnpm e2e:mobile ...    # = pnpm --filter ledger-live-mobile-e2e-tests ...
 ```
 
-### 7.3 The Filter System
+### 2.2.3 The Filter System
 
 The `--filter` flag selects which packages to operate on:
 
@@ -319,7 +310,7 @@ The `--filter` flag selects which packages to operate on:
 --filter="[origin/develop]"           # Packages changed since develop
 ```
 
-### 7.4 Turbo (Build Orchestration)
+### 2.2.4 Turbo (Build Orchestration)
 
 Turbo manages the **build dependency graph**. When you run `pnpm build:lld`, Turbo knows to build all dependent libraries first, in the correct order, with maximum parallelism.
 
@@ -337,7 +328,7 @@ pnpm build:lld
 pnpm build:llm:deps
 ```
 
-### 7.5 When TypeCheck Fails on an Import
+### 2.2.5 When TypeCheck Fails on an Import
 
 If you see:
 ```
@@ -349,7 +340,7 @@ The library needs to be **rebuilt** — its build output is stale:
 pnpm turbo build --filter=@ledgerhq/live-countervalues-react
 ```
 
-### 7.6 Live Reload During Development
+### 2.2.6 Live Reload During Development
 
 If you are modifying a library package while working on LLD or LLM, you can get on-the-fly updates:
 
@@ -360,7 +351,7 @@ pnpm --filter="@ledgerhq/hw-transport" run watch
 
 > **Tip from the wiki**: For `live-common`, run the watch command **before** starting the application, or the hot reload can destabilize the running app.
 
-### 7.7 Dependency Duplicates Management
+### 2.2.7 Dependency Duplicates Management
 
 The monorepo relies heavily on many npm libraries. Over time, the `pnpm-lock.yaml` can accumulate duplicate dependency versions — different packages locking slightly different versions of the same dependency.
 
@@ -389,7 +380,7 @@ pnpm -r up <dep>    # Unify across all packages
 | **LLD (Desktop)** | Webpack bundles wrong version | Add alias in webpack config |
 | **Global** | Peer dependency causes duplication | Add to `readPackage` function in `.pnpmfile.cjs` to force-remove peer deps |
 
-### 7.8 Windows Considerations
+### 2.2.8 Windows Considerations
 
 On Windows, running binaries by specifying their path in package.json scripts will fail:
 
@@ -414,9 +405,9 @@ On Windows, running binaries by specifying their path in package.json scripts wi
 <strong>Key takeaway:</strong> In a monorepo this size, you will rarely install or build everything. Learn <code>--filter</code>, learn the aliases (<code>pnpm desktop</code>, <code>pnpm e2e:desktop</code>), and know when to rebuild a stale library. These commands will be your most-typed shell inputs.
 </div>
 
-### 7.9 Quiz
+### 2.2.9 Quiz
 
-<!-- ── Chapter 7 Quiz ── -->
+<!-- ── Chapter 2.2 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz</h3>
@@ -483,689 +474,478 @@ On Windows, running binaries by specifying their path in package.json scripts wi
 
 ---
 
-## Playwright in Ledger Live
+
+## Speculos — Device Emulation
 
 <div class="chapter-intro">
-Playwright is the E2E testing framework for <strong>Ledger Live Desktop</strong>. This chapter covers the Playwright configuration, the custom fixture system (the most important architectural pattern in the desktop E2E suite), locator strategies, the <code>@step</code> decorator for Allure reporting, test tags, userdata profiles, and the complete test development workflow as documented in the team wiki.
+Speculos is the Ledger device emulator — a QEMU-based program that runs real device firmware and real coin apps on your laptop, exposing a REST API that tests can drive programmatically. It is what makes end-to-end testing possible without shipping a Nano X to every engineer. This chapter teaches Speculos from zero: what it is, how it works, the six device models it supports, the REST endpoints, the coin-apps repository, environment variables, and the Docker lifecycle. It then covers how Ledger Live's E2E framework integrates Speculos into the test fixture, and ends with the Ledger Live Bot — an autonomous transaction system built on top of Speculos that runs real blockchain transactions on seven rotated seeds.
+
+By the end of this chapter you should be able to answer these questions without opening a second tab:
+
+- What does Speculos emulate, and what does it not?
+- Which device model should I target by default, and why?
+- What are the two display frameworks and how do they change interaction?
+- What is the difference between a button press, a touch, and an APDU?
+- What must I set up on a fresh machine before running a Speculos test?
+- How do I drive Speculos by hand, outside the test framework, when I want to reproduce a device-only bug?
+- What is the Ledger Live Bot and where does it fit against Playwright/Detox E2E?
 </div>
 
-### 8.1 Configuration
+### 2.3.1 What Is Speculos?
 
-**File**: `e2e/desktop/playwright.config.ts`
-
-Key settings:
-- `testDir`: Points to `tests/specs/`
-- `timeout`: Test timeout (e.g., 5 minutes per test)
-- `retries`: Number of retries on failure (usually 1-2)
-- `workers`: Number of parallel workers
-- `reporter`: Allure reporter + custom Xray JSON reporter
-- `use.screenshot`: Capture on failure
-- `use.video`: Record video (deleted on success to save space)
-- `use.trace`: Capture Playwright trace on failure
-
-### 8.2 The Custom Fixture System
-
-**File**: `e2e/desktop/tests/fixtures/common.ts` — THE most important file in the E2E suite.
-
-The fixture defines everything a test needs:
-
-```typescript
-type TestFixtures = {
-  // UI Configuration
-  lang: string;                          // Default: "en-US"
-  theme: "light" | "dark";              // Default: "dark"
-
-  // Test Data
-  userdata?: string;                    // Pre-configured JSON profile name
-  cliCommands?: CliCommand[];           // Commands to populate test data via CLI
-
-  // Device Simulator
-  speculosApp: AppInfos;               // Which coin app to load on the emulated device
-
-  // Feature Flags
-  featureFlags: OptionalFeatureMap;     // Override Firebase feature flags
-
-  // Provided Objects (injected into tests)
-  electronApp: ElectronApplication;     // The running Electron app instance
-  page: Page;                           // The Playwright page
-  app: Application;                     // All page objects (YOUR MAIN TOOL)
-  userdataFile: string;                 // Path to the test's app.json
-
-  // Reporting
-  teamOwner?: Team;                     // Which team owns this test
-};
-```
-
-Tests configure fixtures with `test.use()`:
-
-```typescript
-test.describe("Settings", () => {
-  test.use({
-    teamOwner: Team.WALLET_XP,
-    userdata: "erc20-0-balance",
-    // speculosApp: account.currency.speculosApp,  // Only if device needed
-    // cliCommands: [liveDataCommand(account)],      // Only if test data needed
-  });
-
-  test("my test", async ({ app }) => {
-    // app has ALL page objects ready to use
-  });
-});
-```
-
-### 8.3 Locator Strategy
-
-Locator priority (most stable to least stable):
-
-```typescript
-// 1. BEST: by test ID (won't break on text/style changes)
-page.getByTestId("send-button");
-
-// 2. GOOD: by role (accessible, semantic)
-page.getByRole("button", { name: "Send" });
-
-// 3. OK: by text (breaks if translations change)
-page.getByText("Send transaction");
-
-// 4. LAST RESORT: CSS selector
-page.locator(".send-button");
-```
-
-### 8.4 The @step Decorator
-
-**File**: `e2e/desktop/tests/misc/reporters/step.ts`
-
-Every page object method is decorated with `@step` for Allure reporting:
-
-```typescript
-class AccountPage extends AppPage {
-  @step("Click Send button")
-  async clickSend(): Promise<void> {
-    await this.sendButton.click();
-  }
-
-  @step("Navigate to token $0")  // $0 replaced with first argument
-  async navigateToToken(name: string): Promise<void> {
-    await this.page.getByText(name).click();
-  }
-}
-```
-
-In Allure reports, this creates a collapsible step tree:
-```
-Test: ERC20 token with 0 balance is hidden
-  + Step: Open target from main navigation "accounts"    [0.5s] PASSED
-  + Step: Show parent account tokens "Ethereum 1"        [0.3s] PASSED
-  + Step: Verify token visibility "USDT"                 [0.2s] PASSED
-  + Step: Click hide empty token accounts toggle          [0.1s] PASSED
-  + Step: Verify children tokens are not visible "USDT"  [0.2s] PASSED
-```
-
-### 8.5 Test Tags
-
-Tests are tagged for filtering in CI:
-
-```typescript
-test("My test", {
-  tag: [
-    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",  // Device compatibility
-    "@ethereum", "@family-evm",                                     // Currency / family
-    "@smoke",                                                       // Quick validation
-  ],
-  annotation: [{ type: "TMS", description: "B2CQA-817" }],         // Jira test case ID
-}, async ({ app }) => { ... });
-```
-
-| Tag Type | Examples | Used For |
-|----------|----------|----------|
-| Device | `@NanoSP`, `@Stax`, `@LNS` | Filter by device model in CI |
-| Currency | `@ethereum`, `@bitcoin` | Filter by cryptocurrency |
-| Family | `@family-evm`, `@family-bitcoin` | Filter by coin family |
-| Scope | `@smoke` | Quick PR validation |
-
-### 8.6 Userdata Profiles
-
-Pre-configured JSON files in `e2e/desktop/tests/userdata/`:
-
-| Profile | Purpose |
-|---------|---------|
-| `skip-onboarding-with-last-seen-device` | Skips onboarding, has a remembered device |
-| `erc20-0-balance` | ETH account with zero-balance ERC-20 tokens |
-| `1AccountBTC1AccountETH` | One Bitcoin + one Ethereum account |
-| (and more...) | Various pre-configured states |
-
-These avoid running through onboarding and account setup in every test, making tests faster and more reliable.
-
-### 8.7 Test Development Workflow (from the wiki)
-
-The wiki documents a 4-step workflow for developing desktop E2E tests:
-
-#### Step 1: Set Up Environment
-
-```bash
-export MOCK=0
-export SPECULOS_DEVICE=nanoSP
-export COINAPPS=~/coin-apps
-export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:latest
-# Optional: export SEED="your test seed"
-```
-
-#### Step 2: Build the Application
-
-```bash
-pnpm build:lld:deps
-pnpm desktop build:testing
-```
-
-#### Step 3: Run Your Test
-
-```bash
-pnpm e2e:desktop test:playwright send.spec.ts
-# Or filter by test name pattern (alternative):
-pnpm e2e:desktop test:playwright --grep "my test name"
-```
-
-#### Step 4: Debug Failures
-
-```bash
-# Open Playwright UI mode for interactive debugging
-pnpm e2e:desktop test:playwright --ui
-
-# Generate and view Allure report
-pnpm e2e:desktop allure
-```
-
-### 8.8 Common Issues (from the wiki)
-
-| Issue | Cause | Fix |
-|-------|-------|-----|
-| "Element not found: send-button" + loading spinner in screenshot | Test doesn't wait for loading state | Add `waitFor({ state: "visible" })` before interaction |
-| Speculos container timeout | Docker not running or coin-apps outdated | Check Docker, run `cd ~/coin-apps && git pull` |
-| Test passes locally but fails in CI | Environment differences (timeouts, race conditions) | Increase timeouts, add explicit waits |
-| "No app found for Solana on nanoSP" | Missing .elf binary | Update coin-apps: `cd ~/coin-apps && git pull` |
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://playwright.dev/docs/intro">Playwright documentation</a> — by Microsoft (Andrey Lushnikov, Dmitry Gozman)</li>
-<li><a href="https://playwright.dev/docs/test-fixtures">Playwright Fixtures</a> — deep dive into the fixture system</li>
-<li><a href="https://playwright.dev/docs/locators">Playwright Locators</a> — the recommended locator strategies</li>
-<li><a href="https://playwright.dev/docs/test-annotations">Playwright Annotations & Tags</a></li>
-<li><a href="https://playwright.dev/docs/trace-viewer">Playwright Trace Viewer</a> — for post-mortem debugging</li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> The fixture system in <code>common.ts</code> is the heart of desktop E2E testing. Every test declares what it needs (userdata, device, feature flags) and the fixture orchestrates the setup and teardown. Master fixtures and you master the test suite.
-</div>
-
-### 8.9 Quiz
-
-<!-- ── Chapter 8 Quiz ── -->
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> What does <code>test.use({ userdata: "erc20-0-balance" })</code> do?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Creates a new ERC-20 account from scratch</button>
-<button class="quiz-choice" data-value="B">B) Loads a pre-configured app state that skips onboarding and has an ETH account with zero-balance ERC-20 tokens</button>
-<button class="quiz-choice" data-value="C">C) Deletes all ERC-20 tokens from the test state</button>
-<button class="quiz-choice" data-value="D">D) Sets the balance of all tokens to zero via the CLI</button>
-</div>
-<p class="quiz-explanation">It loads a pre-configured JSON profile that provides a known state, avoiding the need to run through onboarding and account setup. This makes tests faster and more deterministic.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> Which locator strategy should you use as your first choice?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) CSS selector: <code>page.locator(".send-btn")</code></button>
-<button class="quiz-choice" data-value="B">B) Text: <code>page.getByText("Send")</code></button>
-<button class="quiz-choice" data-value="C">C) Test ID: <code>page.getByTestId("send-button")</code></button>
-<button class="quiz-choice" data-value="D">D) XPath: <code>page.locator("//button[@class='send']")</code></button>
-</div>
-<p class="quiz-explanation"><code>getByTestId</code> is the most stable locator — it won't break when text changes (translations) or when CSS classes are refactored. Test IDs are added specifically for test automation.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> In <code>@step("Navigate to token $0")</code>, what does <code>$0</code> represent?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The step sequence number in the test</button>
-<button class="quiz-choice" data-value="B">B) The first argument passed to the method (e.g., "USDT")</button>
-<button class="quiz-choice" data-value="C">C) The test case ID</button>
-<button class="quiz-choice" data-value="D">D) The return value of the method</button>
-</div>
-<p class="quiz-explanation"><code>$0</code> is replaced with the first argument passed to the decorated method. If you call <code>navigateToToken("USDT")</code>, the Allure step shows "Navigate to token USDT".</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> A test fails in CI with "Element not found: send-button" and the Allure screenshot shows a loading spinner. What is the most likely fix?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Change the test ID to a different string</button>
-<button class="quiz-choice" data-value="B">B) Remove the test and rewrite it from scratch</button>
-<button class="quiz-choice" data-value="C">C) Increase the global timeout in <code>playwright.config.ts</code></button>
-<button class="quiz-choice" data-value="D">D) Add an explicit wait for the element to be visible before interacting with it</button>
-</div>
-<p class="quiz-explanation">The test tries to interact with the element before the loading state finishes. Adding <code>await page.getByTestId("send-button").waitFor({ state: "visible", timeout: 30000 })</code> ensures the page has loaded.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> What is the purpose of the <code>annotation: { type: "TMS", description: "B2CQA-817" }</code> in a test?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It links the automated test to a Jira/Xray test case, creating a clickable link in Allure</button>
-<button class="quiz-choice" data-value="B">B) It sets the test timeout to 817 milliseconds</button>
-<button class="quiz-choice" data-value="C">C) It tags the test for CI sharding</button>
-<button class="quiz-choice" data-value="D">D) It marks the test as belonging to a specific team</button>
-</div>
-<p class="quiz-explanation">TMS = Test Management System. <code>B2CQA-XXX</code> is a Jira/Xray test case ID. The Allure report creates a clickable link to the Jira issue, connecting automated test results to manual test case definitions.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Detox in Ledger Live
-
-<div class="chapter-intro">
-Detox is the E2E testing framework for <strong>Ledger Live Mobile</strong>. While the high-level testing philosophy (Page Object Model, Speculos emulation, feature flag overrides) mirrors the desktop suite, the implementation is fundamentally different. This chapter covers Detox configuration, the global app singleton, the WebSocket bridge, helper functions, the multi-phase initialization, and the complete mobile E2E project structure and debugging techniques as documented in the team wiki.
-</div>
-
-### 9.1 Configuration
-
-**File**: `e2e/mobile/detox.config.js`
-
-Defines device and app configurations:
-- `ios.sim.debug`: iOS Simulator, debug build (needs Metro)
-- `android.emu.release`: Android Emulator, release build (recommended for CI)
-- App binary paths, launch arguments, test runner config (Jest)
-
-### 9.2 The Global App Singleton
-
-**File**: `e2e/mobile/page/index.ts`
-
-Unlike Desktop's fixture injection, Mobile uses a global `app` object:
-
-```typescript
-// Accessible globally in all tests:
-await app.portfolio.waitForPortfolioPageToLoad();
-await app.portfolio.navigateToSettings();
-await app.settings.openGeneralSettings();
-```
-
-### 9.3 The WebSocket Bridge
-
-**File**: `e2e/mobile/bridge/server.ts`
-
-Enables communication between Jest/Detox and the React Native app:
-
-```
-[Jest + Detox]  <--- WebSocket --->  [React Native App]
-     |                                      |
-     |  importAccounts                      |  Receives accounts JSON
-     |  overrideFeatureFlag                 |  Toggles feature flag
-     |  navigate                            |  Changes screen
-     |  getLogs                             |  Returns app logs
-     |  addKnownSpeculos                    |  Registers Speculos device
-     +  acceptTerms                         +  Skips onboarding
-```
-
-This bridge is necessary because Detox cannot directly manipulate React Native app state (unlike Playwright which has access to the Electron process). The WebSocket bridge is the channel through which the test harness configures the running app.
-
-### 9.4 Helper Functions
-
-**File**: `e2e/mobile/helpers/elementHelpers.ts`
-
-```typescript
-// Wrappers around verbose Detox API:
-await tapById("send-button");           // element(by.id("send-button")).tap()
-await tapByText("Confirm");             // element(by.text("Confirm")).tap()
-await typeTextById("amount-input", "0.001");
-await waitForElementById("success-message", 30000);
-await scrollToId("account-row-bitcoin");
-const balance = await getTextOfElement("balance-text");
-```
-
-### 9.5 Multi-Phase Initialization
-
-The `app.init()` method orchestrates everything:
-
-```typescript
-await app.init({
-  speculosApp: account.currency.speculosApp,  // Start Speculos with coin app
-  cliCommands: [liveDataCommand(account)],    // Populate accounts via CLI
-  featureFlags: { myFlag: { enabled: true } }, // Override feature flags
-});
-```
-
-Internally this: launches Speculos Docker containers in parallel, executes CLI commands with retry logic, registers Speculos ports via the bridge, loads feature flags, and imports accounts.
-
-### 9.6 Mobile E2E Project Structure (from the wiki)
-
-```
-e2e/mobile/
-├── bridge/              # WebSocket bridge (server + client)
-│   ├── server.ts        # Bridge server (Jest side)
-│   └── client.ts        # Bridge client (React Native side)
-├── helpers/             # Helper functions (element helpers, CLI helpers)
-├── models/              # Data models (Account, Currency, etc.)
-├── page/                # Page Object Model classes
-│   ├── index.ts         # Global app singleton exporting all pages
-│   ├── portfolio.page.ts
-│   ├── account.page.ts
-│   ├── send.page.ts
-│   └── ...
-├── specs/               # Test specifications
-│   ├── send/
-│   ├── receive/
-│   ├── swap/
-│   └── ...
-├── detox.config.js      # Detox configuration
-└── jest.config.ts       # Jest runner configuration
-```
-
-### 9.7 Building and Running Mobile E2E Tests (from the wiki)
-
-#### Prerequisites
-
-- Node.js, pnpm, Docker (for Speculos)
-- **iOS**: Xcode, CocoaPods, iOS Simulator
-- **Android**: Android Studio, Android SDK, an AVD (Android Virtual Device)
-
-#### Building
-
-```bash
-# Install all dependencies
-pnpm i
-
-# Build mobile dependencies
-pnpm build:llm:deps
-
-# iOS: Install CocoaPods
-pnpm mobile pod
-
-# Build the app for testing
-# iOS:
-pnpm e2e:mobile build:ios.sim.debug
-# Android:
-pnpm e2e:mobile build:android.emu.release
-```
-
-#### Running
-
-```bash
-# Set environment variables
-export MOCK=0
-export SPECULOS_DEVICE=nanoSP
-export COINAPPS=~/coin-apps
-
-# Run all tests (iOS):
-pnpm e2e:mobile test:ios.sim.debug
-
-# Run specific test:
-pnpm e2e:mobile test:ios.sim.debug -- --testNamePattern "send BTC"
-
-# Run with specific device:
-pnpm e2e:mobile test:android.emu.release
-```
-
-### 9.8 Debugging Mobile E2E Tests (from the wiki)
-
-| Technique | How | When |
-|-----------|-----|------|
-| **Detox logs** | `pnpm e2e:mobile test:ios.sim.debug -- --loglevel trace` | Detox framework issues |
-| **App logs via bridge** | `const logs = await app.bridge.getLogs()` | React Native app issues |
-| **Metro console** | Watch Metro bundler terminal output | JavaScript errors, red screen |
-| **Xcode console** | Open Xcode → Window → Devices and Simulators | iOS native crashes |
-| **Android logcat** | `adb logcat *:E` | Android native crashes |
-| **Allure report** | `pnpm e2e:mobile allure` | Test step trace, screenshots |
-
-### 9.9 Key Differences from Desktop
-
-| Aspect | Desktop (Playwright) | Mobile (Detox + Jest) |
-|--------|---------------------|----------------------|
-| Framework | Playwright | Detox + Jest |
-| App launch | `electron.launch()` | `device.launchApp()` |
-| Fixture system | Playwright fixtures (`test.use()`) | Global `app.init()` |
-| Page access | `({ app }) =>` destructured | `app.` global variable |
-| Element find | `page.getByTestId()` | `element(by.id())` |
-| Wait strategy | Auto-wait built-in | Manual `waitFor().withTimeout()` |
-| Text input | `.fill("text")` | `.typeText("text")` |
-| Bridge | Not needed | WebSocket bridge (test <-> RN app) |
-| Parallelism | Full parallel | 1-3 workers (device limitation) |
-| Port forwarding | Not needed | `device.reverseTcpPort()` (Android) |
-| Build | Rspack bundle | Xcode / Gradle native build |
-
-### 9.10 CI Workflow Inputs (from the wiki)
-
-The mobile E2E CI workflow accepts several inputs that control test execution:
-
-| Input | Description | Default |
-|-------|-------------|---------|
-| `platform` | `ios` or `android` | `ios` |
-| `configuration` | Detox configuration name | `ios.sim.release` |
-| `test_filter` | Jest `--testNamePattern` filter | (none) |
-| `shard_index` / `shard_total` | Sharding for parallel CI | `1/1` |
-| `speculos_device` | Device model for Speculos | `nanoSP` |
-| `retry_count` | Number of retries on failure | `1` |
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://wix.github.io/Detox/">Detox documentation</a> — by Wix Engineering</li>
-<li><a href="https://wix.github.io/Detox/docs/api/matchers">Detox Matchers</a> — element matching API</li>
-<li><a href="https://wix.github.io/Detox/docs/api/actions-on-element">Detox Actions</a> — tap, type, scroll, swipe</li>
-<li><a href="https://wix.github.io/Detox/docs/troubleshooting/running-tests">Detox Troubleshooting</a></li>
-<li><a href="https://reactnative.dev/docs/debugging">React Native Debugging</a></li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> Mobile E2E has more moving parts than desktop — native builds, the WebSocket bridge, device simulators, port forwarding. The <code>app.init()</code> method abstracts most of this complexity. When debugging failures, know which layer to look at: Detox framework, bridge communication, React Native app, or native platform.
-</div>
-
-### 9.11 Quiz
-
-<!-- ── Chapter 9 Quiz ── -->
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> How do you access page objects in mobile E2E tests?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Through Playwright fixtures: <code>async ({ app }) =></code></button>
-<button class="quiz-choice" data-value="B">B) Through a global <code>app</code> singleton variable</button>
-<button class="quiz-choice" data-value="C">C) By importing each page object individually</button>
-<button class="quiz-choice" data-value="D">D) Through dependency injection with InversifyJS</button>
-</div>
-<p class="quiz-explanation">Mobile tests use a global <code>app</code> singleton (defined in <code>e2e/mobile/page/index.ts</code>), unlike Desktop which uses Playwright's fixture injection pattern.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q2.</strong> Why does Detox need <code>device.reverseTcpPort()</code> for Android but not iOS?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Android emulators run in a sandboxed network and need port forwarding to reach the host</button>
-<button class="quiz-choice" data-value="B">B) iOS is faster and doesn't need port configuration</button>
-<button class="quiz-choice" data-value="C">C) Android doesn't support WebSocket natively</button>
-<button class="quiz-choice" data-value="D">D) Port reverse is only needed for Bluetooth connections</button>
-</div>
-<p class="quiz-explanation">Android emulators run with their own network stack where <code>localhost</code> refers to the emulator, not the host machine. Port reverse mapping connects the emulator's localhost to the host's localhost. iOS simulators share the host's network directly.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q3.</strong> What is the purpose of the WebSocket bridge in mobile E2E tests?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It connects the mobile app to Firebase for feature flags</button>
-<button class="quiz-choice" data-value="B">B) It streams video recordings from the device to the test runner</button>
-<button class="quiz-choice" data-value="C">C) It enables the test harness (Jest/Detox) to send commands to the React Native app (import accounts, override flags, navigate)</button>
-<button class="quiz-choice" data-value="D">D) It provides a REST API for Speculos device emulation</button>
-</div>
-<p class="quiz-explanation">Detox can interact with native UI elements but cannot directly manipulate React Native app state. The WebSocket bridge is the channel through which the test harness sends commands like <code>importAccounts</code>, <code>overrideFeatureFlag</code>, and <code>navigate</code> to the running app.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Translate this Playwright code to Detox: <code>await page.getByTestId("amount").fill("0.5");</code></p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>await element(by.text("amount")).fill("0.5");</code></button>
-<button class="quiz-choice" data-value="B">B) <code>await device.typeText("amount", "0.5");</code></button>
-<button class="quiz-choice" data-value="C">C) <code>await element(by.id("amount")).setText("0.5");</code></button>
-<button class="quiz-choice" data-value="D">D) <code>await element(by.id("amount")).typeText("0.5");</code></button>
-</div>
-<p class="quiz-explanation">In Detox: <code>getByTestId</code> → <code>by.id()</code>, <code>.fill()</code> → <code>.typeText()</code>. Detox uses <code>typeText</code> to simulate keyboard input, while Playwright's <code>fill</code> directly sets the input value.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> Your mobile E2E test fails with a red screen in the React Native app. Which debugging technique should you try first?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Run <code>adb logcat</code> for Android native crash logs</button>
-<button class="quiz-choice" data-value="B">B) Check the Metro bundler terminal output for JavaScript errors</button>
-<button class="quiz-choice" data-value="C">C) Increase the Detox timeout to 5 minutes</button>
-<button class="quiz-choice" data-value="D">D) Rebuild the app from scratch</button>
-</div>
-<p class="quiz-explanation">A red screen in React Native indicates a JavaScript error. The Metro bundler terminal will show the exact error and stack trace. Only check native logs (<code>adb logcat</code>, Xcode console) if the issue is at the native layer.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## Speculos Deep Dive
-
-<div class="chapter-intro">
-Speculos is the Ledger device emulator — the component that makes E2E testing possible without physical hardware. It runs real firmware inside a Docker container, exposing a REST API for interaction. This chapter covers all six device models, the REST API, touch vs non-touch interaction, the coin-apps repository, Docker commands, and the Ledger Live Bot — an autonomous testing system built on top of Speculos.
-</div>
-
-### 10.1 What Is Speculos?
-
-Speculos is a **Ledger device emulator** that runs real firmware inside a Docker container. It supports all device models: Nano S, Nano S Plus, Nano X, Stax, Flex, and Nano Gen 5.
+Speculos is a **Ledger device emulator** that runs real firmware inside a Docker container. Under the hood it emulates the ARM processor of a Ledger device using QEMU, loads the actual `.elf` binary of a device app (Bitcoin, Ethereum, Solana, etc.), and runs it in a sandboxed environment. It supports all six device models currently produced by Ledger: Nano S, Nano S Plus, Nano X, Stax, Flex, and Nano Gen 5.
 
 - **Source**: `github.com/LedgerHQ/speculos`
 - **Written in**: C (ARM emulation core) + Python (REST API, automation)
 - **Image**: `ghcr.io/ledgerhq/speculos:latest`
+- **Official docs**: https://speculos.ledger.com/
 
-### 10.2 Device Models in Detail
+Speculos exposes three surfaces:
 
-| Device | Env | Touch | Display | Screen | Notes |
-|--------|-----|-------|---------|--------|-------|
-| Nano S | `nanoS` | No | BAGL | 128x32 | Legacy. Limited memory. Requires specific Docker SHA. |
+- A **REST API** (default port 5000) for button presses, screenshots, APDU commands, and automation rules
+- A **TCP server** (default port 9999) for raw APDU communication
+- A **web UI** at `http://localhost:5000` that renders the emulated screen in your browser — invaluable for visual debugging
+
+In E2E tests, Speculos runs inside a **Docker container**. Each test gets its own container on a unique port so that test workers can run in parallel without stepping on each other.
+
+> **Note:** You never "install" Speculos locally in the classic sense. You run the Docker image, which ships with a specific firmware set. The device apps (Bitcoin, Ethereum, …) come from a separate repository: `coin-apps`. Keep both in sync.
+
+#### A tiny mental model
+
+Think of Speculos as three nested layers:
+
+1. A **Docker container** — the unit of isolation. One test worker, one container, one port.
+2. Inside the container, a **QEMU process** that emulates the ARM Cortex-M CPU used by Ledger devices. QEMU runs the exact firmware image that ships on real hardware — including the secure element stubs, the BOLOS operating system, and the display framework (BAGL or NBGL).
+3. On top of the firmware, a **device app** (`Bitcoin.elf`, `Ethereum.elf`, …) loaded from the `coin-apps` repo. The app is what actually signs transactions.
+
+Around the emulated CPU, a Python layer wraps the button GPIOs and the screen framebuffer, and exposes them over HTTP. That is the REST API — your tests' only access point into the device.
+
+```
++------------------------------------------------------------+
+|                    Test process (Node)                     |
+|   Playwright / Detox  →  live-common transport             |
++------------------------------------------------------------+
+                         |  HTTP (REST + APDU)
+                         v
++------------------------------------------------------------+
+|                   Docker container                         |
+|   +-----------------------------------------------------+  |
+|   |         Speculos Python layer (REST/TCP)            |  |
+|   +-----------------------------------------------------+  |
+|   |         QEMU ARM Cortex-M emulation core            |  |
+|   +-----------------------------------------------------+  |
+|   |         BOLOS firmware + display framework          |  |
+|   +-----------------------------------------------------+  |
+|   |         Coin app .elf (Bitcoin, Ethereum, …)        |  |
+|   +-----------------------------------------------------+  |
++------------------------------------------------------------+
+```
+
+Read that diagram top-to-bottom when a test fails: the higher the problem, the cheaper it is to diagnose. A Playwright selector miss is seconds to fix; a QEMU-level emulation bug is a ticket against the Speculos repo.
+
+### 2.3.2 Why Speculos Exists
+
+Without Speculos, an E2E test that signs a transaction would need:
+
+- A physical Ledger device connected via USB
+- A human pressing buttons or tapping the screen at the right moment
+- A seed loaded on that device with real or test funds
+
+Running CI that way is impossible. Speculos replaces the hardware with software:
+
+- Real firmware (same `.elf` that ships to production devices, bit-for-bit)
+- Real coin apps (same `.elf` a user would install via Ledger Live Manager)
+- REST endpoints instead of fingers — tests press buttons through HTTP calls
+
+Because the firmware and apps are the real thing, a transaction signed on Speculos is cryptographically valid. The Ledger Live Bot (covered in 2.3.10) takes advantage of this by broadcasting real signed transactions to real testnet and mainnet blockchains.
+
+#### What Speculos is not
+
+A few limits are worth stating up front so you do not waste time fighting them:
+
+- **Not a secure element.** Real Ledger devices store private keys in a certified secure element chip; Speculos derives keys from a BIP39 seed held in memory. Do not treat Speculos screenshots as a substitute for attestation or hardware-security review.
+- **Not a USB device.** Speculos speaks HTTP, not HID/USB. The `live-common` transport layer abstracts that difference, but any test that pokes real USB internals will not work.
+- **Not a UI substitute.** Speculos emulates what a device shows — not what the Ledger Live desktop or mobile app shows. For that you need Playwright/Detox on top. The E2E architecture is always "Playwright/Detox drives the app UI; the app drives Speculos; Speculos drives the device app".
+- **Not a perfect match for every firmware version.** Speculos lags real-hardware firmware by a few weeks at times. If you see behavior that differs from a physical device, bump `SPECULOS_IMAGE_TAG` first.
+
+### 2.3.3 Device Models in Detail
+
+Speculos supports all six current Ledger device models. The model you emulate affects interaction (buttons vs touch), display framework (BAGL vs NBGL), and which coin-app binary gets loaded.
+
+| Device | Env value | Touch | Display | Screen | Notes |
+|--------|-----------|-------|---------|--------|-------|
+| Nano S | `nanoS` | No | BAGL | 128x32 | Legacy. Limited memory. Requires a specific Docker SHA. |
 | Nano S Plus | `nanoSP` | No | BAGL | 128x64 | Most common test target. Good default. |
-| Nano X | `nanoX` | No | BAGL | 128x64 | Has Bluetooth (not relevant in Speculos). |
-| Stax | `stax` | **Yes** | NBGL | 400x672 | Touchscreen. Tap, swipe, long press interactions. |
+| Nano X | `nanoX` | No | BAGL | 128x64 | Has Bluetooth in production (not relevant in Speculos). |
+| Stax | `stax` | **Yes** | NBGL | 400x672 | Touchscreen. Tap, swipe, long press. |
 | Flex | `flex` | **Yes** | NBGL | 480x600 | Touchscreen. Different form factor than Stax. |
 | Nano Gen 5 | `nanoGen5` | **Yes** | NBGL | — | Newest. Internally codenamed "apex" in coin-apps. |
 
-**BAGL vs NBGL**: These are the two display frameworks used by Ledger devices. BAGL (Bolos Application Graphics Library) is the older system for button-based Nano devices. NBGL (New Bolos GL) is the modern framework for touchscreen devices (Stax, Flex, Gen 5). The display framework affects how E2E tests interact with the emulated device — buttons vs touch gestures.
+**BAGL vs NBGL.** These are the two display frameworks used by Ledger devices.
 
-### 10.3 The REST API
+- **BAGL** (Bolos Application Graphics Library) is the older system for button-based Nano devices. It is monochrome, character-oriented, and drives pagination through left/right/both button events.
+- **NBGL** (New Bolos GL) is the modern framework for touchscreen devices (Stax, Flex, Gen 5). It uses high-level widgets (review pages, long-press confirmations, swipe navigation) rendered on a color display.
 
-Speculos exposes a comprehensive REST API:
+The display framework affects how E2E tests interact with the emulated device — buttons vs touch gestures. You cannot share the same page object between a Nano SP and a Stax; the interaction grammar is different.
+
+> **Note:** Device tags in tests (`@NanoSP`, `@NanoX`, `@Stax`, `@Flex`, `@NanoGen5`) indicate which device models a test supports. In CI, the matrix runs each supported device model for every tagged test.
+
+#### Choosing a default device for local work
+
+Most day-to-day E2E work targets **Nano S Plus** (`nanoSP`). Reasons:
+
+- It is the most common test target — the majority of existing tests assume it.
+- It has a BAGL display, which keeps the interaction grammar simple (two buttons).
+- The coin-apps repo has the widest coverage for `nanoSP` across currencies.
+
+When you add a test, start with `nanoSP`, then widen coverage only once the behavior is stable. Add `@Stax`/`@Flex` tags (and rework the interaction layer for touch) once the logic is solid on Nano.
+
+### 2.3.4 The REST API
+
+Speculos exposes a comprehensive REST API. Even though tests usually interact with Speculos through the `live-common` library (not direct HTTP calls), understanding the raw API is essential for debugging.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/` | GET | Health check (alive?) |
-| `/events` | GET | Get display events (text on screen) |
+| `/events` | GET | Get display events (text currently on screen) |
 | `/apdu` | POST | Send raw APDU command |
 | `/button/left` | POST | Press left button (non-touch) |
 | `/button/right` | POST | Press right button (non-touch) |
 | `/button/both` | POST | Press both buttons = confirm (non-touch) |
 | `/finger` | POST | Touch event with x,y coordinates (touch devices) |
-| `/screenshot` | GET | Take PNG screenshot |
+| `/screenshot` | GET | Take PNG screenshot of the display |
 | `/` | DELETE | Kill the session |
-| `/automation` | POST | Set automation rules (auto-approve) |
+| `/automation` | POST | Set automation rules (auto-approve text matches) |
 
-### 10.4 Non-Touch vs Touch Interaction
+Concrete examples you can copy-paste when a test is running and you want to poke the device directly:
 
-**Non-touch devices** (Nano S, S Plus, X):
+```bash
+# Take a screenshot of the device display
+curl http://localhost:5023/screenshot -o device.png
+
+# Press the right button (navigate right on Nano)
+curl -d '{"action":"press-and-release"}' http://localhost:5023/button/right
+
+# Press both buttons (confirm on Nano)
+curl -d '{"action":"press-and-release"}' http://localhost:5023/button/both
+
+# Touch the screen at (x, y) — for Stax/Flex
+curl -d '{"action":"press-and-release","x":200,"y":300}' http://localhost:5023/finger
+
+# Send an APDU command (raw device protocol)
+curl -d '{"data":"e0c4000000"}' http://localhost:5023/apdu
+
+# Get the current screen text (for debugging)
+curl http://localhost:5023/events
+```
+
+The port (`5023` in the examples) is assigned randomly per test. Look for it in the test console output or the Allure description.
+
+**Reference**: full endpoint list at https://speculos.ledger.com/user/launch.html.
+
+#### A short APDU primer
+
+APDU stands for Application Protocol Data Unit. It is the binary protocol every smartcard speaks, and Ledger devices are smartcards at heart. When Ledger Live "asks the device to sign a transaction", what actually crosses the wire is a sequence of APDUs. A command APDU looks like this:
+
+```
+| CLA | INS | P1 | P2 | Lc | Data (Lc bytes) | Le |
+```
+
+- **CLA** — class byte (which app's instruction set)
+- **INS** — instruction byte (what to do)
+- **P1, P2** — parameters
+- **Lc** — length of `Data`
+- **Le** — expected response length
+
+Speculos's `POST /apdu` accepts the raw hex bytes of a command APDU and returns the device's response APDU. You will rarely hand-craft APDUs in E2E tests — `live-common` does that for you — but knowing the shape helps when you read logs that contain lines like `=> e0c4000000` (command) and `<= 9000` (status word "OK").
+
+#### Automation rules
+
+The `/automation` endpoint lets you pre-program "if the screen ever shows X, press Y". This is how long, deterministic flows stay tractable — instead of scripting every button press, you install a ruleset and let Speculos auto-advance.
+
+```json
+{
+  "version": 1,
+  "rules": [
+    { "text": "Review", "actions": [["button", 2, true], ["button", 2, false]] },
+    { "text": "Approve", "actions": [["button", 2, true], ["button", 2, false]] }
+  ]
+}
+```
+
+Rule of thumb: if your test repeats the same "press both buttons until we see Approve" dance in multiple places, hoist it into an automation ruleset.
+
+#### A full curl-driven session
+
+To make the REST API click, here is a hand-driven session against a running Speculos on port 5023 (Bitcoin app, Nano SP):
+
+```bash
+# 1. Confirm the emulator is alive.
+curl http://localhost:5023/
+
+# 2. See what the screen shows at boot.
+curl http://localhost:5023/events
+# => {"events":[{"text":"Bitcoin","x":41,"y":12}, ...]}
+
+# 3. Ask the app for a receive address (the app will prompt on the screen).
+curl -d '{"data":"e04000000d058000002c8000000080000000000000000000000000"}' \
+     http://localhost:5023/apdu
+# The app now shows "Verify receive address" and blocks.
+
+# 4. Press right to page through the address.
+curl -d '{"action":"press-and-release"}' http://localhost:5023/button/right
+
+# 5. Press both to approve.
+curl -d '{"action":"press-and-release"}' http://localhost:5023/button/both
+
+# 6. The original /apdu call unblocks and returns the address + status 9000.
+
+# 7. Snapshot for the record.
+curl http://localhost:5023/screenshot -o receive.png
+```
+
+Running through that flow once, by hand, is worth more than reading ten pages of documentation. Do it early in your onboarding.
+
+### 2.3.5 Non-Touch vs Touch Interaction
+
+The API split above reflects a deeper grammar difference. Your tests should never hard-code interactions — they should call helpers that dispatch based on `SPECULOS_DEVICE`.
+
+**Non-touch devices** (Nano S, Nano S Plus, Nano X) use the two physical buttons:
+
 ```typescript
 buttons.right();     // Next screen
 buttons.right();     // Next screen
 buttons.both();      // Confirm
 ```
 
-**Touch devices** (Stax, Flex, Gen 5):
+**Touch devices** (Stax, Flex, Gen 5) use taps, long presses, and swipes:
+
 ```typescript
-pressAndRelease("Sign transaction", x, y);     // Tap on label
-longPressAndRelease("Hold to sign", 3);         // Long press 3 seconds
-swipeRight();                                    // Swipe gesture
+pressAndRelease("Sign transaction", x, y);   // Tap on a label
+longPressAndRelease("Hold to sign", 3);       // Long press for 3 seconds
+swipeRight();                                  // Swipe gesture
 ```
 
-### 10.5 The Coin-Apps Repository
+> **Note:** A test written for Nano devices that relies on button sequences will not run unmodified on Stax. Conversely, tests written with touch helpers cannot execute on a Nano. This is why device tags exist — they gate which device models a given test claims to support.
 
-`github.com/LedgerHQ/coin-apps` contains compiled `.elf` binaries:
+#### A worked walkthrough: sending 0.01 BTC on Nano SP
+
+To make the grammar concrete, here is what happens inside Speculos when Ledger Live asks the user to confirm a 0.01 BTC transaction on a Nano SP:
+
+1. The app sends an APDU: "please display and sign this transaction". Speculos forwards it to the emulated Bitcoin app.
+2. The Bitcoin app parses the transaction and draws the first screen: `Review transaction`. A test observer sees `GET /events` return that text.
+3. The test (or an automation rule) calls `POST /button/right`. Screen advances to `Amount: 0.01 BTC`.
+4. Another `POST /button/right`. Screen: `Fees: 0.00002 BTC`.
+5. Another `POST /button/right`. Screen: `Accept and send?`.
+6. The test calls `POST /button/both`. The Bitcoin app reads that as "confirm", signs the transaction, and returns the signed payload in a response APDU.
+7. Ledger Live broadcasts. The test asserts against the resulting account state.
+
+On Stax the same flow uses three screens of a review widget, a swipe to advance, and a long-press-to-sign at the end. The HTTP grammar is different (`POST /finger` with coordinates) but the overall narrative is identical.
+
+### 2.3.6 The Coin-Apps Repository
+
+Speculos emulates the firmware, but not the device apps. Device apps (`Bitcoin.elf`, `Ethereum.elf`, `Solana.elf`, …) live in a separate repository: `github.com/LedgerHQ/coin-apps`. This repo contains compiled `.elf` binaries organized by device model, firmware version, app name, and app version:
 
 ```
 coin-apps/
-|-- nanoS/1.6.2/Bitcoin/app_2.5.0.elf
-|-- nanoSP/1.8.1/Bitcoin/app_2.7.0.elf
-|-- nanoSP/1.8.1/Ethereum/app_1.13.0.elf
-|-- stax/.../
-|-- flex/.../
-+-- apex/.../                # Nano Gen 5 (codename)
+├── nanoS/1.6.2/Bitcoin/app_2.5.0.elf
+├── nanoSP/1.8.1/Bitcoin/app_2.7.0.elf
+├── nanoSP/1.8.1/Ethereum/app_1.13.0.elf
+├── stax/.../
+├── flex/.../
+└── apex/.../            # Nano Gen 5 (codename)
 ```
 
+Local setup:
+
 ```bash
-# Local setup:
 git clone https://github.com/LedgerHQ/coin-apps.git ~/coin-apps
 export COINAPPS=~/coin-apps
-# Keep it updated frequently:
+
+# Keep it updated frequently — new apps and versions land constantly:
 cd ~/coin-apps && git pull
 ```
 
-### 10.6 Environment Variables
+> **Note:** The #2 cause of "App not found" errors in E2E tests (after Docker issues) is a stale `coin-apps` checkout. If a test fails with `Error: no app found for Solana on nanoSP`, your first reflex should be `cd $COINAPPS && git pull`.
+
+#### Pinning app versions
+
+`coin-apps` keeps multiple app versions side-by-side. Tests can pin a specific `(device, firmware, appName, appVersion)` tuple, which is what the `appQuery` field in the bot spec above does. Pinning is important for two reasons:
+
+- **Reproducibility.** A test that passes today on `Bitcoin 2.7.0` should not silently start running against `2.8.0` tomorrow.
+- **Bug triage.** When a behavior changes, knowing the exact app version narrows the search to a single commit range.
+
+When adding a test for a new currency, copy the version pin from a similar existing test and only bump it once you have a green baseline.
+
+### 2.3.7 Environment Variables
+
+Speculos and the test framework communicate through environment variables. You must set the required ones before running any Speculos-based test.
 
 ```bash
-# Required
-export MOCK=0                                          # Real Speculos, not mocked
-export SPECULOS_DEVICE=nanoSP                          # Device model
-export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:latest
-export COINAPPS=~/coin-apps                            # Path to .elf binaries
+# REQUIRED — set these before running tests
+export MOCK=0                                            # Disable mocks, use real Speculos
+export SPECULOS_DEVICE=nanoSP                            # Which device to emulate
+export SEED="abandon abandon ... about"                  # Recovery phrase (CI secret; ask QAA team)
+export COINAPPS=~/coin-apps                              # Path to .elf binaries
+export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:latest   # Docker image (use :master in some setups)
 
-# Auto-managed by the test framework (don't set manually):
-# SPECULOS_API_PORT=5000        # REST API port
-# SPECULOS_ADDRESS=http://127.0.0.1
-# SEED=abandon abandon ... about   # BIP39 mnemonic (CI secret)
+# OPTIONAL — usually managed by fixtures, do not set manually unless debugging
+# export SPECULOS_API_PORT=5000                          # REST API port (auto-assigned per test)
+# export SPECULOS_ADDRESS=http://127.0.0.1               # Speculos host
+# export REMOTE_SPECULOS=true                            # Use remote Speculos (CI only)
 ```
 
-### 10.7 Docker Commands
+**`MOCK=0` is the switch that matters most.** When `MOCK=1`, the Ledger Live app uses a fake device that returns canned responses — fast, but not representative. When `MOCK=0`, the app talks to the actual Speculos emulator via the port in `SPECULOS_API_PORT`. All Speculos-based E2E tests require `MOCK=0`.
+
+> **Note:** `SEED` is a real BIP39 mnemonic. It controls real addresses on real blockchains (testnet or mainnet). Never commit a seed. The QAA team manages the seven shared bot seeds — use a dedicated seed with minimal funds for local experiments (less than ~$10 per coin).
+
+#### First-day setup: getting a Speculos test to run locally
+
+Assume a fresh macOS or Linux workstation with Docker installed and the Ledger Live monorepo checked out. The path from zero to "a green Speculos test in my terminal" is:
+
+1. **Install Docker** and confirm it is running: `docker info` should print cluster info without errors. On macOS, Docker Desktop must be launched manually before every session.
+2. **Pull the Speculos image**: `docker pull ghcr.io/ledgerhq/speculos:latest`. This is a few hundred megabytes the first time.
+3. **Clone coin-apps** somewhere outside the monorepo: `git clone https://github.com/LedgerHQ/coin-apps.git ~/coin-apps`. Checking it out inside the monorepo will confuse the pnpm workspace resolver.
+4. **Ask QAA for a non-production seed.** Do not reuse a personal seed. Do not commit it. Store it in your shell profile or a `direnv` file that is gitignored.
+5. **Export the env vars** described above (`MOCK=0`, `SPECULOS_DEVICE=nanoSP`, `COINAPPS`, `SEED`, `SPECULOS_IMAGE_TAG`).
+6. **Run a known-good Speculos test.** Pick the simplest tagged `@Speculos @NanoSP` test in the desktop suite and run it via the standard pnpm command. If that test is green, your setup is correct.
+
+If step 6 fails, walk back through the list. Every failure at this stage has one of three causes: Docker not running, `COINAPPS` wrong or stale, or `SEED` missing.
+
+#### A minimal `.env` for a new contributor
+
+If you have just cloned the monorepo and want a working Speculos setup, start with this and adjust:
 
 ```bash
-docker pull ghcr.io/ledgerhq/speculos:latest          # Pull latest
-docker images | grep speculos                          # Verify
-docker ps --filter name=speculos                       # Running containers
-docker rm -f $(docker ps -aq --filter name=speculos)   # Kill leftovers
-docker logs <container-id>                             # View logs
+# ~/.config/ledger-live-e2e/env.local (or whatever loader your shell uses)
+MOCK=0
+SPECULOS_DEVICE=nanoSP
+SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:latest
+COINAPPS=/Users/me/code/coin-apps
+SEED="ask QAA for the dev seed, do not paste a real one"
 ```
 
-### 10.8 The Ledger Live Bot (from the wiki)
+Source the file, run `docker pull $SPECULOS_IMAGE_TAG`, `cd $COINAPPS && git pull`, and you are ready to run any Speculos-tagged test.
 
-The Ledger Live Bot is an autonomous testing system that performs real transactions using Speculos. It is fundamentally different from E2E tests:
+### 2.3.8 Docker Commands You Will Actually Use
+
+Speculos runs inside Docker. When things go wrong, Docker is the first place to look.
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/ledgerhq/speculos:latest
+
+# Verify the image is present
+docker images | grep speculos
+
+# List running Speculos containers (should match running test workers)
+docker ps --filter name=speculos
+
+# Kill leftover containers from crashed or interrupted tests
+docker rm -f $(docker ps -aq --filter name=speculos)
+
+# View logs from a specific container
+docker logs <container-id>
+```
+
+**The single most common failure mode** is a stuck container from a previous run. If you interrupted a test with `Ctrl+C` and the next run fails with port conflicts or "container not ready", the fix is almost always:
+
+```bash
+docker rm -f $(docker ps -a -q --filter ancestor=ghcr.io/ledgerhq/speculos:latest)
+```
+
+#### One-off Speculos, without the test framework
+
+Sometimes you want to poke Speculos by hand — for example, to reproduce a device-side bug outside the full E2E stack. You can launch a container directly:
+
+```bash
+docker run --rm -it \
+  -p 5000:5000 -p 9999:9999 \
+  -v $COINAPPS/nanoSP/1.8.1:/speculos/apps \
+  ghcr.io/ledgerhq/speculos:latest \
+  /speculos/apps/Bitcoin/app_2.7.0.elf \
+  --display headless --api-port 5000 --model nanosp
+```
+
+Then open `http://localhost:5000` in your browser. You will see the emulated Bitcoin app boot, and you can drive it with `curl` against port 5000. This is the purest form of Speculos — no app framework, no Playwright, just you and the device.
+
+### 2.3.9 Speculos in the Ledger Live Test Framework
+
+The pieces above — REST API, coin-apps, env vars, Docker — are raw Speculos. In the Ledger Live repo, an orchestration layer wraps all of this so that individual tests never have to `docker run` anything. The contract for a test writer is simple:
+
+1. Declare which app the device should launch with, via the `speculosApp` fixture value.
+2. Optionally declare `cliCommands` to populate accounts or balances before the test starts.
+3. Use the `speculos` fixture in the test; it exposes `current` (the device) and `relaunch(appName)` (switch apps mid-test, e.g., for swap flows).
+
+Behind the scenes, a fixture in `common.ts` does the heavy lifting: it launches a container, waits for it to become ready, assigns a random port, registers the transport with `live-common`, runs any CLI commands, hands the device to your test, and — most importantly — cleans up after the test regardless of outcome.
+
+The port is assigned randomly per container precisely to enable parallel execution. With `fullyParallel: true` and a high `workers` count, many tests run at the same time; each needs its own isolated Speculos instance on a unique port.
+
+#### What the test author writes
+
+From the perspective of somebody writing a new test, the Speculos-specific surface area is small:
+
+```typescript
+test.use({
+  speculosApp: specs.bitcoin,         // which app to boot the device with
+  cliCommands: [addAccountCommand],   // optional: populate accounts before the test runs
+});
+
+test("send 0.01 BTC", async ({ page, speculos }) => {
+  // ... Playwright-driven UI steps ...
+  await confirmOnDevice(speculos.current);   // helper that dispatches on SPECULOS_DEVICE
+  // ... assertions on the UI and/or on-chain state ...
+});
+```
+
+Everything else — container lifecycle, port assignment, transport registration, Allure metadata, cleanup — is the fixture's responsibility. If you find yourself reaching for `docker` or `curl` inside a test body, stop and see whether a helper already exists or should exist.
+
+The fixture also exposes a **mutable handle** rather than a bare device. That is because some tests — swaps in particular — need to switch from app A to app B mid-flow. The handle's `relaunch(appName)` stops the current container and starts a new one, preserving the test's view of "the current device" without littering test code with container management.
+
+> **Cross-reference:** The exact internals of the Ledger Live E2E fixture — `speculos` in `common.ts`, the `launchSpeculos` and `cleanSpeculos` helpers in `speculosUtils.ts`, and the `SpeculosDevice` TypeScript type — are covered in **Part 3 Chapter 3.6 (Desktop E2E Fixtures & Speculos Integration)**. This chapter stays at the tool level; Part 3 walks through the code that binds Speculos to Playwright.
+
+#### What the fixture buys you
+
+When you write `test("...", async ({ speculos }) => { … })`, you inherit five things for free:
+
+1. **A running container** on a unique port, reachable via the standard REST API.
+2. **Transport registration** — `live-common` already knows how to talk to this specific Speculos instance, so the in-app device picker resolves to it.
+3. **Data population** — if you declared `cliCommands`, accounts are already scanned and balances loaded by the time your test body runs.
+4. **Allure integration** — the device name, app name, and app version show up in the report description, so later triage does not require guessing what firmware was in play.
+5. **Guaranteed cleanup** — even if the test throws, fails, or the worker is killed, the fixture's `finally` stops the container. That is the difference between a clean CI run and a board full of zombie Docker processes.
+
+#### CI matrix: one test, many devices
+
+In CI, a single test tagged `@NanoSP @Stax @Flex` runs three times — once per device model — with `SPECULOS_DEVICE` overridden per matrix entry. The test code does not change; only the env var does. This is the payoff for keeping all device-specific interaction behind helpers that dispatch on `SPECULOS_DEVICE`: one source of truth, N executions.
+
+Practical consequences:
+
+- If you hard-code `nanoSP` anywhere in a helper, you break the matrix for that test.
+- If you add a new device tag to a test, make sure every interaction path it touches has a branch for that device.
+- If you find yourself adding `if (device === "stax")` in tests, extract a helper instead. Tests should read as intent, not as device switching.
+
+### 2.3.10 The Ledger Live Bot
+
+On top of Speculos, Ledger Live runs an autonomous testing system called **the Ledger Live Bot**. It is fundamentally different from the E2E tests we have discussed so far: the bot does not drive a UI, does not use Playwright or Detox, and does not assert against screenshots. It uses Speculos and `live-common` directly to perform **real transactions on real blockchains**.
 
 #### Philosophy
 
-- **Stateless**: Its state is on the blockchain
-- **Configless**: Only needs a seed and a coin-apps folder
-- **Autonomous**: Restores from existing seed accounts and continues from existing blockchain state
-- **Data driven**: Actions are based on data specs (mutations) that drive capabilities
-- **End to End**: Relies on the complete Ledger stack: live-common + Speculos
-- **Realistic**: Very close to what Ledger Live users would do — it even presses device buttons
+- **Stateless**: its state is on the blockchain, not on disk
+- **Configless**: only needs a seed and a coin-apps folder
+- **Autonomous**: restores from existing seed accounts and continues from existing blockchain state
+- **Data driven**: actions are described by data specs (mutations) that declare capabilities
+- **End to end**: relies on the complete Ledger stack — `live-common` plus Speculos
+- **Realistic**: very close to what a real user does — it even presses device buttons via the Speculos API
 
 #### How It Works
 
-The bot scans accounts for a given seed and, for each account, randomly selects a possible transaction ("mutation") to perform against one of its sibling accounts. This exercises the full transaction flow: scan → build transaction → sign on device → broadcast → verify.
-
-#### Mutations
+The bot scans accounts for a given seed. For each account it randomly selects a possible transaction — a **mutation** — to perform against one of its sibling accounts. This exercises the full transaction flow: scan accounts → build transaction → sign on device → broadcast to the network → verify the on-chain outcome.
 
 A **mutation** is a possible action to perform on an account. It includes:
+
 - The **transaction expression** (what to do)
-- The **device action** (how to interact with Speculos)
-- An optional **assertion test** (expected outcome)
+- The **device action** (how to interact with Speculos — which buttons to press, what text to approve)
+- An optional **assertion test** (expected outcome after broadcast)
 
 ```javascript
 const dogecoinSpec = {
@@ -1192,7 +972,21 @@ const dogecoinSpec = {
 };
 ```
 
+#### Where the bot fits vs Playwright/Detox E2E
+
+It is useful to see the three automated stacks side by side:
+
+| Stack | Drives | Asserts on | Runs on | Good for |
+|-------|--------|------------|---------|----------|
+| Playwright E2E (desktop) | The Electron UI + Speculos | UI state, device screen, final account state | Every PR, nightly | UI regressions, end-to-end flows |
+| Detox E2E (mobile) | The native mobile UI + Speculos | UI state, device screen | Nightly, on demand | Mobile UI flows |
+| Ledger Live Bot | `live-common` + Speculos directly (no UI) | On-chain state after broadcast | Rotated every 8h on `develop`, weekly costly on `develop`, daily on `main` | Protocol-level regressions, broad currency coverage |
+
+The bot is the only one of the three that ends in a real broadcast, which is why it uses funded seeds and why its scope is intentionally narrow (happy path only). UI regressions are Playwright/Detox's job; the bot catches things like "Bitcoin app 2.8.0 produces invalid signatures against testnet" long before a human would notice from a screenshot.
+
 #### The Seven Seeds
+
+The bot runs against seven dedicated seeds, each with a codename and a specific role in the CI rotation:
 
 | Secret ID | Codename | Purpose |
 |-----------|----------|---------|
@@ -1208,37 +1002,187 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 
 #### Bot Limitations
 
-- Only covers successful transactions (no error cases)
+- Only covers **successful** transactions (no error-path coverage)
 - Not all apps are supported in Speculos
-- Cannot assert all possible transactions in one run
-- Only works with one app at a time (no disconnection/dashboard flows)
+- Cannot assert all possible transactions in a single run (it samples mutations probabilistically)
+- Only works with one app at a time (no disconnection or dashboard flows)
 - Does **not** run on LLD or LLM — cannot detect UI-specific issues
 - Cannot perform swaps
 
-> **Security warning**: The bot uses seeds in clear text. Never use an existing seed. Use a dedicated seed with minimal funds (~$10 per coin).
+> **Security warning:** The bot uses seeds in clear text. Never use a personal seed. Use a dedicated seed with minimal funds (~$10 per coin) for any manual bot run.
+
+### 2.3.11 Patterns and Anti-Patterns
+
+A handful of habits make Speculos-backed tests dramatically more reliable. A handful of others guarantee flake.
+
+#### Patterns to adopt
+
+- **Drive the device through named helpers, not raw button presses.** A helper like `confirmOnDevice()` that dispatches on `SPECULOS_DEVICE` keeps the test narrative readable and the matrix honest.
+- **Wait on the device's screen text before pressing.** Poll `GET /events` or use the live-common wrapper until the expected label appears, then press. Never sleep-then-press.
+- **Pin app versions in fixtures.** A test that works today on Bitcoin 2.7.0 should still work tomorrow on Bitcoin 2.7.0 — even if 2.8.0 exists.
+- **Keep one Speculos app per test whenever possible.** The `relaunch()` path is powerful but adds a container restart, which slows the test and widens the failure surface. Only use it when the test genuinely needs two apps (swaps, app-to-app flows).
+- **Attach a device screenshot to the failure.** The Playwright fixture already does this; just do not disable it.
+- **Use automation rules for long, deterministic flows.** If you are writing a for-loop of button presses, you are probably reinventing the automation endpoint.
+
+#### Anti-patterns to avoid
+
+- **Hard-coding `nanoSP` anywhere.** Even in "temporary" debug code, this breaks the device matrix the moment you forget to remove it.
+- **Asserting against raw coordinates on touch devices.** Layouts shift between firmware versions. Assert on labels (`pressAndRelease("Confirm")`) and let Speculos resolve the coordinates.
+- **Letting the test choose the Speculos port.** The fixture does this; overriding defeats parallelism.
+- **Running long sleeps to "let the device settle".** If you need a sleep, you probably need a wait-for-event instead. Sleeps hide real race conditions and reappear as flake in CI.
+- **Sharing a single container across tests.** Each test writes state into the emulated device (automation rules, last-screen history). Share nothing — that is what per-test containers buy you.
+- **Treating a Speculos-pass as a hardware-pass.** Speculos is a faithful emulator, not a secure element. Hardware-specific certification still needs real devices.
+
+#### Reading a live-common APDU log
+
+When you tail an E2E run with debug logging on, you will see lines like:
+
+```
+=> e040000015 058000002c800000008000000000000000 00000000
+<= 4104a3...9000
+```
+
+Decoded:
+
+- `=>` is a command APDU the app sent to Speculos. `e0` is CLA, `40` is INS (get-public-key on Bitcoin), then P1, P2, Lc, data, Le.
+- `<=` is the response. The last two bytes are the status word: `9000` means "OK". Anything else is a failure to investigate — `6a80` for invalid data, `6d00` for instruction not supported, and so on.
+
+You will not normally hand-parse APDUs. But being able to tell "OK vs not OK" from the trailing `9000` is enough to identify whether the device refused a request or Ledger Live misinterpreted the response.
+
+#### A concrete automation ruleset example
+
+The automation endpoint accepts a JSON document. Here is a ruleset that auto-approves a standard Bitcoin send on a Nano SP — useful when you want to isolate a UI-side issue and do not care about the device-side prompts:
+
+```json
+{
+  "version": 1,
+  "rules": [
+    { "regexp": "Review.*transaction", "actions": [["button", 2, true], ["button", 2, false]] },
+    { "regexp": "Amount",               "actions": [["button", 2, true], ["button", 2, false]] },
+    { "regexp": "Address",              "actions": [["button", 2, true], ["button", 2, false]] },
+    { "regexp": "Fees",                 "actions": [["button", 2, true], ["button", 2, false]] },
+    { "regexp": "Accept and send",      "actions": [["button", 2, true], ["button", 2, false]] }
+  ]
+}
+```
+
+Ship this to `POST /automation` once at test start, and Speculos will fire the matching button sequence whenever any of those texts appears. The test body no longer has to script device presses — it just waits on the UI.
+
+> **Note:** Automation rules bypass the human-in-the-loop guarantee that signing implies an explicit user approval. That is fine for tests, but never copy a ruleset into anything that interacts with a real user's seed.
+
+### 2.3.12 Debugging Speculos Issues
+
+A practical checklist, in the order you should work through it when a Speculos-based test misbehaves.
+
+**"No Speculos device" or container timeout:**
+
+```bash
+# Check if Docker is running
+docker ps
+
+# Check for lingering containers from failed tests
+docker ps -a | grep speculos
+
+# Remove stuck containers
+docker rm -f $(docker ps -a -q --filter ancestor=ghcr.io/ledgerhq/speculos:latest)
+```
+
+**"App not found" error:**
+
+```bash
+# Update your coin-apps repository
+cd $COINAPPS
+git pull origin develop
+```
+
+**Port conflicts:**
+
+```bash
+# Check what is using a port
+lsof -i :5000
+
+# Kill the process
+kill -9 <PID>
+```
+
+**View the device screen during a test:**
+
+Open `http://localhost:<port>` in your browser while the test is running (replace `<port>` with the Speculos port from the console output or Allure description). You will see the emulated display update in real time. This is the single most useful debugging tool — far more informative than reading logs.
+
+**Audit what the device is doing at a given instant:**
+
+```bash
+# What text is currently on the screen?
+curl http://localhost:<port>/events
+
+# What does the screen look like right now?
+curl http://localhost:<port>/screenshot -o now.png
+```
+
+> **Cross-reference:** Broader E2E troubleshooting (Playwright traces, Detox logs, CI artifact download) lives in **Appendix E: Troubleshooting FAQ**.
+
+#### Common failure modes, in one table
+
+| Symptom | Most likely cause | First fix |
+|---------|-------------------|-----------|
+| `container not ready` after 30s timeout | Stuck container from a previous run | `docker rm -f $(docker ps -aq --filter name=speculos)` |
+| `no app found for X on nanoSP` | Stale `coin-apps` checkout | `cd $COINAPPS && git pull` |
+| `EADDRINUSE` on port 5000 | Another Speculos still owns the port | `lsof -i :5000`, then kill |
+| `SIGNATURE_INVALID` on transaction | Wrong app version pinned vs seed state | Verify `appQuery.appVersion` against coin-apps |
+| Test hangs at "waiting for device" | `MOCK=1` still set, app uses mock transport | `export MOCK=0`, relaunch app |
+| Screenshots blank / all black | Container started but firmware did not boot | Check Docker logs; may need to repull the image |
+| Works locally, fails in CI only | `REMOTE_SPECULOS` / secrets missing | Inspect CI env, confirm `SEED` is injected |
+| Screen shows unexpected app | `speculosApp` fixture value stale from previous `relaunch()` | Use `speculos.current.appName` to confirm state |
+
+#### Three scenarios, three fixes
+
+A few concrete examples of the kind of bug reports that land on the QAA team and the five-minute mental path from symptom to resolution.
+
+**Scenario 1 — "My test was green yesterday, now it fails with `no app found for Bitcoin 2.9.0 on nanoSP`."**
+
+Somebody bumped the pinned Bitcoin app version in the test's fixture, but your local `coin-apps` checkout has not seen `2.9.0` yet. `cd $COINAPPS && git pull`, rerun. If the failure persists after pulling, check that the new version actually exists in the upstream repo — the bump might have been wishful.
+
+**Scenario 2 — "The test hangs forever after clicking the Send button. No error, no screenshot."**
+
+Almost always a missing or wrong `MOCK` value. The app is waiting for a device that is not connected, because the transport layer is still pointed at the mock. Verify `MOCK=0`, verify `SPECULOS_API_PORT` is exported for the current worker (or let the fixture manage it by not setting it at all), and verify you are not running two Ledger Live instances against the same port.
+
+**Scenario 3 — "On CI the test fails with `EADDRINUSE`, but locally it is green."**
+
+The CI runner has leftover containers from a previous job. This is a CI-hygiene issue, not a test bug. Open the CI runner logs, confirm that a container with your port is still alive, and either let the next scheduled cleanup step take care of it or trigger one manually. If you can reproduce this locally by running the same test twice in quick succession without `docker rm -f`, you have confirmed the diagnosis.
+
+#### Reading Allure artifacts for a Speculos failure
+
+When a Speculos-based test fails in CI, the Allure report typically carries:
+
+- The **fixture description** — device, app name, app version, Speculos image tag.
+- The **Playwright trace** — every action up to the failure, including page HTML.
+- A **device screenshot** captured at failure time (the app takes one via `GET /screenshot`).
+- The **APDU log** from `live-common`, surfaced as a step attachment.
+
+Your triage reflex should be: open the trace, scroll to the last successful step, look at the device screenshot for that moment, then compare it to the assertion that failed. Most "flaky Speculos" failures turn out to be a race between the app's UI and the device's display — the test asked the next button press too early, or queried `/events` before the new screen rendered.
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><a href="https://github.com/LedgerHQ/speculos">Speculos source code</a> — the device emulator</li>
+<li><a href="https://github.com/LedgerHQ/speculos">Speculos: GitHub repository</a> — source code, issues, releases</li>
+<li><a href="https://speculos.ledger.com/">Speculos: official site</a></li>
+<li><a href="https://speculos.ledger.com/user/launch.html">Speculos: launch and usage documentation</a></li>
 <li><a href="https://github.com/LedgerHQ/coin-apps">Coin-apps repository</a> — compiled .elf binaries for all devices</li>
-<li><a href="https://developers.ledger.com/docs/device-interaction/beginner/exchange_data">APDU — How to exchange data with a Ledger device</a> (Ledger developer docs)</li>
-<li><a href="https://docs.zondax.ch/ledger-apps/starkware/APDU">APDU — Protocol specification reference</a> (Zondax docs)</li>
-<li><a href="https://www.ledger.com/introducing-bolos-blockchain-open-ledger-operating-system">BOLOS / BAGL / NBGL — Introducing the Blockchain Open Ledger Operating System</a></li>
+<li><a href="https://github.com/LedgerHQ/app-boilerplate">Ledger app boilerplate</a> — reference template for device apps</li>
+<li><a href="https://developers.ledger.com/docs/device-interaction/beginner/exchange_data">APDU — how to exchange data with a Ledger device</a> (Ledger developer docs)</li>
+<li><a href="https://www.ledger.com/introducing-bolos-blockchain-open-ledger-operating-system">BOLOS / BAGL / NBGL — introducing the Blockchain Open Ledger Operating System</a></li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Speculos is what makes your tests realistic — it runs real firmware, real coin apps, and responds to real APDU commands. The bot extends this further by performing autonomous transactions on the blockchain. When a test involves device interaction, understanding Speculos is non-negotiable.
+<strong>Key takeaway:</strong> Speculos is what makes your tests realistic — it runs the real firmware and the real coin apps, and it responds to real APDU commands over a REST API. The Ledger Live framework wraps it so individual tests never touch Docker directly, but when something breaks your mental model should start at the bottom: is Docker running, are there stuck containers, is <code>COINAPPS</code> fresh, is <code>MOCK=0</code>, is the right <code>SPECULOS_DEVICE</code> selected? Above that layer, the Ledger Live Bot performs autonomous blockchain transactions on seven rotated seeds — the most realistic automated coverage we have, and the closest thing to a real user that does not need a human in the loop.
 </div>
 
-### 10.9 Quiz
-
-<!-- ── Chapter 10 Quiz ── -->
+### 2.3.13 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<h3>Chapter 2.3 Quiz</h3>
+<p class="quiz-subtitle">9 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
@@ -1255,12 +1199,12 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 <div class="quiz-question" data-correct="B">
 <p><strong>Q2.</strong> Your tests fail with "Error: no app found for Solana on nanoSP". What is the most likely cause?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Speculos doesn't support Solana at all</button>
+<button class="quiz-choice" data-value="A">A) Speculos does not support Solana at all</button>
 <button class="quiz-choice" data-value="B">B) The <code>COINAPPS</code> path is wrong or coin-apps needs <code>git pull</code></button>
 <button class="quiz-choice" data-value="C">C) You must use <code>nanoX</code> for Solana</button>
 <button class="quiz-choice" data-value="D">D) The Speculos Docker image is too new</button>
 </div>
-<p class="quiz-explanation">Either <code>COINAPPS</code> is not set, points to the wrong directory, or the coin-apps repo is outdated and doesn't have the Solana .elf binary for the requested device/firmware version. Run <code>cd ~/coin-apps && git pull</code>.</p>
+<p class="quiz-explanation">Either <code>COINAPPS</code> is not set, points to the wrong directory, or the coin-apps repo is outdated and does not have the Solana .elf binary for the requested device/firmware version. Run <code>cd ~/coin-apps && git pull</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
@@ -1274,19 +1218,63 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 <p class="quiz-explanation">BAGL (Bolos Application Graphics Library) is the display framework for button-based Nanos. NBGL (New Bolos GL) is the modern framework for touchscreen devices. This distinction affects how E2E tests interact with the emulated device.</p>
 </div>
 
+<div class="quiz-question" data-correct="B">
+<p><strong>Q4.</strong> Why does each Speculos container get a random port number?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) For security — random ports are harder to attack</button>
+<button class="quiz-choice" data-value="B">B) To enable parallel execution — multiple test workers run simultaneously, each needing its own isolated Speculos instance</button>
+<button class="quiz-choice" data-value="C">C) Speculos requires random ports by design</button>
+<button class="quiz-choice" data-value="D">D) To avoid conflicts with the Ledger Live app's default port</button>
+</div>
+<p class="quiz-explanation">With <code>fullyParallel: true</code> and a high worker count, many tests run at the same time. Each gets its own Docker container on a unique port, preventing port conflicts.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> What does <code>MOCK=0</code> do?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Enables mock data for faster tests</button>
+<button class="quiz-choice" data-value="B">B) Disables all network requests</button>
+<button class="quiz-choice" data-value="C">C) Disables mocked device responses so the app talks to a real Speculos emulator instead</button>
+<button class="quiz-choice" data-value="D">D) Turns off test assertions</button>
+</div>
+<p class="quiz-explanation"><code>MOCK=0</code> tells the Ledger Live app to NOT use mock device responses. Instead, it communicates with the actual Speculos emulator via the port specified in <code>SPECULOS_API_PORT</code>. This is required for Speculos-based E2E tests.</p>
+</div>
+
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> In the Ledger Live Bot, what is a "mutation"?</p>
+<p><strong>Q6.</strong> What should you check FIRST when Speculos fails to start?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The Playwright configuration file</button>
+<button class="quiz-choice" data-value="B">B) The test source code</button>
+<button class="quiz-choice" data-value="C">C) The Allure report</button>
+<button class="quiz-choice" data-value="D">D) Docker — is it running? Are there stuck containers from previous test runs?</button>
+</div>
+<p class="quiz-explanation">The #1 cause of Speculos failures is Docker issues: Docker Desktop not running, stuck containers from interrupted tests, or port conflicts. Always check <code>docker ps -a</code> first.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q7.</strong> What is the <code>SpeculosFixtureHandle</code> and why does it have a <code>relaunch()</code> method?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It is a mutable wrapper around the current device. <code>relaunch()</code> lets a test switch to a different Speculos app mid-test (e.g., for swap tests that need two different currency apps)</button>
+<button class="quiz-choice" data-value="B">B) It is a Playwright page object for device interaction</button>
+<button class="quiz-choice" data-value="C">C) It is a Docker container management utility exposed to test authors</button>
+<button class="quiz-choice" data-value="D">D) It is used only for retry logic when Speculos crashes</button>
+</div>
+<p class="quiz-explanation">The handle wraps the current device with a <code>current</code> getter and a <code>relaunch()</code> method. <code>relaunch()</code> stops the current container and starts a new one with a different app — essential for tests that need multiple device apps (like swaps).</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q8.</strong> In the Ledger Live Bot, what is a "mutation"?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) A change to the Speculos Docker image configuration</button>
 <button class="quiz-choice" data-value="B">B) A modification to the source code of a coin integration</button>
 <button class="quiz-choice" data-value="C">C) A React state update in the Ledger Live UI</button>
-<button class="quiz-choice" data-value="D">D) A possible transaction action to perform on an account (e.g., "send max", "move 50%"), which mutates the blockchain state</button>
+<button class="quiz-choice" data-value="D">D) A possible transaction action to perform on an account (e.g., "send max", "move 50%") that mutates the on-chain state</button>
 </div>
 <p class="quiz-explanation">In the bot's vocabulary, a mutation is a transaction scenario that changes (mutates) account state on the blockchain. Each mutation includes the transaction definition, device action (how to interact with Speculos), and optional assertions.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> Which bot seed (Nitrogen) runs daily non-regression on <code>develop</code>?</p>
+<p><strong>Q9.</strong> Which bot seed runs daily non-regression on <code>develop</code>?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) SEED7 (Nitrogen)</button>
 <button class="quiz-choice" data-value="B">B) SEED1 (Mère Denis)</button>
@@ -1307,7 +1295,7 @@ All seeds are rotated for non-regression against `develop` every 8 hours.
 Feature flags are a critical part of modern software delivery. They let teams decouple deployment from release, run experiments, and kill broken features instantly. This chapter covers how Ledger Live uses Firebase Remote Config, the four environments, how to override flags in E2E tests, and — crucially — the <strong>anti-patterns</strong> that have caused real problems in the codebase. Understanding what NOT to do with feature flags is as important as knowing how to use them.
 </div>
 
-### 11.1 What Are Feature Flags?
+### 2.4.1 What Are Feature Flags?
 
 Feature flags let you enable/disable features remotely without deploying new code. They are used for:
 - **Gradual rollouts** (enable for 10% of users, then 50%, then 100%)
@@ -1315,7 +1303,7 @@ Feature flags let you enable/disable features remotely without deploying new cod
 - **Kill switches** (instantly disable a broken feature)
 - **Development** (hide WIP features behind a flag)
 
-### 11.2 Firebase Remote Config Environments
+### 2.4.2 Firebase Remote Config Environments
 
 Ledger Live uses four Firebase environments:
 
@@ -1326,7 +1314,7 @@ Ledger Live uses four Firebase environments:
 | **Earn** | Flags for staking/earning features |
 | **Buy Sell** | Flags for fiat on/off ramp |
 
-### 11.3 Feature Flags in E2E Tests
+### 2.4.3 Feature Flags in E2E Tests
 
 You can override flags in tests using three methods:
 
@@ -1354,7 +1342,7 @@ await app.init({
 export E2E_FEATURE_FLAGS_JSON='{"myFlag":{"enabled":true}}'
 ```
 
-### 11.4 The Wallet 4.0 Toggle
+### 2.4.4 The Wallet 4.0 Toggle
 
 ```bash
 export E2E_ENABLE_WALLET40=1
@@ -1362,7 +1350,7 @@ export E2E_ENABLE_WALLET40=1
 
 This enables the Wallet 4.0 UI, which significantly changes navigation and layout. Some tests need this flag, others expect the classic UI. Always be aware of which UI version your test targets.
 
-### 11.5 Feature Flag Anti-Patterns
+### 2.4.5 Feature Flag Anti-Patterns
 
 The following anti-patterns have been identified from real issues in the Ledger Live codebase. Understanding them will help you write more robust E2E tests and contribute to better feature flag hygiene.
 
@@ -1435,7 +1423,7 @@ test.describe("New staking flow", () => {
 });
 ```
 
-### 11.6 Monitoring Feature Flag Impact
+### 2.4.6 Monitoring Feature Flag Impact
 
 The QA team monitors feature flag impact through the Slack channel **#qa-b2c-releases-bugs-tracking**. When a bug is suspected to be flag-related:
 
@@ -1443,7 +1431,7 @@ The QA team monitors feature flag impact through the Slack channel **#qa-b2c-rel
 2. Try to reproduce with the flag explicitly toggled in both states
 3. Report whether the bug is flag-dependent in the Jira ticket
 
-### 11.7 Key Takeaways for Feature Flag Hygiene
+### 2.4.7 Key Takeaways for Feature Flag Hygiene
 
 | Principle | Description |
 |-----------|-------------|
@@ -1466,9 +1454,9 @@ The QA team monitors feature flag impact through the Slack channel **#qa-b2c-rel
 <strong>Key takeaway:</strong> In your E2E tests, <strong>always explicitly override every feature flag your test depends on</strong>. Never rely on Firebase defaults — they can change without notice. Document flag dependencies in your test code. And when debugging a flaky test, check whether a flag change is the root cause before investigating other hypotheses.
 </div>
 
-### 11.8 Quiz
+### 2.4.8 Quiz
 
-<!-- ── Chapter 11 Quiz ── -->
+<!-- ── Chapter 2.4 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz</h3>
@@ -1535,204 +1523,707 @@ The QA team monitors feature flag impact through the Slack channel **#qa-b2c-rel
 
 ---
 
-## Allure Reporting & Xray Integration
+
+## Allure Reporting & Xray
 
 <div class="chapter-intro">
-Running tests without reading reports is like writing code without running it. <strong>Allure</strong> is the test reporting framework used by Ledger Live E2E tests. It transforms raw test results into interactive HTML reports with step-by-step traces, screenshots, videos, and environment data. Combined with <strong>Xray</strong> integration, it connects automated test results to Jira test case definitions. This chapter shows you how to generate, read, and interpret these reports.
+Running tests without reading reports is like writing code without running it. <strong>Allure</strong> is the test reporting framework used by every Ledger Live E2E and unit pipeline. It turns raw test output into interactive HTML reports with hierarchical step traces, screenshots, device captures, videos, and environment metadata. <strong>Xray</strong> is the Jira plugin that stores our manual test-case catalogue on the <code>B2CQA</code> project; a small custom reporter wires the Playwright and Detox results back into Xray so every execution updates the corresponding <code>B2CQA-*</code> ticket. This chapter teaches Allure from zero, then walks through the exact Ledger Live wiring — per-platform reporter config, the <code>$TmsLink()</code> binding to B2CQA, the artifact pipeline, and the ticket transition that happens when a test lands.
 </div>
 
-### 12.1 What Is Allure?
+### 2.5.1 What Is Allure?
 
-Allure is a **test reporting framework** that generates interactive HTML reports with:
-- Test results (passed, failed, broken, skipped)
-- Step-by-step execution trace (from `@step` decorators)
-- Screenshots on failure
-- Video recordings
-- Environment information
-- Links to Jira/Xray test cases
+Allure Report (by Qameta Software) is an open-source test reporting framework. It consumes a directory of JSON/attachment files emitted by any supported test runner and produces a static HTML site that engineers, QA, and PMs can all read.
 
-### 12.2 Viewing Reports Locally
+At a minimum a report shows:
+
+- Test outcomes grouped by status: **passed**, **failed**, **broken**, **skipped**.
+- A collapsible **step tree** for each test (populated by `@step` decorators, see §2.5.4).
+- **Attachments** per test: screenshots, videos, Playwright traces, Speculos device screens, console logs, network logs.
+- **Metadata**: severity, feature, story, owner, parent suite, TMS links, bug links, environment.
+- **Trends**: pass/fail history across the last N runs (when CI keeps a history folder).
+
+Two things Allure is *not*:
+
+- Not a runner. Allure does not execute tests; it consumes results.
+- Not a TMS. Allure does not store test-case definitions or track manual execution — that is Xray's job on `B2CQA`.
+
+<div style="border-left:4px solid #3498db; padding:0.5em 1em; background:#f6fafd; margin:1em 0;">
+<strong>Mental model.</strong> Your runner (Playwright, Detox, Jest, Vitest) writes raw result files into <code>allure-results/</code>. The <code>allure</code> CLI reads that folder and renders <code>allure-report/</code> — a static site you can open locally or upload to the Ledger Allure server. Xray sync is a <em>separate</em> output file produced by a custom reporter in the same run.
+</div>
+
+### 2.5.2 The Reporting Pipeline
+
+```
+Your code                     Runner hook                    Artefact                         Consumer
+---------                     -----------                    --------                         --------
+@step("...") decorator    ->  test.step()               ->   allure-results/*-result.json  -> Allure HTML step tree
+addTmsLink([ids])         ->  allure.tms(id)            ->   links[] in result JSON        -> Clickable Jira link
+addBugLink([ids])         ->  allure.issue(id)          ->   links[] in result JSON        -> Clickable Jira bug
+captureArtifacts()        ->  testInfo.attach(...)      ->   allure-results/*-attachment   -> Embedded png/webm/json
+test.use({ teamOwner })   ->  allure.owner/feature(...) ->   labels[] in result JSON       -> Team filter
+customJsonReporter        ->  onTestEnd / onExit        ->   xray-report.json              -> Xray REST import
+```
+
+One Playwright/Detox run thus fans out into two output channels:
+
+1. The `allure-results/` folder -> `allure generate` -> `allure-report/` -> uploaded to `https://ledger-live.allure.green.ledgerlabs.net`.
+2. A single `xray-report.json` file -> Xray REST v2 import -> status written on every `B2CQA-*` ticket listed in the file.
+
+### 2.5.3 Viewing Reports Locally
+
+Desktop (Playwright + Electron):
 
 ```bash
-# Desktop:
-pnpm e2e:desktop allure:generate   # Generate from ./allure-results
-pnpm e2e:desktop allure:open       # Open in browser
-pnpm e2e:desktop allure             # Combined (generate + open)
-
-# Mobile (from e2e/mobile/):
-pnpm allure
+pnpm e2e:desktop allure:generate   # reads apps/ledger-live-desktop/allure-results
+pnpm e2e:desktop allure:open       # serves apps/ledger-live-desktop/allure-report
+pnpm e2e:desktop allure            # convenience: generate + open in one shot
 ```
 
-### 12.3 Reports in CI
+Mobile (Detox + Jest), from `apps/ledger-live-mobile/e2e`:
 
-Reports are automatically uploaded to: `https://ledger-live.allure.green.ledgerlabs.net`
+```bash
+pnpm allure                        # same generate+open, but on e2e/allure-results
+```
 
-The URL is printed in the GitHub Actions job summary. Look for "Desktop Allure report URL" or "Mobile Allure report URL".
+Generic fallback — useful when debugging a third-party package:
 
-### 12.4 How @step Creates the Report
+```bash
+npx allure serve ./allure-results  # one-shot local web server
+```
 
-The `@step` decorator on page object methods automatically populates the Allure report with a step-by-step trace:
+### 2.5.4 Reports in CI
+
+Every `e2e-*` GitHub Actions job uploads its report to:
+
+```
+https://ledger-live.allure.green.ledgerlabs.net
+```
+
+The final URL is printed in the job summary — look for lines starting with **"Desktop Allure report URL"** or **"Mobile Allure report URL"**. The upload also seeds the `history/` folder so the next run shows trends (pass-rate graph, previously-failed tests).
+
+History retention is currently 20 runs per branch; beyond that Allure drops the oldest. Do not rely on Allure for long-term analytics — use the Xray test execution records on Jira for historical reporting (§2.5.10).
+
+### 2.5.5 How `@step` Creates the Step Tree
+
+The step tree is the single most useful part of an Allure report. It is produced by the `@step` decorator applied on every page-object method in both desktop and mobile codebases.
 
 ```typescript
+// e2e/desktop/tests/models/portfolioPage.ts (shape)
 @step("Click Send button")
-async clickSend() { await this.sendButton.click(); }
+async clickSend() {
+  await this.sendButton.click();
+}
 
 @step("Navigate to token $0")
-async navigateToToken(name: string) { await this.page.getByText(name).click(); }
+async navigateToToken(name: string) {
+  await this.page.getByText(name).click();
+}
 ```
 
-In Allure, this produces:
+The execution chain on a single call:
+
+1. The decorator wraps the method body in `test.step("Click Send button", () => body())`.
+2. Playwright (or Detox) records the step start timestamp and label.
+3. The original method body runs.
+4. The runner records the end timestamp and outcome.
+5. `allure-playwright` / `allure-jest` writes the step into the test's result JSON.
+6. `allure generate` renders it as a collapsible row in the report.
+
+The `$0`, `$1` placeholders in the label are interpolated from the call arguments, which is how you get human-readable labels like `Navigate to token "USDT"` instead of the bare method name.
+
+Rendered output:
+
 ```
-Test: ERC20 token with 0 balance is hidden
-  + Step: Open target from main navigation "accounts"    [0.5s] PASSED
-  + Step: Show parent account tokens "Ethereum 1"        [0.3s] PASSED
-  + Step: Verify token visibility "USDT"                 [0.2s] PASSED
-  + Step: Click hide empty token accounts toggle          [0.1s] PASSED
-  + Step: Verify children tokens are not visible "USDT"  [0.2s] PASSED
+[Bitcoin] Add account (12.3s) PASSED
+  Click add account button (0.8s)
+  Select asset by ticker (1.2s)
+  Select network (0.5s)
+  Select first account (3.1s)
+  Click close button (0.3s)
+  Wait for balance to be visible (2.4s)
+  Expect accounts persisted in app.json (4.0s)
 ```
 
-### 12.5 TMS Links (Jira/Xray)
+<div style="border-left:4px solid #e67e22; padding:0.5em 1em; background:#fdf6ef; margin:1em 0;">
+<strong>Cross-reference.</strong> The implementation of the <code>@step</code> decorator (TypeScript 5 stage-3 decorators, <code>Symbol.metadata</code>, closure capture of test context) is covered in depth in Part 3 §3.4 "Playwright Advanced — Fixtures, POM &amp; TypeScript Decorators". This chapter assumes the decorator exists and focuses on what it produces, not how it is built.
+</div>
+
+### 2.5.6 Artifact Capture on Failure
+
+When a test fails, `captureArtifacts()` (shared helper in `e2e/<platform>/tests/utils/`) collects every piece of forensic evidence an engineer might need. The function is called from the shared `afterEach` fixture with access to `testInfo`, the Playwright `page`, the Electron app, and the Speculos controller.
 
 ```typescript
-test("My test", {
-  annotation: { type: "TMS", description: "B2CQA-817" },
-}, async ({ app }) => {
-  await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-  // ...
+export async function captureArtifacts(
+  page,
+  testInfo,
+  electronApp,
+  takeSpeculosScreenshot,
+  webviewCollector,
+) {
+  // 1. Desktop screenshot
+  const screenshot = await page.screenshot();
+  await testInfo.attach("Screenshot", { body: screenshot, contentType: "image/png" });
+
+  // 2. Speculos device screenshots (what the emulated Nano S/X/SP screen shows)
+  if (takeSpeculosScreenshot) {
+    await attachSpeculosScreenshots(testInfo); // single PNG or HTML gallery
+  }
+
+  // 3. Test execution logs (last retry only to keep the report compact)
+  if (isLastRetry(testInfo)) {
+    await page.evaluate(filePath => window.saveLogs(filePath), filePath);
+    await testInfo.attach("Test logs", { path: filePath, contentType: "application/json" });
+    await attachIfExists(testInfo, "Network failures", "network.log", "text/plain");
+  }
+
+  // 4. Webview logs (Swap, Earn, Buy all use embedded webviews)
+  if (webviewCollector) {
+    await testInfo.attach("Webview Console Logs", {
+      body: webviewCollector.getFormattedConsoleLogs(),
+      contentType: "text/plain",
+    });
+    await testInfo.attach("Webview Network Logs", {
+      body: webviewCollector.getFormattedNetworkLogs(),
+      contentType: "text/plain",
+    });
+  }
+
+  // 5. Video recording (last retry only — large files)
+  const video = page.video();
+  if (video) {
+    await electronApp.close(); // flush video buffer
+    const videoData = await readFileAsync(await video.path());
+    await testInfo.attach("Test Video", { body: videoData, contentType: "video/webm" });
+  }
+}
+```
+
+Key design choices:
+
+- **Last retry only** for video and log dumps. Earlier retries that fail will be re-attempted; keeping their videos would multiply artefact size for no added value.
+- `electronApp.close()` before reading the video file — Playwright only flushes the webm container when the browser context is closed.
+- Speculos screenshots come from the emulator's HTTP screenshot endpoint, not from Playwright. See Part 2 §2.4 Speculos for details.
+
+### 2.5.7 Per-Platform Reporter Configuration
+
+The reporter configuration lives in two files, one per platform. These are canonical — if you change the reporter list, change it here.
+
+**Desktop — `apps/ledger-live-desktop/playwright.config.ts`:**
+
+```typescript
+import { defineConfig } from "@playwright/test";
+
+export default defineConfig({
+  testDir: "./tests/specs",
+  reporter: [
+    ["list"],                                          // terminal output
+    ["allure-playwright", {
+      detail: true,
+      outputFolder: "allure-results",
+      links: {
+        // Transforms the plain id "B2CQA-817" into a full Jira URL in the report
+        tms: { urlTemplate: "https://ledgerhq.atlassian.net/browse/%s" },
+        issue: { urlTemplate: "https://ledgerhq.atlassian.net/browse/%s" },
+      },
+    }],
+    ["./tests/utils/customJsonReporter.ts"],           // writes xray-report.json
+    ["html", { open: "never", outputFolder: "playwright-report" }],
+  ],
+  use: {
+    video: "retain-on-failure",
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
+  },
 });
 ```
 
-This creates clickable links in Allure to: `https://ledgerhq.atlassian.net/browse/B2CQA-817`
+**Mobile — `apps/ledger-live-mobile/e2e/jest.config.js` + `detox.config.js`:**
 
-### 12.6 Xray JSON Export
+```javascript
+// jest.config.js
+module.exports = {
+  rootDir: "..",
+  testMatch: ["<rootDir>/e2e/specs/**/*.spec.ts"],
+  reporters: [
+    "default",
+    ["jest-allure2-reporter", {
+      resultsDir: "e2e/allure-results",
+      links: {
+        tms: "https://ledgerhq.atlassian.net/browse/{}",
+        issue: "https://ledgerhq.atlassian.net/browse/{}",
+      },
+    }],
+    ["<rootDir>/e2e/utils/customJsonReporter.js", {}],
+  ],
+  // ...
+};
+```
 
-Test results are exported for Jira/Xray import via a custom reporter:
+Notes on the two packages:
 
-**File**: `e2e/desktop/tests/utils/customJsonReporter.ts`
+- Desktop uses [`allure-playwright`](https://allurereport.org/docs/playwright/) — direct integration with Playwright's reporter interface.
+- Mobile uses [`jest-allure2-reporter`](https://github.com/zaqqaz/jest-allure2-reporter) — the community reporter that supports Jest + Detox and mirrors the Allure 2 metadata API (`tms`, `issue`, `owner`, `severity`, `feature`, `story`, attachments).
+- Both write into their own `allure-results/` folders. CI uploads them as two separate reports.
+- The `urlTemplate` (desktop) and `{}` placeholder (mobile) are what turns a raw id like `B2CQA-2499` into the Jira URL inside the HTML. If this template is missing, the link renders as plain text.
+
+### 2.5.8 TMS Links — Binding a Test to a B2CQA Ticket
+
+Every automated test that implements a manual B2CQA test case must declare the binding. This is what makes Xray sync possible and is what a QA engineer looks for when deciding whether to move the `B2CQA-*` ticket from **Manual Test** to **Automated** (see §2.5.10).
+
+```typescript
+// Desktop — apps/ledger-live-desktop/tests/specs/wallet/send.spec.ts (shape)
+test(
+  "Send 0.0001 BTC to external address",
+  {
+    annotation: { type: "TMS", description: "B2CQA-2499, B2CQA-2644" },
+  },
+  async ({ app }) => {
+    await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+    await allure.severity("critical");
+    await allure.feature("Send");
+    await allure.story("External address");
+    // ...test body
+  },
+);
+```
+
+What `$TmsLink()` actually is: it is the **Xray-side JQL and annotation name** for the same binding. In the Ledger monorepo you never call a function literally named `$TmsLink` from TypeScript — Xray parses the list of TMS ids collected in `allure-results` (and in `xray-report.json`) and treats each id as if the test source file had declared `$TmsLink("B2CQA-2499")`. The result is the same: a bi-directional link between the automation spec and the ticket.
+
+**Valid TMS targets — R4 ground truth:**
+
+| Project | Xray issue type id | What lives there |
+|---------|--------------------|------------------|
+| `B2CQA` | **10756** — Test  | Manual test cases. This is the canonical TMS target. |
+| `B2CQA` | **10759** — Test Plan | Grouping of tests for a release or non-reg campaign. |
+| `B2CQA` | **10760** — Test Execution | One concrete run (e.g. `Nano Gen5 1.1.0-rc5 non-reg`). |
+| `LIVE`  | 10510 — Test      | Legacy product-side Xray tests; do not create new ones here. |
+
+New automations must target `B2CQA-*` Test tickets only. `LIVE-*` is for product bugs and stories; `QAA-*` is for the automation engineering backlog (the ticket that tracks "automate this B2CQA case"). See Part 2 §2.9 Jira & Xray for the full project matrix.
+
+**Bug links** work exactly the same way but use `allure.issue()`:
+
+```typescript
+await addBugLink(["LIVE-12345"]); // known open defect blocking this flow
+```
+
+This surfaces the ticket next to the test in the Allure report and makes it obvious when a test is failing because of a tracked bug, not a new regression.
+
+### 2.5.9 Team Ownership
+
+```typescript
+test.use({ teamOwner: Team.WALLET_XP });
+
+// Implementation — e2e/<platform>/tests/utils/teamOwner.ts
+export async function addTeamOwner(team: Team) {
+  await allure.owner(team.toString());        // owner in the report header
+  await allure.parentSuite(team.toString());  // top-level grouping in Suites view
+  await allure.feature(team.toString());      // Features view grouping
+}
+```
+
+Supported teams (2026-04): `WALLET_XP`, `QAA`, `SWAP`, `EARN`, `MARKET`, `LIVE_DEVICE`, `LIVE_CORE`, `GROWTH`, `REWARDS`. New teams are added to `e2e/<platform>/tests/utils/teams.ts` and should mirror the Jira `team` custom field on `LIVE-*` tickets.
+
+Filtering by team is how each squad finds only its own tests in a shared nightly report. Without this tag, a 1,200-test report is unusable.
+
+### 2.5.10 The Xray Custom Reporter
+
+`customJsonReporter.ts` is the bridge between Playwright/Detox and Jira. It implements the runner's `Reporter` interface and writes a single `xray-report.json` file at the end of the run.
+
+**File**: `apps/ledger-live-desktop/tests/utils/customJsonReporter.ts` (mirror at `apps/ledger-live-mobile/e2e/utils/customJsonReporter.js`).
+
+```typescript
+import { Reporter, TestCase, TestResult } from "@playwright/test/reporter";
+import { writeFileSync } from "node:fs";
+
+type XrayResult = { testKey: string; status: "PASSED" | "FAILED" };
+
+class JsonReporter implements Reporter {
+  private results: XrayResult[] = [];
+
+  onTestEnd(test: TestCase, result: TestResult) {
+    const tms = test.annotations.find(a => a.type === "TMS")?.description ?? "";
+    const tmsIds = tms.split(",").map(s => s.trim()).filter(Boolean);
+
+    for (const id of tmsIds) {
+      this.results.push({
+        testKey: id,
+        status: result.status === "passed" ? "PASSED" : "FAILED",
+      });
+    }
+  }
+
+  onExit() {
+    writeFileSync(
+      "xray-report.json",
+      JSON.stringify({
+        testExecutionKey: process.env.TEST_EXECUTION, // e.g. "B2CQA-5449"
+        tests: this.results,
+      }),
+    );
+  }
+}
+
+export default JsonReporter;
+```
+
+The emitted JSON:
 
 ```json
 {
+  "testExecutionKey": "B2CQA-5449",
   "tests": [
-    { "testKey": "B2CQA-817", "status": "PASSED" },
-    { "testKey": "B2CQA-804", "status": "PASSED" },
+    { "testKey": "B2CQA-817",  "status": "PASSED" },
+    { "testKey": "B2CQA-804",  "status": "PASSED" },
     { "testKey": "B2CQA-2574", "status": "FAILED" }
   ]
 }
 ```
 
-This import syncs automated test results with Xray test executions in Jira, giving the QA team a unified view of test coverage across manual and automated tests.
+CI then calls the Xray REST v2 import endpoint:
 
-### 12.7 Reading an Allure Report Effectively
+```
+POST https://xray.cloud.getxray.app/api/v2/import/execution
+Content-Type: application/json
+Authorization: Bearer $XRAY_TOKEN
 
-When you open an Allure report, focus on these sections:
+<xray-report.json body>
+```
 
-1. **Overview** — Pass/fail ratio, test count, duration
-2. **Suites** — Tests grouped by describe block (your spec files)
-3. **Graphs** — Visual breakdown of results by status, severity, duration
-4. **Timeline** — When tests ran, useful for detecting parallelism issues
-5. **Categories** — Failure categories (product defect vs test defect)
+Effects on Jira:
 
-For a **failed test**, drill into:
-1. The **step trace** — which step failed and its duration
-2. The **screenshot** — what the UI looked like at failure time
-3. The **video** — the full test execution recording
-4. The **trace** — Playwright trace file for detailed debugging
-5. The **TMS link** — jump to the Jira test case for expected behavior
+- Every `testKey` listed updates its Xray execution status on the B2CQA Test ticket.
+- If `testExecutionKey` is provided, the statuses are attached to that existing Test Execution; otherwise Xray creates a new Execution and links each Test to it.
+- The B2CQA Test ticket's own workflow status (`To Do` / `In Test Review` / `Manual Test` / `Automated` / `Obsolete`) is **not** changed by an execution — only the execution status changes.
 
-### 12.8 Allure Annotations in Practice
+**The one manual step that remains.** When the automation spec lands on `develop` and the CI run is green, the QA Automation owner manually moves the B2CQA Test ticket from **Manual Test** to **Automated** (R4 §2.2). That transition is what tells the QA team "this test case is now covered by the nightly run and no longer needs manual execution". Forgetting this step is the most common source of manual/automated coverage drift.
 
-Beyond `@step` and TMS links, you can add more metadata to your tests:
+### 2.5.11 Failures That Are Product Bugs — Filing on LIVE
+
+When a nightly failure reveals a real product defect, the on-call QA Automation engineer files a **LIVE bug** (not a B2CQA bug — B2CQA bugs are for test-infrastructure defects only):
+
+1. Issue type: **Bug** on the **LIVE** project.
+2. Add label `qaa` — this is the label LL devs filter on to see "something the automation caught".
+3. If the build is release-critical: also add `deploymentPROD` and `blocker` (see R4 §5). The release manager uses these two labels to freeze a hotfix branch.
+4. Link the failing B2CQA Test ticket with a **"blocks"** or **"tests"** link type, and paste the Allure report URL in the description.
+5. In the next green run, once the fix is merged, add `addBugLink(["LIVE-XXXX"])` inside the test body so the Allure report surfaces the bug next to the test until the LIVE ticket is **Released**.
+
+<div style="border-left:4px solid #c0392b; padding:0.5em 1em; background:#fdf2f1; margin:1em 0;">
+<strong>Do not create "LLM", "LLD", or "PTX" tickets.</strong> These are <em>labels</em> on LIVE tickets, not projects. <code>LLM</code> = mobile-only, <code>LLD</code> = desktop-only, <code>PTX</code> = Protect/Recover (filed under LIVE with the <code>Recover</code> / <code>Apex</code> labels). A Jira search for <code>project = LLM</code> will return zero rows.
+</div>
+
+### 2.5.12 Reading a Report Effectively
+
+When you open an Allure report, use the five top-level views in this order:
+
+| View | What it shows | When to use it |
+|------|---------------|----------------|
+| **Overview** | Pass/fail summary, duration, severity counts | 10-second health check |
+| **Suites** | Tests grouped by describe block | Find a specific test by name |
+| **Graphs** | Status / severity / duration charts | Spot a systemic regression |
+| **Timeline** | When each test ran in parallel workers | Diagnose slow / serialized tests |
+| **Categories** | Failures bucketed by error type | Tell product defects from test defects |
+
+For a **failed test**, drill in this order. Each step narrows the search space faster than the next; go deeper only when the current layer is inconclusive.
+
+1. **Step trace** — which `@step` failed, and how long did it take? Length anomalies often point to timing / auto-wait issues.
+2. **Desktop screenshot** — what did the app UI show at the moment of failure?
+3. **Speculos screenshot** — what did the emulated device screen show? Critical when a signing / approval step hangs.
+4. **Video** — full execution, only present on last retry. Use for complex multi-click flows where the screenshot is ambiguous.
+5. **Playwright trace** — opens in `trace.playwright.dev` with DOM snapshots per action. Heavyweight; use when screenshots and video disagree.
+6. **Network failures** attachment — any 4xx/5xx the app made during the test? Common cause of flaky Swap/Earn failures.
+7. **Webview Console Logs** — JS errors inside the embedded webview (Swap/Earn/Buy all run in webviews).
+8. **TMS link** — jump to the B2CQA ticket to re-read the expected behaviour the test is encoding.
+
+### 2.5.13 Additional Allure Annotations
+
+Everything in the Allure 2 metadata API is available. The annotations most used in Ledger Live:
 
 ```typescript
-import { allure } from "allure-playwright";
+import { allure } from "allure-playwright"; // desktop
+// or: import { allure } from "jest-allure2-reporter/api"; // mobile
 
-test("My test", async ({ app }) => {
-  await allure.severity("critical");
-  await allure.feature("Send");
-  await allure.story("Send Bitcoin to external address");
+test("ERC20 token with 0 balance is hidden", async ({ app }) => {
+  await allure.severity("critical");            // blocker / critical / normal / minor / trivial
+  await allure.feature("Accounts");              // groups in Features view
+  await allure.story("Hide empty token accounts");
   await allure.owner("qaa-team");
+  await allure.tag("erc20");
+  await allure.tag("regression");
+  await allure.parameter("coin", "USDT");        // shown in test params table
+  await allure.description("Verifies the 'Hide empty tokens' toggle...");
+  await allure.link("Spec", "https://ledger.atlassian.net/wiki/...");
   // ...
 });
 ```
 
-These annotations feed into Allure's filtering and grouping capabilities, making it easier to find and analyze specific test results.
+Severity guidance:
+
+- `blocker` — test covers a path whose break would block a release. Pair with `deploymentPROD` if the underlying feature is release-gated.
+- `critical` — main user flow (send, receive, swap, add account).
+- `normal` — secondary flow or less-used asset.
+- `minor` — UI polish, localisation, edge case.
+- `trivial` — smoke / meta check.
+
+### 2.5.14 Environment Metadata
+
+Allure surfaces a "Environment" panel on the Overview page — useful for knowing which build and which backend a run was executed against. It is populated from a flat file written by CI before `allure generate`.
+
+**File**: `allure-results/environment.properties` (plain Java-properties format, one `key=value` per line).
+
+```properties
+ledger-live-desktop.version=2.103.0-nightly.20260422
+ledger-live-mobile.version=4.1.0-nightly.20260422
+nightly.commit=7f3a9b2
+speculos.firmware=nano-sp-1.1.1
+node.env=staging
+test.execution=B2CQA-5449
+runner=github-actions
+runner.os=ubuntu-22.04
+```
+
+The CI step that writes this file in the Desktop E2E workflow:
+
+```yaml
+- name: Write Allure environment
+  run: |
+    mkdir -p apps/ledger-live-desktop/allure-results
+    cat > apps/ledger-live-desktop/allure-results/environment.properties <<EOF
+    ledger-live-desktop.version=${{ steps.build.outputs.version }}
+    nightly.commit=${{ github.sha }}
+    node.env=${{ inputs.environment }}
+    test.execution=${{ inputs.test_execution_key }}
+    runner=github-actions
+    runner.os=${{ runner.os }}
+    EOF
+```
+
+Locally you can drop the same file into `allure-results/` by hand if you want the report to show which branch / commit you were on.
+
+### 2.5.15 History, Trends, and Categories
+
+**History.** Allure persists a history folder across runs. To enable trends locally:
+
+```bash
+# First run
+pnpm e2e:desktop allure:generate          # creates allure-report/
+cp -r allure-report/history allure-results/history   # seed for next run
+
+# Second run
+pnpm e2e:desktop allure:generate          # trend graph now populated
+```
+
+CI does the same thing using the GitHub Actions `actions/cache` action, keyed on the branch name.
+
+**Categories.** A `categories.json` file at the root of `allure-results/` tells Allure how to bucket failures on the Categories view. The default at Ledger Live is:
+
+```json
+[
+  {
+    "name": "Product defects",
+    "matchedStatuses": ["failed"],
+    "messageRegex": ".*Expect(ed)?.*|.*AssertionError.*"
+  },
+  {
+    "name": "Infrastructure / flaky",
+    "matchedStatuses": ["broken"],
+    "messageRegex": ".*Timeout.*|.*ECONNREFUSED.*|.*ETIMEDOUT.*"
+  },
+  {
+    "name": "Speculos crashes",
+    "matchedStatuses": ["broken", "failed"],
+    "messageRegex": ".*speculos.*|.*emulator.*"
+  },
+  {
+    "name": "Webview / third-party",
+    "matchedStatuses": ["failed"],
+    "messageRegex": ".*webview.*|.*Swap.*provider.*"
+  }
+]
+```
+
+The difference between **failed** and **broken** matters:
+
+- **failed** — an assertion returned false. A test wrote `expect(X).toBe(Y)` and `X !== Y`. Usually a product defect.
+- **broken** — the test threw before it could assert (timeout, network error, TypeError). Usually an infrastructure problem or a test bug.
+
+Use the Categories view to answer "did today's red run fail because of the product or because of the pipeline?" in five seconds instead of opening twenty tests.
+
+### 2.5.16 A Worked Local Run — Desktop
+
+The fastest way to internalise the pipeline is to run it once end-to-end on your own machine.
+
+```bash
+# 1. Make sure the desktop app is built (cached after first run)
+pnpm desktop build
+
+# 2. Run a single spec — no retries, visible output
+pnpm e2e:desktop test tests/specs/wallet/send.spec.ts --headed
+
+# 3. Inspect what the runner wrote
+ls apps/ledger-live-desktop/allure-results
+# -> 3f8e...-result.json   <- one per test
+# -> 3f8e...-attachment.png
+# -> xray-report.json        <- custom reporter output
+
+cat apps/ledger-live-desktop/xray-report.json
+# { "testExecutionKey": undefined,
+#   "tests": [ { "testKey": "B2CQA-2499", "status": "PASSED" } ] }
+
+# 4. Render the HTML and open it
+pnpm e2e:desktop allure:generate
+pnpm e2e:desktop allure:open
+# Browser opens allure-report/index.html
+```
+
+In the browser, click the failing/passing test, expand the step tree, then click Attachments. You should see the screenshot, the video (if last retry), the Speculos gallery, and the TMS link in the sidebar.
+
+To force a failure and see the artefact pipeline in action:
+
+```bash
+# Temporarily break an assertion in the spec, then re-run
+pnpm e2e:desktop test tests/specs/wallet/send.spec.ts --retries=0
+```
+
+Observe in the report:
+
+- `status=failed` (not broken) because the assertion fired.
+- Screenshot, Speculos screenshot, and test logs attached.
+- The step that failed is highlighted red; its parent `@step` contains the stack trace.
+
+This five-minute exercise is mandatory onboarding for anyone touching E2E tests.
+
+### 2.5.17 Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Report opens but has no steps | `@step` decorator not applied to page-object methods, or TypeScript decorators disabled | Check `tsconfig.json` has `experimentalDecorators: true` or stage-3 config; confirm the class is the one imported by the test. |
+| TMS link renders as plain text | `links.tms.urlTemplate` missing from reporter config | Add `urlTemplate` block in `playwright.config.ts` (desktop) or `links.tms` string in Jest reporter config (mobile). |
+| Video attachment is missing | `electronApp.close()` not called before reading the video path | `captureArtifacts()` must close the Electron app to flush the webm file before attaching. |
+| Xray import returns 400 | `testKey` points to a `LIVE-*` or `QAA-*` id instead of `B2CQA-*`, or Test id does not exist | Verify every id in `xray-report.json` is a B2CQA Test (issue type 10756). |
+| Two runs overwrite each other's trend | CI forgot to copy the previous `history/` folder into `allure-results/` before generate | Job must `cp -r previous-report/history allure-results/history` before `allure generate`. |
+| Allure HTML is empty in CI artefact | CI uploaded `allure-results/` (raw JSON) instead of `allure-report/` (rendered HTML) | Run `allure generate` before the upload step. |
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><a href="https://allurereport.org/docs/">Allure Report documentation</a> — by Qameta Software</li>
-<li><a href="https://allurereport.org/docs/playwright/">Allure Playwright integration</a></li>
-<li><a href="https://docs.getxray.app/display/XRAY/About+Xray">Xray documentation</a> — the Jira test management plugin</li>
-<li><a href="https://docs.getxray.app/display/XRAY/Import+Execution+Results+-+REST+v2">Xray REST API for importing results</a></li>
+<li><a href="https://allurereport.org/docs/">Allure Report — official documentation</a> (Qameta Software)</li>
+<li><a href="https://docs.qameta.io/allure/">Allure 2 — legacy reference</a> (older API, still maps 1:1 to the current reporter output)</li>
+<li><a href="https://allurereport.org/docs/playwright/">Allure Playwright integration guide</a></li>
+<li><a href="https://github.com/zaqqaz/jest-allure2-reporter">jest-allure2-reporter on GitHub</a> — the mobile/Detox reporter package</li>
+<li><a href="https://marketplace.atlassian.com/apps/1211769/xray-test-management-for-jira">Xray on the Atlassian Marketplace</a></li>
+<li><a href="https://docs.getxray.app/display/XRAYCLOUD/Import+Execution+Results+-+REST+v2">Xray — Import Execution Results REST v2</a></li>
+<li><a href="https://playwright.dev/docs/test-reporters">Playwright — Custom Reporters API</a></li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> The Allure report is your first stop when a test fails. The step trace tells you <em>what</em> went wrong, the screenshot tells you <em>what the user would see</em>, and the TMS link tells you <em>what should have happened</em>. Learn to read reports fluently — it will save you hours of debugging.
+<strong>Key takeaway.</strong> Allure turns <code>@step</code> decorators and <code>testInfo.attach()</code> calls into rich HTML reports; the custom Xray reporter turns the same run's annotations into a JSON file that updates every <code>B2CQA-*</code> Test ticket in Jira. The report is your forensic toolkit when a test fails — step trace, screenshot, device screenshot, video, logs, TMS link, in that order. The Xray sync is what ties the automation back to the QA team's single source of truth. Fluency with both is the difference between debugging in minutes and debugging in hours.
 </div>
 
-### 12.9 Quiz
-
-<!-- ── Chapter 12 Quiz ── -->
+### 2.5.18 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<h3>Chapter 2.5 Quiz</h3>
+<p class="quiz-subtitle">9 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
 <p><strong>Q1.</strong> What does a TMS annotation like <code>B2CQA-817</code> refer to?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) A Git branch name</button>
-<button class="quiz-choice" data-value="B">B) A Jira/Xray test case ID</button>
+<button class="quiz-choice" data-value="B">B) A Jira/Xray Test case ticket on the B2CQA project</button>
 <button class="quiz-choice" data-value="C">C) A Firebase feature flag</button>
 <button class="quiz-choice" data-value="D">D) A Speculos device identifier</button>
 </div>
-<p class="quiz-explanation">TMS = Test Management System. <code>B2CQA-XXX</code> is a Jira/Xray test case ID that links the automated test to its manual test case definition. Allure creates a clickable link to the Jira issue.</p>
+<p class="quiz-explanation">TMS = Test Management System. <code>B2CQA-XXX</code> is a Jira/Xray Test (issue type 10756) on the <code>B2CQA</code> project — Ledger's QA catalogue. Allure renders it as a clickable link via the <code>urlTemplate</code> in <code>playwright.config.ts</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> How do you generate and view an Allure report for desktop E2E tests?</p>
+<p><strong>Q2.</strong> How do you generate and open an Allure report for desktop E2E tests?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>npx allure serve</code></button>
+<button class="quiz-choice" data-value="A">A) <code>npx allure serve</code> from the monorepo root</button>
 <button class="quiz-choice" data-value="B">B) <code>pnpm desktop allure</code></button>
 <button class="quiz-choice" data-value="C">C) <code>pnpm e2e:desktop allure</code></button>
 <button class="quiz-choice" data-value="D">D) <code>pnpm test:allure</code></button>
 </div>
-<p class="quiz-explanation"><code>pnpm e2e:desktop allure</code> is the combined command that generates the report from <code>./allure-results</code> and opens it in a browser. Note the <code>e2e:desktop</code> prefix (not <code>desktop</code>).</p>
+<p class="quiz-explanation"><code>pnpm e2e:desktop allure</code> is the combined script that runs <code>allure generate</code> on <code>allure-results/</code> then opens the rendered report. Mobile uses <code>pnpm allure</code> from <code>apps/ledger-live-mobile/e2e</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> What creates the step-by-step trace visible in the Allure report?</p>
+<p><strong>Q3.</strong> What creates the collapsible step tree visible in every Allure test?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The <code>@step</code> decorator on page object methods</button>
+<button class="quiz-choice" data-value="A">A) The <code>@step</code> decorator applied to page-object methods</button>
 <button class="quiz-choice" data-value="B">B) Playwright's built-in trace recorder</button>
-<button class="quiz-choice" data-value="C">C) Jest's test lifecycle hooks</button>
-<button class="quiz-choice" data-value="D">D) Console.log statements in the test code</button>
+<button class="quiz-choice" data-value="C">C) Jest's <code>beforeEach</code>/<code>afterEach</code> hooks</button>
+<button class="quiz-choice" data-value="D">D) <code>console.log</code> statements in the test body</button>
 </div>
-<p class="quiz-explanation">The <code>@step</code> decorator (from <code>e2e/desktop/tests/misc/reporters/step.ts</code>) wraps each page object method and reports its execution to Allure, creating the collapsible step tree with timing information.</p>
+<p class="quiz-explanation">The <code>@step</code> decorator wraps each method call in <code>test.step()</code>, which the Allure reporter writes into the result JSON and the HTML renders as a collapsible row with timing.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> A test fails in CI. What is the most efficient order to investigate using the Allure report?</p>
+<p><strong>Q4.</strong> A nightly test fails. What is the most efficient order to investigate in Allure?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) Video → Screenshot → Step trace → TMS link</button>
 <button class="quiz-choice" data-value="B">B) TMS link → Video → Screenshot → Step trace</button>
-<button class="quiz-choice" data-value="C">C) Re-run the test → Read the code → Check logs</button>
-<button class="quiz-choice" data-value="D">D) Step trace (which step failed) → Screenshot (UI state at failure) → Video (full execution) → TMS link (expected behavior)</button>
+<button class="quiz-choice" data-value="C">C) Re-run locally, then read the code, then check logs</button>
+<button class="quiz-choice" data-value="D">D) Step trace → Desktop screenshot → Speculos screenshot → Video → Network/Webview logs → TMS link</button>
 </div>
-<p class="quiz-explanation">Start with the step trace to identify which step failed and how long it took. Then check the screenshot to see the UI state. The video shows the full execution if context is needed. The TMS link shows what the test should have done.</p>
+<p class="quiz-explanation">Start narrow and widen: the step trace tells you <em>where</em> the failure happened, screenshots show <em>what</em> the user/device saw, video reconstructs the flow, logs surface API/JS errors, and the TMS link shows the <em>expected</em> behaviour.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What does the Xray JSON export enable?</p>
+<p><strong>Q5.</strong> What does the custom JSON reporter (<code>customJsonReporter.ts</code>) produce, and what consumes it?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It publishes test results to the Allure dashboard</button>
-<button class="quiz-choice" data-value="B">B) It syncs automated test results with Xray test executions in Jira, giving a unified view of manual and automated coverage</button>
-<button class="quiz-choice" data-value="C">C) It exports test code to a JSON format for backup</button>
-<button class="quiz-choice" data-value="D">D) It sends Slack notifications when tests fail</button>
+<button class="quiz-choice" data-value="A">A) It generates the Allure HTML report from <code>allure-results</code></button>
+<button class="quiz-choice" data-value="B">B) It writes <code>xray-report.json</code> mapping each TMS id to PASSED/FAILED, which CI posts to Xray's REST v2 import endpoint</button>
+<button class="quiz-choice" data-value="C">C) It posts Slack notifications on failures</button>
+<button class="quiz-choice" data-value="D">D) It uploads screenshots to S3</button>
 </div>
-<p class="quiz-explanation">The custom JSON reporter (<code>customJsonReporter.ts</code>) exports results in Xray format, which are imported into Jira to sync automated test statuses with their corresponding manual test case definitions.</p>
+<p class="quiz-explanation">The reporter implements Playwright's <code>Reporter</code> interface. <code>onTestEnd</code> collects TMS ids + status, <code>onExit</code> writes <code>xray-report.json</code>. CI POSTs it to <code>xray.cloud.getxray.app/api/v2/import/execution</code>, which updates every listed <code>B2CQA-*</code> Test's execution status.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> Why are video recordings only attached on the last retry?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Playwright cannot record video during retries</button>
+<button class="quiz-choice" data-value="B">B) Videos can only be rendered in CI</button>
+<button class="quiz-choice" data-value="C">C) Video files are large; earlier retries will be re-attempted anyway, so their videos add weight without value</button>
+<button class="quiz-choice" data-value="D">D) The first retry is always too fast for video</button>
+</div>
+<p class="quiz-explanation"><code>captureArtifacts()</code> gates video (and large log dumps) on <code>isLastRetry(testInfo)</code>. Only the final attempt's outcome is reported, so only its video is useful.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q7.</strong> Which Jira/Xray combination is the correct canonical TMS target for a new automated test?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A <code>LIVE-*</code> ticket with issue type 10510 (legacy Xray Test)</button>
+<button class="quiz-choice" data-value="B">B) A <code>B2CQA-*</code> Test ticket (issue type 10756), optionally attached to a B2CQA Test Plan (10759)</button>
+<button class="quiz-choice" data-value="C">C) A <code>QAA-*</code> ticket in the automation backlog</button>
+<button class="quiz-choice" data-value="D">D) An <code>LLM-*</code> or <code>LLD-*</code> ticket depending on the platform</button>
+</div>
+<p class="quiz-explanation">The QA catalogue lives on <code>B2CQA</code>. Test = 10756, Test Plan = 10759, Test Execution = 10760. <code>LIVE-*</code> is for product work, <code>QAA-*</code> tracks the automation task, and <code>LLM</code>/<code>LLD</code> are <em>labels</em> on LIVE, not projects.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q8.</strong> A new automation lands, CI is green. What still needs to happen on the corresponding B2CQA ticket, and who does it?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Nothing — Xray moves the ticket automatically</button>
+<button class="quiz-choice" data-value="B">B) The ticket is auto-closed by the CI bot</button>
+<button class="quiz-choice" data-value="C">C) The release manager moves it to <strong>Released</strong></button>
+<button class="quiz-choice" data-value="D">D) The QA Automation owner manually transitions the B2CQA Test from <strong>Manual Test</strong> to <strong>Automated</strong></button>
+</div>
+<p class="quiz-explanation">Xray execution status changes are automatic, but the B2CQA Test's <em>workflow</em> status is not. The QA Automation engineer manually moves it from <strong>Manual Test</strong> to <strong>Automated</strong> so the QA team knows this case is now covered by the nightly run.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q9.</strong> A nightly E2E run reveals a real product regression. Where and how should the bug be filed?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A <strong>LIVE Bug</strong> with label <code>qaa</code> (plus <code>deploymentPROD</code> + <code>blocker</code> if release-critical), linked to the failing B2CQA Test</button>
+<button class="quiz-choice" data-value="B">B) A B2CQA Bug in the QA catalogue</button>
+<button class="quiz-choice" data-value="C">C) A QAA ticket for the automation engineer to fix the test</button>
+<button class="quiz-choice" data-value="D">D) A new <code>LLM-*</code> or <code>LLD-*</code> ticket depending on platform</button>
+</div>
+<p class="quiz-explanation">Product defects live on <code>LIVE</code>. The <code>qaa</code> label is how LL devs filter for "caught by E2E automation". B2CQA bugs are reserved for test-infrastructure issues. <code>LLM</code> / <code>LLD</code> are labels, not projects.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -1740,11 +2231,13 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 
 ---
 
+---
+
 ## Part 2 Final Assessment
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 2 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions across all chapters · 80% to pass</p>
+<p class="quiz-subtitle">10 questions across Git, pnpm/Turbo, Speculos, Firebase, Allure · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
@@ -1755,7 +2248,7 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 <button class="quiz-choice" data-value="C">C) <code>chore/</code></button>
 <button class="quiz-choice" data-value="D">D) <code>support/</code></button>
 </div>
-<p class="quiz-explanation"><code>feat/</code> — New tests are new features. Use <code>test(e2e): ...</code> for the commit type within the Conventional Commits format.</p>
+<p class="quiz-explanation"><code>feat/</code> — new tests are new features. Use <code>test(e2e): ...</code> for the commit type within the Conventional Commits format.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
@@ -1770,25 +2263,25 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q3.</strong> In Playwright's locator priority, which should you use first?</p>
+<p><strong>Q3.</strong> You need to run a test against a Stax device. Which environment variable tells Speculos which device model to emulate?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) CSS selector</button>
-<button class="quiz-choice" data-value="B">B) <code>getByText</code></button>
-<button class="quiz-choice" data-value="C">C) <code>getByTestId</code></button>
-<button class="quiz-choice" data-value="D">D) XPath</button>
+<button class="quiz-choice" data-value="A">A) <code>DEVICE_TYPE</code></button>
+<button class="quiz-choice" data-value="B">B) <code>LEDGER_DEVICE</code></button>
+<button class="quiz-choice" data-value="C">C) <code>SPECULOS_MODEL</code> (or <code>--model</code> flag)</button>
+<button class="quiz-choice" data-value="D">D) <code>EMULATOR_TARGET</code></button>
 </div>
-<p class="quiz-explanation"><code>getByTestId</code> is the most stable locator — it won't break on text changes (translations) or CSS refactors. Test IDs are added specifically for test automation.</p>
+<p class="quiz-explanation">Speculos selects its device model via the <code>SPECULOS_MODEL</code> env var or the <code>--model</code> CLI flag. Valid values include <code>nanos</code>, <code>nanosp</code>, <code>nanox</code>, <code>stax</code>, <code>flex</code>.</p>
 </div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q4.</strong> How does the mobile E2E suite communicate with the React Native app?</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q4.</strong> What does the <code>@Step(...)</code> decorator do in an Allure-instrumented Page Object method?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Direct DOM access</button>
-<button class="quiz-choice" data-value="B">B) WebSocket bridge</button>
-<button class="quiz-choice" data-value="C">C) HTTP REST API</button>
-<button class="quiz-choice" data-value="D">D) Shared memory</button>
+<button class="quiz-choice" data-value="A">A) Wraps the method so Allure records its entry, exit, and screenshots as a nested step in the report</button>
+<button class="quiz-choice" data-value="B">B) Forces the method to run synchronously</button>
+<button class="quiz-choice" data-value="C">C) Registers the method as a Jest-only hook</button>
+<button class="quiz-choice" data-value="D">D) Disables retries for the wrapped call</button>
 </div>
-<p class="quiz-explanation">The WebSocket bridge (<code>e2e/mobile/bridge/server.ts</code>) sends commands like <code>importAccounts</code>, <code>overrideFeatureFlag</code>, and <code>navigate</code> from Jest/Detox to the running React Native app.</p>
+<p class="quiz-explanation"><code>@Step</code> is an Allure reporter decorator: it intercepts the call, emits a named step event (with arg interpolation via <code>$0</code>, <code>$1</code>, etc.), and nests sub-steps inside it. Failures are attached to the most-specific step.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
@@ -1799,29 +2292,29 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 <button class="quiz-choice" data-value="C">C) <code>GET /screen</code></button>
 <button class="quiz-choice" data-value="D">D) <code>POST /capture</code></button>
 </div>
-<p class="quiz-explanation"><code>GET /screenshot</code> returns a PNG image of the device screen. It's a GET because you are retrieving data, not modifying state.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> What are the four Firebase environments used by Ledger Live?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Dev, Staging, Production, Canary</button>
-<button class="quiz-choice" data-value="B">B) Ledger Wallet, Swap, Earn, Buy Sell</button>
-<button class="quiz-choice" data-value="C">C) Desktop, Mobile, CLI, Web</button>
-<button class="quiz-choice" data-value="D">D) Alpha, Beta, RC, Stable</button>
-</div>
-<p class="quiz-explanation">Each environment manages feature flags for a different product area: Ledger Wallet (main features), Swap (exchange), Earn (staking), and Buy Sell (fiat on/off ramp).</p>
+<p class="quiz-explanation"><code>GET /screenshot</code> returns a PNG image of the device screen. GET because you are retrieving data, not modifying state.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q7.</strong> During the release process, what is the purpose of the <code>nightly</code> branch?</p>
+<p><strong>Q6.</strong> Ledger Live ships four Firebase environments. Which list names them correctly?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is a staging branch that merges into <code>main</code> weekly</button>
-<button class="quiz-choice" data-value="B">B) It replaces <code>develop</code> during release freezes</button>
-<button class="quiz-choice" data-value="C">C) It is used for hotfix deployments</button>
-<button class="quiz-choice" data-value="D">D) It is a standalone long-lived branch that receives <code>develop</code> merges nightly and publishes <code>@nightly</code> tagged packages — it never merges anywhere</button>
+<button class="quiz-choice" data-value="A">A) Alpha, Beta, RC, Stable</button>
+<button class="quiz-choice" data-value="B">B) Dev, Staging, Production, Canary</button>
+<button class="quiz-choice" data-value="C">C) Ledger Wallet, Swap, Earn, Buy Sell</button>
+<button class="quiz-choice" data-value="D">D) <code>ledger-live-development</code>, <code>ledger-live-testing</code>, <code>ledger-live-staging</code>, <code>ledger-live-production</code></button>
 </div>
-<p class="quiz-explanation">The <code>nightly</code> branch is standalone and permanent. Every night, <code>develop</code> is merged into it, and the standard pre-release cycle publishes libraries under the <code>@nightly</code> tag and builds desktop/mobile apps through nightly channels.</p>
+<p class="quiz-explanation">The four Firebase Remote Config projects are <code>development</code> (dev sandbox), <code>testing</code> (QA testing), <code>staging</code> (prerelease QA), and <code>production</code> (prod). Swap, Earn, etc. are Live Apps with per-env manifests — not Firebase environments.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q7.</strong> Every PR that changes published behavior ships with a file in <code>.changeset/</code>. What does that file declare?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The list of reviewers required by CODEOWNERS</button>
+<button class="quiz-choice" data-value="B">B) The CI workflow to run</button>
+<button class="quiz-choice" data-value="C">C) Which packages are affected and whether this is a <code>patch</code>, <code>minor</code>, or <code>major</code> bump</button>
+<button class="quiz-choice" data-value="D">D) The Jira ticket to close when the PR merges</button>
+</div>
+<p class="quiz-explanation">Changesets use per-PR markdown files listing affected packages + semver bump type. At release, <code>changeset version</code> aggregates them, bumps versions, and generates CHANGELOGs. No semantic-release involved.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
@@ -1835,15 +2328,15 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 <p class="quiz-explanation">The bot doesn't maintain local state. It derives account state from the blockchain itself by scanning accounts for its seed. Each run resumes from whatever the current blockchain state is.</p>
 </div>
 
-<div class="quiz-question" data-correct="A">
-<p><strong>Q9.</strong> What is the most important file in the desktop E2E suite and why?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q9.</strong> What is the role of <code>$TmsLink("B2CQA-604")</code> in a spec title?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>e2e/desktop/tests/fixtures/common.ts</code> — it defines the fixture system that configures and injects everything a test needs</button>
-<button class="quiz-choice" data-value="B">B) <code>e2e/desktop/playwright.config.ts</code> — it defines all test timeouts</button>
-<button class="quiz-choice" data-value="C">C) <code>e2e/desktop/tests/specs/index.ts</code> — it is the test entry point</button>
-<button class="quiz-choice" data-value="D">D) <code>e2e/desktop/package.json</code> — it lists all dependencies</button>
+<button class="quiz-choice" data-value="A">A) It creates a new Xray test case at run time</button>
+<button class="quiz-choice" data-value="B">B) It binds the automated test to the existing B2CQA test case so Xray can transition it from "Manual" to "Automated" and aggregate runs</button>
+<button class="quiz-choice" data-value="C">C) It tags the test as skipped on CI</button>
+<button class="quiz-choice" data-value="D">D) It marks the test as a flake-quarantine candidate</button>
 </div>
-<p class="quiz-explanation"><code>common.ts</code> defines the fixture system that orchestrates the entire test lifecycle: launching Electron, setting up userdata, starting Speculos, injecting page objects, overriding feature flags, and tearing down. Every test depends on it.</p>
+<p class="quiz-explanation"><code>$TmsLink</code> is a Jest / Playwright reporter pattern: the Allure reporter parses the placeholder and emits a Jira/Xray link in the report. A downstream sync job transitions the B2CQA ticket and attaches the run.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
@@ -1854,7 +2347,7 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 <button class="quiz-choice" data-value="C">C) The test ID was changed in a recent commit</button>
 <button class="quiz-choice" data-value="D">D) The test relies on a Firebase flag default instead of explicitly overriding it, and the default has been changed intermittently</button>
 </div>
-<p class="quiz-explanation">This is the classic "implicit flag dependency" anti-pattern. The test doesn't explicitly set the feature flag, so it depends on the Firebase default. If someone changes the default (even temporarily), the test fails. The fix: always explicitly override all flags your test depends on.</p>
+<p class="quiz-explanation">This is the classic "implicit flag dependency" anti-pattern. The test doesn't explicitly set the feature flag, so it depends on the Firebase default. If someone changes the default (even temporarily), the test fails. The fix: always explicitly override every flag your test depends on.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -1862,3 +2355,8 @@ These annotations feed into Allure's filtering and grouping capabilities, making
 
 ---
 
+<div class="chapter-outro">
+
+Part 2 complete. You now share the same vocabulary — Git, pnpm/Turbo, Speculos, Firebase, Allure — as every other engineer on the team. Part 3 takes you deep into the Desktop E2E stack: Playwright from zero, Electron, the fixture hub, the codebase catalog, and two real ticket walkthroughs.
+
+</div>

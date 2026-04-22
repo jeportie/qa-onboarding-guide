@@ -1,20 +1,10 @@
-
-
-# PART 3 -- E2E TESTING IN PRACTICE
-
-<div class="chapter-intro">
-Parts 1 and 2 gave you the knowledge — what you are testing, how the repo is organized, and how each tool works. Now you put it all together. This part takes you through the actual architecture of the Desktop and Mobile E2E suites, and then guides you through writing your first test on each platform. By the end, you will have written and run a real E2E test against a Speculos-emulated device.
-</div>
-
----
-
 ## Desktop E2E -- Architecture Deep Dive
 
 <div class="chapter-intro">
 Before writing a test, you need to understand the architecture that supports it. The desktop E2E suite is a carefully layered system: spec files call page objects, page objects use the Playwright Page, and the fixture system orchestrates the entire lifecycle from Speculos launch to screenshot capture on failure. This chapter maps the directory structure, the class hierarchy, the Application hub, and the fixture lifecycle in detail.
 </div>
 
-### 13.1 Directory Structure
+### 3.1.1 Directory Structure
 
 ```
 e2e/desktop/
@@ -77,7 +67,7 @@ e2e/desktop/
 +-- allure-results/                   # Generated test results (gitignored)
 ```
 
-### 13.2 The Class Hierarchy
+### 3.1.2 The Class Hierarchy
 
 ```
 PageHolder (abstract)
@@ -107,7 +97,7 @@ PageHolder (abstract)
 - **AppPage**: Abstract page class that all concrete page objects extend.
 - **Concrete pages**: Each encapsulates one screen's locators and actions, decorated with `@step` for Allure.
 
-### 13.3 The Application Class (Hub)
+### 3.1.3 The Application Class (Hub)
 
 ```typescript
 // File: e2e/desktop/tests/page/index.ts
@@ -135,7 +125,7 @@ test("example", async ({ app }) => {
 });
 ```
 
-### 13.4 The Fixture Lifecycle
+### 3.1.4 The Fixture Lifecycle
 
 The fixture system runs this lifecycle automatically for each test:
 
@@ -171,7 +161,7 @@ The fixture system runs this lifecycle automatically for each test:
 
 **Why random ports for Speculos?** Each test worker gets its own Speculos container on a unique port. This enables full parallel execution — multiple tests running simultaneously without port conflicts.
 
-### 13.5 Sharding in CI (from the wiki)
+### 3.1.5 Sharding in CI (from the wiki)
 
 For large test suites, CI uses **Playwright sharding** to split tests across multiple runners:
 
@@ -198,9 +188,9 @@ Each shard runs independently, with its own Speculos containers, and produces it
 <strong>Key takeaway:</strong> The architecture is layered by design — specs → page objects → fixtures → utilities. Each layer has a single responsibility. When you write a test, you only interact with the <code>app</code> object. When you maintain the suite, you modify one layer without breaking the others. This separation is what makes a 26-file test suite manageable.
 </div>
 
-### 13.6 Quiz
+### 3.1.6 Quiz
 
-<!-- ── Chapter 13 Quiz ── -->
+<!-- ── Chapter 3.1 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz</h3>
@@ -267,13 +257,14 @@ Each shard runs independently, with its own Speculos containers, and produces it
 
 ---
 
+
 ## Writing Your First Desktop E2E Test
 
 <div class="chapter-intro">
 You have seen the architecture — now it is time to write code. This chapter walks through real tests from the codebase, explains each section line by line, shows data-driven patterns, and provides a template you can copy for your first test. By the end, you will have the muscle memory for the standard test structure.
 </div>
 
-### 14.1 Anatomy of a Real Test
+### 3.2.1 Anatomy of a Real Test
 
 Study this real test from `e2e/desktop/tests/specs/settings.spec.ts`:
 
@@ -334,7 +325,7 @@ test.describe("Settings", () => {
 5. All interactions go through the `app` object and page object methods
 6. No raw locators — every action is a named method on a page object
 
-### 14.2 A Test With Speculos (Device Interaction)
+### 3.2.2 A Test With Speculos (Device Interaction)
 
 When your test needs to interact with the Ledger device (signing transactions, verifying addresses), add `speculosApp` and `cliCommands` to the fixtures:
 
@@ -380,7 +371,7 @@ test.describe("Password", () => {
 
 Note: `speculosApp` and `cliCommands` trigger Speculos Docker start and CLI data population **automatically** before the test runs — the fixture system handles all of this.
 
-### 14.3 Data-Driven Tests
+### 3.2.3 Data-Driven Tests
 
 Use JavaScript loops to generate multiple tests from data:
 
@@ -402,7 +393,7 @@ for (const l10n of languageTestData) {
 
 This pattern is used extensively for testing multiple currencies, device models, and locales.
 
-### 14.4 Template: Write Your Own Test
+### 3.2.4 Template: Write Your Own Test
 
 Copy this template as your starting point:
 
@@ -431,7 +422,7 @@ test.describe("YOUR FEATURE NAME", () => {
 });
 ```
 
-### 14.5 The 4-Step Development Workflow
+### 3.2.5 The 4-Step Development Workflow
 
 1. **Set up environment**: Export `MOCK=0`, `SPECULOS_DEVICE`, `COINAPPS`
 2. **Build the app**: `pnpm build:lld:deps && pnpm desktop build:testing`
@@ -452,9 +443,9 @@ test.describe("YOUR FEATURE NAME", () => {
 <strong>Key takeaway:</strong> Every desktop E2E test follows the same pattern: import from custom fixtures, configure with <code>test.use()</code>, tag and annotate, interact through <code>app</code>. Once you have written one test, you have written them all — the variation is in the page objects you call, not the structure.
 </div>
 
-### 14.6 Quiz
+### 3.2.6 Quiz
 
-<!-- ── Chapter 14 Quiz ── -->
+<!-- ── Chapter 3.2 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz</h3>
@@ -510,207 +501,1033 @@ test.describe("YOUR FEATURE NAME", () => {
 
 ---
 
-## Mobile E2E -- Architecture Deep Dive
+
+## Playwright from Zero -- Core Concepts
 
 <div class="chapter-intro">
-The mobile E2E suite tests Ledger Live Mobile (React Native) using Detox + Jest. While the high-level patterns mirror the desktop suite — Page Object Model, Speculos emulation, feature flag overrides — the implementation differs significantly. This chapter maps the directory structure, the initialization flow, the WebSocket bridge, and the key architectural differences from desktop.
+Playwright is the foundation of everything in desktop E2E. If you have never used it before, this chapter teaches you every concept you need — from what a locator is to how auto-waiting works — using real examples from the Ledger Live codebase. After this chapter, you will be able to read any test file in the suite and understand every line.
 </div>
 
-### 15.1 Directory Structure
+### 3.3.1 What Is Playwright?
 
-```
-e2e/mobile/
-|-- jest.config.js                # Jest configuration
-|-- detox.config.js               # Detox device/app configuration
-|-- jest.environment.ts           # Custom Jest environment
-|-- jest.globalSetup.ts           # Pre-test cleanup
-|-- setup.ts                      # Runs before each test suite
-|-- package.json
-|
-|-- specs/                        # TEST FILES (184 specs!)
-|   |-- send/                     #   68 send flow tests
-|   |-- swap/                     #   23 swap tests
-|   |-- addAccount/               #   17 add account tests
-|   |-- delegate/                 #   10 staking tests
-|   |-- deleteAccount/            #   13 remove account tests
-|   |-- deposit/                  #   3 receive tests
-|   |-- earn/                     #   9 earn feature tests
-|   |-- settings/                 #   6 settings tests
-|   |-- portfolio/                #   4 portfolio tests
-|   |-- verifyAddress/            #   12 address verification tests
-|   +-- subAccount/               #   13 token sub-account tests
-|
-|-- page/                         # PAGE OBJECTS (34 files)
-|   |-- index.ts                  #   Application singleton (global `app`)
-|   |-- common.page.ts            #   Shared actions
-|   |-- wallet/                   #   Wallet screens
-|   |-- trade/                    #   Transaction screens
-|   |-- settings/                 #   Settings screens
-|   |-- accounts/                 #   Account management
-|   +-- onboarding/               #   Onboarding flow
-|
-|-- helpers/                      # HELPER FUNCTIONS
-|   |-- commonHelpers.ts          #   App launch, deeplinks
-|   |-- elementHelpers.ts         #   Detox element wrappers (tapById, typeTextById, etc.)
-|   +-- allure/allure-helper.ts   #   Allure metadata
-|
-|-- utils/                        # UTILITIES
-|   |-- speculosUtils.ts          #   Speculos Docker management
-|   |-- cliUtils.ts               #   CLI command wrappers
-|   |-- initUtil.ts               #   Multi-phase initialization
-|   +-- constants.ts              #   Shared constants
-|
-|-- bridge/
-|   +-- server.ts                 #   WebSocket bridge
-|
-+-- models/
-    +-- send.ts                   #   Transaction validation
+Playwright is an open-source browser automation framework created by Microsoft. It can control Chromium, Firefox, WebKit, and — critically for us — **Electron** applications. Unlike Selenium (which communicates over HTTP), Playwright talks to browsers via the Chrome DevTools Protocol (CDP), making it faster and more reliable.
+
+**Key facts:**
+- Language: TypeScript/JavaScript (also supports Python, Java, .NET)
+- Created by: Microsoft (the same team that originally built Puppeteer at Google)
+- First release: 2020
+- Used for: E2E testing, web scraping, automation
+- Killer feature: **Auto-waiting** — Playwright automatically waits for elements to be ready before interacting with them
+
+**Why Playwright over alternatives?**
+
+| Feature | Playwright | Cypress | Selenium |
+|---------|-----------|---------|----------|
+| Multi-browser | Chromium, Firefox, WebKit | Chromium only (limited Firefox) | All browsers |
+| Electron support | Native | No | No |
+| Auto-waiting | Built-in | Built-in | Manual |
+| Parallel execution | Built-in | Via CI splitting | Via Grid |
+| Speed | Fast (CDP) | Fast (in-process) | Slower (HTTP) |
+| Language | TS/JS, Python, Java, .NET | JS/TS only | All major |
+
+Ledger Live Desktop uses Playwright because it natively supports **Electron testing** — the ability to launch and control the desktop application as if a real user were clicking through it.
+
+### 3.3.2 The Locator System
+
+A **locator** is how you tell Playwright which element to interact with. Think of it as a CSS selector on steroids — but with built-in waiting and retry logic.
+
+#### The Golden Rule: `getByTestId` first
+
+The most reliable locator strategy is `data-testid` attributes. These are custom attributes added to the source code specifically for testing:
+
+```html
+<!-- In the React source code -->
+<button data-testid="portfolio-empty-state-add-account-button">Add Account</button>
 ```
 
-### 15.2 The Initialization Flow
-
-The mobile E2E suite has a 7-phase initialization:
-
-```
-1. GLOBAL SETUP
-   +-- Validate .env.mock, install signal handlers, configure video recording
-
-2. ENVIRONMENT SETUP
-   +-- Initialize Detox environment, configure multi-worker devices, set globals
-
-3. SUITE SETUP (beforeAll in jest.environment.ts)
-   +-- Launch app with bridge, reverse TCP ports (Android), set Allure metadata
-
-4. TEST INIT (app.init())
-   |-- Launch Speculos Docker containers in parallel
-   |-- Execute CLI commands with retry logic
-   |-- Register Speculos ports via bridge
-   |-- Load feature flag overrides via bridge
-   +-- Import accounts via bridge
-
-5. TEST RUNS (your test code)
-
-6. SUITE TEARDOWN (afterAll)
-   +-- Close bridge, stop Speculos containers
-
-7. GLOBAL TEARDOWN
-   +-- Docker cleanup, artifact collection
+```typescript
+// In the test
+this.page.getByTestId("portfolio-empty-state-add-account-button");
 ```
 
-### 15.3 The WebSocket Bridge In Depth
+This is the most stable because `data-testid` attributes are never changed by designers or translators. They exist solely for tests.
 
-The bridge is a WebSocket server running on the Jest side that the React Native app connects to:
-
-```
-[Jest + Detox]  <--- WebSocket --->  [React Native App]
-     |                                      |
-     |  importAccounts                      |  Receives accounts JSON
-     |  overrideFeatureFlag                 |  Toggles feature flag
-     |  navigate                            |  Changes screen
-     |  getLogs                             |  Returns app logs
-     |  addKnownSpeculos                    |  Registers Speculos device
-     +  acceptTerms                         +  Skips onboarding
+**Real example from `portfolio.page.ts`:**
+```typescript
+private addAccountButton = this.page.getByTestId("portfolio-empty-state-add-account-button");
+private buySellEntryButton = this.page.getByTestId("buy-sell-entry-button");
+private chart = this.page.getByTestId("chart-container");
+private totalBalance = this.page.getByTestId("total-balance");
 ```
 
-**Why is a bridge needed?** Detox can interact with native UI elements (tap, scroll, type), but it cannot directly access or manipulate React Native app state. The bridge is the channel for state manipulation — injecting accounts, overriding flags, navigating programmatically.
+#### `getByRole` — Accessible locators
 
-### 15.4 Why `app.init()` is in `beforeAll` (not `beforeEach`)
+`getByRole` finds elements by their ARIA role, which is what screen readers see. It is the second most reliable strategy:
 
-Desktop uses Playwright fixtures which automatically create fresh state per test (new userdata directory, new Electron process). Mobile cannot afford this — launching a native app, connecting the bridge, and populating data is expensive (10-30 seconds per setup).
+```typescript
+// From add.account.modal.ts — find an option by accessible name
+private selectAccountInList = (Currency: Currency) =>
+  this.page.getByRole("option", {
+    name: `${Currency.name} (${Currency.ticker})`,
+    exact: true,
+  });
+```
 
-So `app.init()` runs once per describe block in `beforeAll`. All tests in that block share the app instance. This is faster but means **tests in the same block are not fully isolated** — one test's side effects can affect the next.
+The `exact: true` option means the name must match exactly (no partial matches).
 
-**Mitigation**: Group tests that need the same setup in the same describe block. Tests that need different setups go in separate files.
+**Common roles:** `button`, `link`, `textbox`, `option`, `heading`, `checkbox`, `radio`, `dialog`.
 
-### 15.5 Key Differences from Desktop (Summary)
+#### `getByText` — Text content locators
 
-| Aspect | Desktop | Mobile |
-|--------|---------|--------|
-| Framework | Playwright | Detox + Jest |
-| App launch | `electron.launch()` | `device.launchApp()` |
-| Fixture system | Per-test Playwright fixtures | Global `app.init()` in `beforeAll` |
-| Page access | `({ app }) =>` destructured | `app.` global variable |
-| Bridge | Not needed (Electron access) | WebSocket bridge required |
-| Parallelism | Full parallel (random ports) | 1-3 workers (device limitation) |
-| Build | Rspack bundle (~2 min) | Xcode/Gradle native (~10-30 min) |
-| Test isolation | Full (fresh app per test) | Partial (shared app per describe) |
+When elements have no `data-testid` and no specific ARIA role, you can find them by their visible text:
+
+```typescript
+// From portfolio.page.ts
+private assetAllocationTitle = this.page.getByText("Asset allocation");
+private showAllButton = this.page.getByText("Show all");
+private showMoreButton = this.page.getByText("Show more");
+```
+
+**Warning:** Text locators break when translations change or text is dynamic. Use `getByTestId` whenever possible.
+
+#### `page.locator()` — CSS and XPath selectors
+
+For complex cases, you can use raw CSS selectors or XPath expressions:
+
+```typescript
+// CSS selector — from portfolio.page.ts
+private operationList = this.page.locator("#operation-list");
+private assetRowElements = this.page.locator("[data-testid^='asset-row-']");
+private operationRows = this.page.locator("[data-testid^='operation-row-']");
+```
+
+The `^=` means "starts with" — so `[data-testid^='asset-row-']` matches any element whose `data-testid` starts with `asset-row-`.
+
+**XPath — from `abstractClasses.ts`:**
+```typescript
+// XPath: find any element containing specific text
+protected optionWithText = (text: string) =>
+  this.page.locator(`//*[contains(text(),"${text}")]`).first();
+
+// XPath with following-sibling: find text then look for nearby text
+protected optionWithTextAndFollowingText = (text: string, followingText: string) =>
+  this.page.locator(
+    `//*[contains(text(),"${text}")]/following::span[contains(text(),"${followingText}")]`,
+  ).first();
+```
+
+XPath is powerful but fragile — it is used in the codebase only when simpler locators cannot work (typically for dropdown options that have no `data-testid`).
+
+#### Dynamic locators (factory functions)
+
+Sometimes you need a locator that depends on a parameter. The codebase uses arrow functions for this:
+
+```typescript
+// From portfolio.page.ts — locator factory for any asset row
+private assetRow = (asset: string) =>
+  this.page.getByTestId(`asset-row-${asset.toLowerCase()}`);
+
+// From layout.component.ts — locator factory for topbar buttons
+private readonly topbarActionButton = (action: string) =>
+  this.page.getByTestId(`topbar-action-button-${action}`);
+```
+
+Usage:
+```typescript
+await this.assetRow("bitcoin").click();          // -> getByTestId("asset-row-bitcoin")
+await this.topbarActionButton("settings").click(); // -> getByTestId("topbar-action-button-settings")
+```
+
+#### The `.or()` combinator
+
+When the same element has different `data-testid` values in different versions of the UI:
+
+```typescript
+// From layout.component.ts — handles both old and new testId
+readonly topbarSettingsButton = this.topbarActionButton("settings").or(
+  this.page.getByTestId("topbar-settings-button"),
+);
+```
+
+This means: try `topbar-action-button-settings` first, OR fall back to `topbar-settings-button`. This pattern handles UI transitions between versions.
+
+#### Locator Priority Summary
+
+| Priority | Strategy | When to use | Stability |
+|----------|----------|-------------|-----------|
+| 1 | `getByTestId` | Always when a `data-testid` exists | Highest |
+| 2 | `getByRole` | Accessible elements (buttons, links, options) | High |
+| 3 | `getByText` | Static, non-translatable text | Medium |
+| 4 | `locator` (CSS) | Complex structural selectors | Medium |
+| 5 | `locator` (XPath) | Last resort — sibling/ancestor traversal | Lowest |
+
+### 3.3.3 Actions
+
+Once you have a locator, you perform actions on it. Here are every action used in the codebase:
+
+#### `click()` — The most common
+
+```typescript
+await this.addAccountButton.click();
+await this.showAllButton.click();
+await this.checkbox.click({ force: true }); // force: bypass visibility checks
+```
+
+The `{ force: true }` option skips Playwright's actionability checks. Used when elements are technically visible but covered by overlays.
+
+#### `fill()` — Type into an input
+
+```typescript
+// From add.account.modal.ts
+await this.selectAccountInput.fill(currency.name);
+```
+
+`fill()` clears the input first, then types the text. Unlike `type()`, it does not simulate individual keystrokes — it sets the value directly.
+
+#### `press()` — Press a keyboard key
+
+```typescript
+await this.selectAccountInput.press("Enter");
+```
+
+Common keys: `"Enter"`, `"Escape"`, `"Tab"`, `"ArrowDown"`, `"Backspace"`.
+
+#### `hover()` — Move mouse over element
+
+```typescript
+await this.page.mouse.move(0, 0); // Move mouse to top-left corner (dismiss tooltips)
+```
+
+#### `waitFor()` — Wait for element state
+
+```typescript
+// Wait for element to become visible
+await this.addAccountsButton.waitFor({ state: "visible" });
+
+// Wait for element to disappear
+await this.stopButton.waitFor({ state: "hidden" });
+await this.loadingSpinner.waitFor({ state: "hidden" });
+```
+
+States: `"visible"`, `"hidden"`, `"attached"`, `"detached"`.
+
+#### `scrollIntoViewIfNeeded()` — Scroll to element
+
+```typescript
+// From portfolio.page.ts
+await this.operationList.scrollIntoViewIfNeeded();
+```
+
+#### `evaluate()` — Run JavaScript in the browser
+
+```typescript
+// From portfolio.page.ts — wait for DOM element count to change
+await this.page.waitForFunction(() => {
+  return document.querySelectorAll("[data-testid^='asset-row-']").length > 6;
+});
+
+// From common.ts — save logs
+await page.evaluate(filePath => {
+  window.saveLogs(filePath);
+}, filePath);
+```
+
+`evaluate()` runs the given function inside the browser context. The second argument is passed as a parameter. This is the escape hatch for anything Playwright's API cannot do directly.
+
+#### `isVisible()` — Check without asserting
+
+```typescript
+if (await this.deselectAllButton.isVisible()) {
+  await this.deselectAllButton.click();
+}
+```
+
+Unlike `expect().toBeVisible()`, `isVisible()` returns a boolean and does not throw on failure. Used for conditional logic.
+
+### 3.3.4 Assertions
+
+Assertions verify that the application is in the expected state. Playwright's `expect` function comes with built-in auto-retry — it keeps checking until the assertion passes or times out.
+
+#### `toBeVisible()` — Element is on screen
+
+```typescript
+import { expect } from "@playwright/test";
+
+await expect(this.addAccountButton).toBeVisible();
+await expect(this.chart).toBeVisible();
+```
+
+This is the most used assertion in the codebase. It waits up to the configured timeout (41 seconds in our config).
+
+#### `not.toBeVisible()` — Element is NOT on screen
+
+```typescript
+await expect(this.portfolioTotalBalance).not.toBeVisible();
+await expect(this.portfolioTrend).not.toBeVisible();
+```
+
+#### `toContainText()` — Element contains text
+
+```typescript
+await expect(this.totalBalance).toContainText("$");
+await expect(this.toaster).toContainText("Transaction sent !");
+await expect(this.assetRowValue("bitcoin")).toContainText("0.001");
+```
+
+`toContainText` is a substring match. It passes if the text appears anywhere in the element.
+
+#### `toHaveText()` — Exact text match
+
+```typescript
+expect(await this.title.textContent()).toBe("Add accounts");
+```
+
+Note: `toBe()` is a Jest-style assertion (string equality), while `toHaveText()` is Playwright's locator assertion with auto-retry. Prefer `toHaveText()` for locators.
+
+#### `toHaveCount()` — Number of matching elements
+
+```typescript
+await expect(this.assetRowElements).toHaveCount(6);
+```
+
+Useful for verifying lists: "I expect exactly 6 asset rows."
+
+#### `toBeEnabled()` / `toBeDisabled()` — Button state
+
+```typescript
+await expect(this.quickActionButton("sell")).toBeDisabled();
+await expect(this.quickActionButton("send")).toBeEnabled();
+```
+
+#### `toHaveAttribute()` — Check HTML attributes
+
+```typescript
+await expect(this.drawerBuycryptoButton).toHaveAttribute("data-active", "true");
+```
+
+#### `toBeGreaterThan()` — Numeric comparison
+
+```typescript
+const numberOfOperationsAfter = await this.operationRows.count();
+expect(numberOfOperationsAfter).toBeGreaterThan(numberOfOperationsBefore);
+```
+
+Note: this is a plain value assertion (no auto-retry). The `count()` already resolved the value.
+
+### 3.3.5 Auto-Waiting — Playwright's Killer Feature
+
+This is what makes Playwright different from Selenium. When you call:
+
+```typescript
+await this.addAccountButton.click();
+```
+
+Playwright does NOT just click immediately. Behind the scenes, it:
+
+1. **Waits** for the element to be attached to the DOM
+2. **Waits** for the element to be visible (not `display: none`, not zero-size)
+3. **Waits** for the element to be stable (not animating)
+4. **Waits** for the element to receive pointer events (not covered by another element)
+5. **Waits** for the element to be enabled (not `disabled`)
+6. **Clicks** the element
+
+If any step fails, Playwright retries from the beginning. This continues until the `timeout` is reached (41 seconds in our config, 120 seconds for the default page timeout).
+
+**This means you almost never need `sleep()` or `waitForTimeout()`.** Instead of:
+
+```typescript
+// BAD — arbitrary wait
+await page.waitForTimeout(3000);
+await button.click();
+```
+
+You write:
+```typescript
+// GOOD — auto-wait handles everything
+await button.click();
+```
+
+The same auto-retry applies to assertions:
+
+```typescript
+// This will retry for up to 41 seconds until the text appears
+await expect(this.totalBalance).toContainText("$1,234.56");
+```
+
+**When you DO need explicit waits:**
+
+```typescript
+// Wait for a specific element state change
+await this.loadingSpinner.waitFor({ state: "hidden" });
+
+// Wait for the page to finish loading
+await page.waitForLoadState("domcontentloaded");
+
+// Wait for a specific selector to appear/disappear
+await page.waitForSelector("#loader-container", { state: "hidden" });
+
+// Wait for a DOM condition (escape hatch)
+await page.waitForFunction(() => {
+  return document.querySelectorAll("[data-testid^='asset-row-']").length > 6;
+});
+```
+
+### 3.3.6 Configuration — `playwright.config.ts` Line by Line
+
+Open `e2e/desktop/playwright.config.ts`. Here is every property explained:
+
+```typescript
+const config: PlaywrightTestConfig = {
+  // Where to find test files
+  testDir: "./tests/specs",
+
+  // Retry failed tests: 2 times in CI, never locally
+  retries: process.env.CI ? 2 : 0,
+
+  // Max time per test: 400s in CI, 1200s (20min) locally
+  // Local is higher because your machine may be slower
+  timeout: process.env.CI ? 400000 : 1200000,
+
+  // Where to save screenshots, videos, traces
+  outputDir: "./tests/artifacts/test-results",
+
+  // Max time for each expect() assertion: 41 seconds
+  expect: { timeout: 41000 },
+
+  // No global timeout (tests can run as long as needed)
+  globalTimeout: 0,
+
+  // Run this file once before ALL tests
+  globalSetup: require.resolve("./tests/utils/global.setup"),
+
+  // Run this file once after ALL tests
+  globalTeardown: require.resolve("./tests/utils/global.teardown"),
+
+  use: {
+    // Accept self-signed certificates
+    ignoreHTTPSErrors: true,
+    // We handle screenshots manually in captureArtifacts()
+    screenshot: "off",
+  },
+
+  // In CI, fail if someone left test.only() in code
+  forbidOnly: !!process.env.CI,
+
+  // In CI, only save artifacts for failed tests
+  preserveOutput: process.env.CI ? "failures-only" : "always",
+
+  // In CI, stop after 5 failures (don't waste time on cascading failures)
+  maxFailures: process.env.CI ? 5 : undefined,
+
+  // Report tests that take longer than 60 seconds
+  reportSlowTests: process.env.CI ? { max: 0, threshold: 60000 } : null,
+
+  // Run all tests in parallel (not sequentially)
+  fullyParallel: true,
+
+  // Use all available CPU cores
+  workers: "100%",
+
+  // Reporters: what format to output results in
+  reporter: process.env.CI
+    ? [
+        ["list"],                          // Console output
+        ["allure-playwright", { ... }],    // Allure HTML report
+        ["./tests/utils/customJsonReporter.ts"],  // Xray JSON for Jira
+      ]
+    : [["allure-playwright"]],  // Local: Allure only
+};
+```
+
+### 3.3.7 Running Tests from the CLI
+
+```bash
+# Run ALL tests
+pnpm e2e:desktop test:playwright
+
+# Run a specific file
+pnpm e2e:desktop test:playwright add.account.spec.ts
+
+# Run tests matching a name pattern (grep)
+pnpm e2e:desktop test:playwright --grep "Add account"
+
+# Run tests with a specific tag
+pnpm e2e:desktop test:playwright --grep "@smoke"
+pnpm e2e:desktop test:playwright --grep "@bitcoin"
+
+# Run with the Playwright UI (interactive debugger)
+pnpm e2e:desktop test:playwright --ui
+
+# Run in debug mode (opens inspector, pauses on first action)
+PWDEBUG=1 pnpm e2e:desktop test:playwright add.account.spec.ts
+
+# Run with a single worker (no parallelism, easier to debug)
+pnpm e2e:desktop test:playwright -- --workers=1
+
+# Run a specific shard (for CI splitting)
+pnpm e2e:desktop test:playwright -- --shard=1/3
+```
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><a href="https://wix.github.io/Detox/docs/introduction/project-setup">Detox Project Setup</a></li>
-<li><a href="https://wix.github.io/Detox/docs/guide/testing-in-ci">Detox: Testing in CI</a></li>
-<li><a href="https://jestjs.io/docs/configuration">Jest Configuration</a></li>
-<li><a href="https://reactnative.dev/docs/testing-overview">React Native Testing Overview</a></li>
+<li><a href="https://playwright.dev/docs/locators">Playwright: Locators</a> — official locator guide with interactive examples</li>
+<li><a href="https://playwright.dev/docs/actionability">Playwright: Auto-waiting</a> — the actionability checks explained</li>
+<li><a href="https://playwright.dev/docs/test-assertions">Playwright: Assertions</a> — full assertion reference</li>
+<li><a href="https://playwright.dev/docs/test-configuration">Playwright: Configuration</a> — all config options</li>
+<li><a href="https://playwright.dev/docs/running-tests">Playwright: Running Tests</a> — CLI options</li>
+<li><a href="https://playwright.dev/docs/test-cli">Playwright: Command Line</a> — complete CLI reference</li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Mobile E2E testing has more constraints than desktop: slower builds, limited parallelism, and the WebSocket bridge as an indirection layer. But the patterns are similar — Page Object Model, Speculos for device emulation, feature flag overrides. Understanding the constraints helps you design better tests.
+<strong>Key takeaway:</strong> Playwright gives you locators that find elements, actions that interact with them, and assertions that verify state — all with built-in auto-waiting. You never write <code>sleep()</code>. The configuration in <code>playwright.config.ts</code> controls timeouts, retries, parallelism, and reporting. Master these fundamentals and you can read any test in the codebase.
 </div>
 
-### 15.6 Quiz
+### 3.3.8 Visual Debugging with PWDEBUG
 
-<!-- ── Chapter 15 Quiz ── -->
+When a test fails or you want to understand the test flow step by step, Playwright's **debug mode** is your best tool. Setting the `PWDEBUG=1` environment variable launches the **Playwright Inspector** — a GUI that pauses at each action and lets you step through the test interactively.
+
+**Launch a test in debug mode:**
+```bash
+PWDEBUG=1 pnpm e2e:desktop test:playwright e2e/desktop/tests/specs/add.account.spec.ts
+```
+
+This opens two windows: the **Electron app** (Ledger Live) and the **Playwright Inspector**:
+
+![Playwright Inspector](images/Playwright_Inspector.png)
+
+**The Inspector UI:**
+
+- **Left panel (Actions list)** — every `await` action from your test, listed in order. The currently executing action is highlighted. Completed actions show a green checkmark.
+- **Right panel (Browser)** — the live Electron app. You can see exactly what the user would see at each step.
+- **Locator input** — type a locator (e.g., `getByTestId("portfolio-empty-state-add-account-button")`) to see it highlighted live in the app.
+- **Step / Resume buttons** — click "Step over" to execute one action at a time, or "Resume" to run until the next breakpoint or failure.
+- **Locator picker** — click the crosshair icon, then click any element in the app to see its best locator suggestion. Invaluable for writing new tests.
+
+**When to use PWDEBUG:**
+- **Debugging a failure** — step to the failing action and inspect the DOM state
+- **Understanding a test flow** — watch what the app does at each step, especially useful when learning a new spec file
+- **Verifying locators** — use the locator picker to confirm your selectors match the right elements
+- **Writing new tests** — pause after each action to decide what the next step should be
+
+> **Tip:** You can also combine PWDEBUG with a single worker for easier debugging:
+> ```bash
+> PWDEBUG=1 pnpm e2e:desktop test:playwright add.account.spec.ts -- --workers=1
+> ```
+
+### 3.3.9 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
+<h3>Quiz — Playwright Core Concepts</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q1.</strong> Which locator strategy should you prefer when a <code>data-testid</code> attribute exists on the element?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>getByTestId()</code> — it is the most stable because test IDs are never changed by designers or translators</button>
+<button class="quiz-choice" data-value="B">B) <code>getByText()</code> — text is always visible and easy to understand</button>
+<button class="quiz-choice" data-value="C">C) <code>locator()</code> with CSS — CSS selectors are more powerful</button>
+<button class="quiz-choice" data-value="D">D) <code>getByRole()</code> — ARIA roles are the web standard</button>
+</div>
+<p class="quiz-explanation"><code>getByTestId()</code> is the #1 priority in the locator strategy. Test IDs exist solely for testing and are never affected by design changes, translations, or accessibility refactors.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> What does Playwright do automatically BEFORE performing a <code>click()</code> action?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Takes a screenshot of the element</button>
+<button class="quiz-choice" data-value="B">B) Scrolls to the top of the page</button>
+<button class="quiz-choice" data-value="C">C) Waits for the element to be attached, visible, stable, able to receive events, and enabled</button>
+<button class="quiz-choice" data-value="D">D) Refreshes the page to ensure latest DOM</button>
+</div>
+<p class="quiz-explanation">Playwright's auto-waiting performs 5 checks before every action: attached to DOM, visible, stable (not animating), receives pointer events (not covered), and enabled. This is the "killer feature" that eliminates most <code>sleep()</code> calls.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q3.</strong> In our <code>playwright.config.ts</code>, what is the <code>expect.timeout</code> set to and what does it control?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) 120 seconds — how long each test can run</button>
+<button class="quiz-choice" data-value="B">B) 400 seconds — the CI test timeout</button>
+<button class="quiz-choice" data-value="C">C) 5 seconds — how long Playwright waits before failing</button>
+<button class="quiz-choice" data-value="D">D) 41 seconds — how long each <code>expect()</code> assertion retries before failing</button>
+</div>
+<p class="quiz-explanation"><code>expect.timeout: 41000</code> means every <code>expect(locator).toBeVisible()</code> (and similar assertions) will retry for up to 41 seconds. This is separate from the overall test timeout (400s CI / 1200s local).</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q4.</strong> What is the difference between <code>fill()</code> and <code>press()</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>fill()</code> is for buttons, <code>press()</code> is for inputs</button>
+<button class="quiz-choice" data-value="B">B) <code>fill()</code> clears the input and sets a text value directly, while <code>press()</code> simulates pressing a single keyboard key</button>
+<button class="quiz-choice" data-value="C">C) They are the same, just different naming conventions</button>
+<button class="quiz-choice" data-value="D">D) <code>fill()</code> is synchronous, <code>press()</code> is asynchronous</button>
+</div>
+<p class="quiz-explanation"><code>fill("Bitcoin")</code> clears the input field and types "Bitcoin" as a whole string. <code>press("Enter")</code> simulates pressing a single key. They serve different purposes and are often used together: <code>fill()</code> to type text, then <code>press("Enter")</code> to submit.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> When should you use <code>page.waitForFunction()</code> instead of regular Playwright locators?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Always — it is more reliable than locators</button>
+<button class="quiz-choice" data-value="B">B) When you want to add a sleep delay</button>
+<button class="quiz-choice" data-value="C">C) When you need to check a DOM condition that cannot be expressed as a locator assertion (e.g., counting elements after a dynamic change)</button>
+<button class="quiz-choice" data-value="D">D) When elements have no <code>data-testid</code></button>
+</div>
+<p class="quiz-explanation"><code>waitForFunction()</code> is the escape hatch for conditions that Playwright's locator API cannot express. For example, waiting for the count of dynamically-added elements to exceed a threshold, as seen in <code>portfolio.page.ts</code>.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Playwright Advanced -- Fixtures, POM & TypeScript Decorators
+
+<div class="chapter-intro">
+Chapter 3.3 taught you how Playwright finds elements and interacts with them. This chapter goes deeper into the three patterns that make the Ledger E2E suite maintainable at scale: <strong>fixtures</strong> (dependency injection for test setup), the <strong>Page Object Model</strong> (separation of test logic from UI details), and <strong>TypeScript decorators</strong> (the <code>@step</code> annotation for reporting). These are the patterns you will use in every test you write.
+</div>
+
+### 3.4.1 What Are Fixtures?
+
+In Playwright, a **fixture** is a reusable piece of setup that is automatically created before your test and cleaned up after. Think of it as dependency injection for tests.
+
+Without fixtures, you would write setup code in every test:
+
+```typescript
+// BAD — setup code repeated in every test
+test("test 1", async () => {
+  const app = await launchElectron();
+  const page = await app.firstWindow();
+  // ... test code ...
+  await app.close();
+});
+
+test("test 2", async () => {
+  const app = await launchElectron();  // repeated!
+  const page = await app.firstWindow();  // repeated!
+  // ... test code ...
+  await app.close();  // repeated!
+});
+```
+
+With fixtures, setup is declared once and injected:
+
+```typescript
+// GOOD — fixtures handle setup/teardown automatically
+test("test 1", async ({ app, page }) => {
+  // app and page are ready to use!
+  // cleanup happens automatically after the test
+});
+
+test("test 2", async ({ app, page }) => {
+  // fresh app and page for each test
+});
+```
+
+The magic: you just list what you need in the destructured parameter (`{ app, page }`), and Playwright creates it for you. When the test ends, Playwright tears it down.
+
+### 3.4.2 `base.extend<T>()` — Creating Custom Fixtures
+
+Playwright provides built-in fixtures (`page`, `context`, `browser`). To add your own, you use `base.extend<T>()`:
+
+```typescript
+import { test as base } from "@playwright/test";
+
+// Define the type of your custom fixtures
+type MyFixtures = {
+  greeting: string;
+  counter: number;
+};
+
+// Extend the base test with your fixtures
+const test = base.extend<MyFixtures>({
+  greeting: "hello",           // Simple value fixture
+  counter: async ({}, use) => {
+    // Setup
+    const value = await fetchCounterFromAPI();
+    // Provide the value to the test
+    await use(value);
+    // Teardown (runs after the test)
+    await resetCounter();
+  },
+});
+```
+
+**The `use()` callback pattern**: The `use` function is the key concept. Everything before `use()` is setup, the argument to `use()` is what the test receives, and everything after `use()` is teardown.
+
+```typescript
+myFixture: async ({}, use) => {
+  // SETUP: runs before the test
+  const resource = await createResource();
+
+  await use(resource);  // TEST RUNS HERE with this value
+
+  // TEARDOWN: runs after the test (even if test fails)
+  await resource.cleanup();
+},
+```
+
+### 3.4.3 The Ledger Live `TestFixtures` Type
+
+Open `e2e/desktop/tests/fixtures/common.ts`. Here is the `TestFixtures` type with every field explained:
+
+```typescript
+type TestFixtures = {
+  // ── UI Configuration ──
+  lang: string;                  // App language (default: "en-US")
+  theme: "light" | "dark" | "no-preference" | undefined;  // Color scheme (default: "dark")
+  env: Record<string, string>;   // Extra environment variables
+
+  // ── Test Data ──
+  userdata?: string;             // Name of JSON fixture (e.g., "skip-onboarding")
+  extraUserdataFiles?: Record<string, string>;  // Additional files to create
+  settings: Record<string, unknown>;   // App settings merged into app.json
+  userdataDestinationPath: string;     // Generated unique dir per test
+  userdataOriginalFile?: string;       // Full path to source JSON
+  userdataFile: string;                // Full path to app.json
+
+  // ── Feature Flags ──
+  featureFlags: OptionalFeatureMap;    // Override feature flags for this test
+
+  // ── Device Simulation ──
+  speculosApp: AppInfos;              // Which Speculos app to launch (e.g., "Bitcoin")
+  speculos: SpeculosFixtureHandle;    // Device handle with current + relaunch
+  simulateCamera: string;             // Fake video capture file path
+
+  // ── Injected Objects ──
+  electronApp: ElectronApplication;   // The launched Electron app
+  page: Page;                         // The app's main window
+  app: Application;                   // The POM hub (all page objects)
+
+  // ── CLI & Data Population ──
+  cliCommands?: CliCommand[];         // Commands to run after Speculos starts
+  cliCommandsOnApp?: { app: AppInfos; cmd: CliCommand }[];  // Commands with specific apps
+
+  // ── Reporting ──
+  teamOwner?: Team;                   // Allure team ownership
+  localManifestOverride?: LiveAppManifest[];  // Override Live App manifests
+};
+```
+
+**The fixture dependency graph:**
+
+```
+speculosApp (input)
+    ↓
+speculos (launches Docker container)
+    ↓
+electronApp (launches Electron with SPECULOS_API_PORT)
+    ↓
+page (gets first window from Electron)
+    ↓
+app (wraps page in Application POM hub)
+```
+
+Each fixture depends on the one above it. Playwright resolves these dependencies automatically — you never have to worry about the order.
+
+### 3.4.4 Overriding Fixtures with `test.use()`
+
+Tests configure their fixtures using `test.use()` inside a `describe` block:
+
+```typescript
+test.describe("Add Accounts", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,                       // For Allure reports
+    userdata: "skip-onboarding-with-last-seen-device", // Pre-configured state
+    speculosApp: Currency.BTC.speculosApp,             // Launch BTC device
+    featureFlags: {                                    // Override flags
+      currencyAleo: { enabled: true },
+    },
+  });
+
+  test("Add BTC account", async ({ app }) => {
+    // app is ready with BTC Speculos running
+  });
+});
+```
+
+**Rules:**
+- `test.use()` applies to ALL tests in the same `describe` block
+- Values in `test.use()` override defaults from the fixture definition
+- You can nest `describe` blocks with different `test.use()` for different configurations
+
+### 3.4.5 Page Object Model (POM) — The Architecture
+
+The **Page Object Model** is a design pattern where each screen (or major UI component) of the application gets its own class. This class encapsulates:
+1. **Locators** — how to find elements on that screen
+2. **Actions** — what a user can do on that screen
+3. **Assertions** — what you can verify on that screen
+
+**Why POM?**
+- If a `data-testid` changes, you update ONE file (the page object), not 50 tests
+- Tests read like user stories: `app.portfolio.clickAddAccountButton()`
+- Page objects can be reused across many tests
+
+**The Ledger implementation:**
+
+```
+PageHolder (base — holds the Page reference)
+    ↓
+Component (adds shared UI: spinner, toaster, dropdown options)
+    ↓
+AppPage (abstract — all concrete pages extend this)
+    ↓
+PortfolioPage, AccountPage, SettingsPage, ... (concrete pages)
+```
+
+And the **Application class** (hub) aggregates all page objects:
+
+```typescript
+// From e2e/desktop/tests/page/index.ts
+export class Application extends PageHolder {
+  public account = new AccountPage(this.page);
+  public accounts = new AccountsPage(this.page);
+  public portfolio = new PortfolioPage(this.page);
+  public addAccount = new AddAccountModal(this.page);
+  public send = new SendModal(this.page);
+  public receive = new ReceiveModal(this.page);
+  public speculos = new SpeculosPage(this.page);
+  public mainNavigation = new MainNavigationPage(this.page);
+  // ... 30+ more page objects
+}
+```
+
+In tests, you access everything through `app`:
+
+```typescript
+test("navigate and check", async ({ app }) => {
+  await app.portfolio.clickAddAccountButton();
+  await app.addAccount.selectCurrency(Currency.BTC);
+  await app.mainNavigation.openTargetFromMainNavigation("accounts");
+  await app.accounts.navigateToAccountByName("Bitcoin 1");
+});
+```
+
+**Rule: Tests never use locators directly.** Every interaction goes through a named method on a page object. This is what makes the suite maintainable.
+
+### 3.4.6 TypeScript Decorators — The `@step()` Pattern
+
+If you come from TypeScript without decorator experience, the `@` syntax may look mysterious. Here is what it means.
+
+**What is a decorator?** A decorator is a function that wraps another function, adding behavior before or after it runs. The `@` symbol is syntax sugar for applying that wrapper.
+
+```typescript
+// Without decorator:
+async clickButton() {
+  await test.step("Click button", async () => {
+    await this.button.click();
+  });
+}
+
+// With decorator — exactly the same behavior, cleaner syntax:
+@step("Click button")
+async clickButton() {
+  await this.button.click();
+}
+```
+
+**How `step.ts` works (the source code):**
+
+```typescript
+// From e2e/desktop/tests/misc/reporters/step.ts
+export function step<This extends HasConstructor, Args extends unknown[], Return>(
+  message?: string,
+) {
+  return function actualDecorator(
+    target: (this: This, ...args: Args) => Promise<Return>,
+    context: ClassMethodDecoratorContext,
+  ) {
+    async function replacementMethod(this: This, ...args: Args): Promise<Return> {
+      const ctorName = this.constructor.name;  // e.g., "PortfolioPage"
+
+      // Build the step name: custom message or "ClassName.methodName"
+      const name = message
+        ? message.replace(/\$(\d+)/g, (_, idx) => String(args[Number(idx)]))
+        : `${ctorName}.${String(context.name)}`;
+
+      // Wrap the method call in a Playwright test step
+      return await test.step(name, () => target.call(this, ...args), { box: true });
+    }
+    return replacementMethod;
+  };
+}
+```
+
+**Key details:**
+
+1. **`$N` placeholders** — The message can include `$0`, `$1`, etc. which get replaced with the function arguments:
+   ```typescript
+   @step("Click on asset row $0")
+   async clickOnSelectedAssetRow(asset: string) { ... }
+   // When called with "bitcoin", step name becomes: "Click on asset row bitcoin"
+   ```
+
+2. **`{ box: true }`** — This tells Playwright to "box" the step, meaning the step's internal details are collapsed in the report. The error points to the test line that called the method, not the internals.
+
+3. **Fallback for non-test contexts** — If `@step` is called outside a test (e.g., during fixture setup), it catches the error and runs the method without wrapping.
+
+4. **Auto-naming** — If no message is provided, the step name is `ClassName.methodName` (e.g., `PortfolioPage.clickAddAccountButton`).
+
+### 3.4.7 Tags and Annotations
+
+Tags and annotations are metadata attached to tests for filtering and reporting.
+
+**Tags — for filtering which tests run:**
+
+```typescript
+test("Add BTC account", {
+  tag: [
+    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",  // Device compatibility
+    "@bitcoin",                                                     // Currency
+    "@family-bitcoin",                                              // Blockchain family
+    "@smoke",                                                       // Test importance
+  ],
+}, async ({ app }) => { ... });
+```
+
+Run only tests with a specific tag:
+```bash
+pnpm e2e:desktop test:playwright --grep "@smoke"
+pnpm e2e:desktop test:playwright --grep "@bitcoin"
+pnpm e2e:desktop test:playwright --grep "@NanoSP"
+```
+
+**Annotations — for linking to external systems:**
+
+```typescript
+test("Add BTC account", {
+  annotation: {
+    type: "TMS",                                    // Test Management System
+    description: "B2CQA-2499, B2CQA-2644",         // Jira/Xray ticket IDs
+  },
+}, async ({ app }) => {
+  // Inside the test, link to Allure
+  await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+});
+```
+
+The annotation links the test to Xray test cases in Jira. The `addTmsLink()` call creates clickable links in the Allure report.
+
+### 3.4.8 Parallel Execution and Workers
+
+```typescript
+// In playwright.config.ts
+fullyParallel: true,  // All tests can run at the same time
+workers: "100%",      // Use all CPU cores
+```
+
+Each worker gets its own:
+- Speculos Docker container (on a random port)
+- Electron app instance
+- Userdata directory (unique UUID)
+- Isolated test state
+
+This is why the fixture system assigns random ports to Speculos — to prevent port conflicts between parallel workers.
+
+**In CI**, the suite is also **sharded** across multiple runners:
+```bash
+# Runner 1:
+pnpm e2e:desktop test:playwright -- --shard=1/3
+# Runner 2:
+pnpm e2e:desktop test:playwright -- --shard=2/3
+# Runner 3:
+pnpm e2e:desktop test:playwright -- --shard=3/3
+```
+
+### 3.4.9 Retry Strategy
+
+```typescript
+retries: process.env.CI ? 2 : 0,
+```
+
+- **Locally**: No retries. You see failures immediately and fix them.
+- **CI**: Up to 2 retries. A test must fail 3 times to be reported as failed.
+
+The `isLastRetry()` utility checks if the current run is the last attempt. Expensive operations like video capture only happen on the last retry:
+
+```typescript
+recordVideo: isLastRetry(testInfo),  // Only record video on the final attempt
+```
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://playwright.dev/docs/test-fixtures">Playwright: Test Fixtures</a> — the official fixture guide</li>
+<li><a href="https://playwright.dev/docs/pom">Playwright: Page Object Models</a> — official POM guide</li>
+<li><a href="https://playwright.dev/docs/test-parameterize">Playwright: Parameterize Tests</a> — data-driven testing patterns</li>
+<li><a href="https://playwright.dev/docs/test-parallel">Playwright: Parallelism</a> — workers and sharding</li>
+<li><a href="https://playwright.dev/docs/test-retries">Playwright: Retries</a> — retry configuration</li>
+<li><a href="https://www.typescriptlang.org/docs/handbook/decorators.html">TypeScript: Decorators</a> — the language feature behind <code>@step</code></li>
+</ul>
+</div>
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Fixtures are dependency injection for tests — declare what you need, Playwright creates it. The Page Object Model separates locators from test logic so changes propagate from a single place. The <code>@step</code> decorator wraps methods in Allure reporting steps with zero effort. Together, these patterns make a 26-file test suite manageable and a 100+ page object codebase navigable.
+</div>
+
+### 3.4.10 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Fixtures, POM & Decorators</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> How many spec files does the mobile E2E suite have?</p>
+<p><strong>Q1.</strong> In the <code>use()</code> callback pattern, what runs AFTER the test finishes?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) 26 (same as desktop)</button>
-<button class="quiz-choice" data-value="B">B) 73</button>
-<button class="quiz-choice" data-value="C">C) 184</button>
-<button class="quiz-choice" data-value="D">D) 250</button>
+<button class="quiz-choice" data-value="A">A) Everything before <code>use()</code></button>
+<button class="quiz-choice" data-value="B">B) The argument passed to <code>use()</code></button>
+<button class="quiz-choice" data-value="C">C) Everything after <code>use()</code> — this is the teardown phase</button>
+<button class="quiz-choice" data-value="D">D) Nothing — teardown must be done manually</button>
 </div>
-<p class="quiz-explanation">The mobile suite has 184 spec files covering send (68), swap (23), addAccount (17), delete (13), verify address (12), delegate (10), earn (9), settings (6), and more.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q2.</strong> Why is <code>app.init()</code> called in <code>beforeAll</code> instead of <code>beforeEach</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because Detox doesn't support <code>beforeEach</code></button>
-<button class="quiz-choice" data-value="B">B) Because the tests don't need any setup</button>
-<button class="quiz-choice" data-value="C">C) Because Jest requires it for parallel execution</button>
-<button class="quiz-choice" data-value="D">D) Because launching a native app, connecting the bridge, and populating data is expensive (10-30s) — doing it per test would be prohibitively slow</button>
-</div>
-<p class="quiz-explanation">Unlike desktop (where Playwright fixtures quickly create fresh state), mobile app launch and bridge connection take 10-30 seconds. Running this per test would make the suite impractically slow.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> What is the consequence of mobile tests sharing the app instance within a <code>describe</code> block?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Tests run faster but can't use Speculos</button>
-<button class="quiz-choice" data-value="B">B) Tests are not fully isolated — one test's side effects can affect the next</button>
-<button class="quiz-choice" data-value="C">C) Tests must be run sequentially and can never be parallelized</button>
-<button class="quiz-choice" data-value="D">D) Test results are merged into a single pass/fail outcome</button>
-</div>
-<p class="quiz-explanation">Shared state means a test that navigates to a different screen or changes a setting can affect subsequent tests. This is why test grouping (same setup = same describe) is critical in mobile E2E.</p>
+<p class="quiz-explanation">The <code>use()</code> callback splits the fixture into three phases: before <code>use()</code> = setup, the argument to <code>use()</code> = what the test gets, after <code>use()</code> = teardown. The teardown runs even if the test fails.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> What does the WebSocket bridge do that Detox cannot?</p>
+<p><strong>Q2.</strong> Why does the Ledger E2E suite import <code>test</code> from <code>"tests/fixtures/common"</code> instead of <code>"@playwright/test"</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Manipulate React Native app state (inject accounts, override feature flags, navigate programmatically)</button>
-<button class="quiz-choice" data-value="B">B) Tap on UI elements and scroll through lists</button>
-<button class="quiz-choice" data-value="C">C) Take screenshots and record video</button>
-<button class="quiz-choice" data-value="D">D) Launch the app and manage the device lifecycle</button>
+<button class="quiz-choice" data-value="A">A) The custom <code>test</code> extends Playwright's base with fixtures for Speculos, Electron, feature flags, page objects, and userdata</button>
+<button class="quiz-choice" data-value="B">B) It is a naming convention with no functional difference</button>
+<button class="quiz-choice" data-value="C">C) The standard Playwright import does not work with TypeScript</button>
+<button class="quiz-choice" data-value="D">D) To avoid a dependency on the Playwright package</button>
 </div>
-<p class="quiz-explanation">Detox handles UI interaction (tap, type, scroll) and device management. The bridge handles state injection — things like loading accounts, setting feature flags, and navigating to specific screens that would be slow or impossible via UI interaction alone.</p>
+<p class="quiz-explanation">The custom <code>test</code> from <code>common.ts</code> uses <code>base.extend&lt;TestFixtures&gt;()</code> to add 20+ custom fixtures (app, electronApp, speculos, featureFlags, userdata, etc.). Using the standard import would miss all of these.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q3.</strong> What does <code>@step("Select currency $0")</code> produce when called with <code>selectCurrency("Bitcoin")</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) An error — <code>$0</code> is not valid syntax</button>
+<button class="quiz-choice" data-value="B">B) A step named "Select currency $0" (literal)</button>
+<button class="quiz-choice" data-value="C">C) A step named "AddAccountModal.selectCurrency"</button>
+<button class="quiz-choice" data-value="D">D) A step named "Select currency Bitcoin" — <code>$0</code> is replaced with the first argument</button>
+</div>
+<p class="quiz-explanation">The <code>@step</code> decorator's implementation uses <code>message.replace(/\$(\d+)/g, (_, idx) => String(args[Number(idx)]))</code> to replace <code>$N</code> placeholders with the corresponding function arguments. <code>$0</code> becomes the first argument.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q4.</strong> In the fixture dependency graph, which fixture must be created BEFORE <code>electronApp</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>page</code> — the window must exist before the app</button>
+<button class="quiz-choice" data-value="B">B) <code>speculos</code> — the Electron app needs the Speculos port number to connect to the device</button>
+<button class="quiz-choice" data-value="C">C) <code>app</code> — the Application must be ready first</button>
+<button class="quiz-choice" data-value="D">D) No dependencies — <code>electronApp</code> is created independently</button>
+</div>
+<p class="quiz-explanation">The <code>electronApp</code> fixture sets <code>SPECULOS_API_PORT</code> as an environment variable from <code>speculos.current.port</code>. Without the Speculos container running first, the app would not know how to reach the emulated device.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> Mobile E2E build times are significantly longer than desktop. What is the approximate range?</p>
+<p><strong>Q5.</strong> Why should tests NEVER use locators directly (e.g., <code>page.getByTestId("button").click()</code>) and instead use page object methods?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) ~30 seconds (Rspack bundle)</button>
-<button class="quiz-choice" data-value="B">B) ~2 minutes (same as desktop)</button>
-<button class="quiz-choice" data-value="C">C) ~10-30 minutes (Xcode/Gradle native build)</button>
-<button class="quiz-choice" data-value="D">D) ~1 hour (full monorepo rebuild)</button>
+<button class="quiz-choice" data-value="A">A) It is slower to use locators directly</button>
+<button class="quiz-choice" data-value="B">B) Playwright does not support direct locator usage in tests</button>
+<button class="quiz-choice" data-value="C">C) If a <code>data-testid</code> changes, you update one page object method instead of every test that uses it</button>
+<button class="quiz-choice" data-value="D">D) Direct locators cannot be used with <code>expect()</code></button>
 </div>
-<p class="quiz-explanation">Mobile builds require native compilation through Xcode (iOS) or Gradle (Android), which is significantly slower than desktop's Rspack JavaScript bundle. This is why mobile CI caches build artifacts aggressively.</p>
+<p class="quiz-explanation">The POM pattern's main benefit is maintainability. When a locator changes (e.g., a <code>data-testid</code> is renamed), you update the page object once. All tests that use that method automatically get the fix. Without POM, you would update every test file.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -718,309 +1535,2062 @@ So `app.init()` runs once per describe block in `beforeAll`. All tests in that b
 
 ---
 
-## Writing Your First Mobile E2E Test
+
+## Electron -- Desktop App Testing
 
 <div class="chapter-intro">
-Time to write mobile code. This chapter mirrors Chapter 14 but for the mobile platform. You will see real mobile test patterns, the helper functions that simplify Detox interactions, and how to translate between desktop and mobile test styles. By the end, you will have a template for your first mobile E2E test.
+Ledger Live Desktop is an <strong>Electron</strong> application — a web app packaged as a native desktop program. This chapter explains what Electron is, how Playwright launches and controls it, and how the E2E fixture system bridges the two. Understanding this layer is essential because Electron introduces concepts (main process, renderer, webviews, environment variables) that do not exist in regular web testing.
 </div>
 
-### 16.1 Simple Mobile Test (No Device)
+### 3.5.1 What Is Electron?
+
+Electron is a framework that lets you build desktop applications using web technologies (HTML, CSS, JavaScript). It bundles:
+
+- **Chromium** — the same engine that powers Chrome (renders the UI)
+- **Node.js** — server-side JavaScript (for file system access, USB communication, etc.)
+
+The result: a cross-platform desktop app (macOS, Windows, Linux) built with web technologies. Slack, VS Code, Discord, and Ledger Live are all Electron apps.
+
+**Two processes:**
+- **Main process** — Node.js. Handles native things: file system, USB, system tray, window management
+- **Renderer process** — Chromium. Displays the UI. This is what Playwright controls
+
+When Playwright launches an Electron app, it gets access to the renderer process (the `Page` object) and can also interact with the main process via `electronApp.evaluate()`.
+
+### 3.5.2 How Playwright Launches the Electron App
+
+The `electronUtils.ts` file contains the `launchApp()` function:
 
 ```typescript
-describe("Language Change", () => {
-  beforeAll(async () => {
-    await app.init({
-      speculosApp: undefined,  // No device needed
-      cliCommands: [],
-      featureFlags: {},
-    });
-  });
+import { _electron as electron } from "@playwright/test";
 
-  it("should change app language to French", async () => {
-    await app.portfolio.navigateToSettings();
-    await app.settings.openGeneralSettings();
-    await app.settingsGeneral.changeLanguage("Francais");
-    await expect(element(by.text("General"))).toBeVisible();
+export async function launchApp({ env, lang, theme, userdataDestinationPath, ... }) {
+  return await electron.launch({
+    args: [
+      // The compiled app entry point
+      `${path.join(__dirname, "../../../../apps/ledger-live-desktop/.webpack/main.bundle.js")}`,
+      // Isolated userdata directory (unique per test)
+      `--user-data-dir=${userdataDestinationPath}`,
+      // Display consistency
+      "--force-device-scale-factor=1",
+      // Prevent shared memory issues in Docker
+      "--disable-dev-shm-usage",
+      // Required for CI environments
+      "--no-sandbox",
+      // Enable Chromium logging
+      "--enable-logging",
+    ],
+    env,                              // Environment variables (FEATURE_FLAGS, SPECULOS_API_PORT, etc.)
+    colorScheme: theme,               // "dark" or "light"
+    locale: lang,                     // "en-US", "fr-FR", etc.
+    executablePath: require("electron/index.js"),  // Path to the Electron binary
+    timeout: 120000,                  // 2 minutes to launch
   });
-});
+}
 ```
 
-### 16.2 Mobile Test With Speculos
+**Key points:**
+- The first `args` entry is the **webpack bundle** — the compiled Ledger Live Desktop code
+- `--user-data-dir` isolates each test's data (accounts, settings) in a unique directory
+- `env` is where feature flags, Speculos connection, and test configuration are passed
+- `require("electron/index.js")` finds the Electron binary installed by npm
+
+### 3.5.3 The Environment Variables
+
+When the `electronApp` fixture launches, it sets these environment variables:
 
 ```typescript
-const transaction = {
-  accountToDebit: Account.ETH_1,
-  accountToCredit: Account.ETH_2,
-  amount: "0.00001",
-  speed: Fee.SLOW,
+env = {
+  VERBOSE: true,                    // Enable detailed logging
+  MOCK: undefined,                  // Disable mocks (use real Speculos)
+  HIDE_DEBUG_MOCK: true,            // Hide mock indicators in UI
+  CI: process.env.CI,               // Are we in CI?
+  PLAYWRIGHT_RUN: true,             // Tell the app it is running in Playwright
+  CRASH_ON_INTERNAL_CRASH: true,    // Fail loudly on crashes
+  LEDGER_MIN_HEIGHT: 768,           // Minimum window height
+  FEATURE_FLAGS: JSON.stringify(mergedFeatureFlags),  // Feature flags JSON
+  MANAGER_DEV_MODE: true,           // Enable developer features
+  SPECULOS_API_PORT: String(speculos.current.port),   // Speculos connection
+  SPECULOS_ADDRESS: getSpeculosAddress(),              // Speculos host
+  DISABLE_TRANSACTION_BROADCAST: "1",  // Don't send real transactions
 };
-
-describe("Send ETH", () => {
-  beforeAll(async () => {
-    await app.init({
-      speculosApp: transaction.accountToDebit.currency.speculosApp,
-      cliCommands: [
-        liveDataCommand(transaction.accountToDebit),
-        getAddressCommand(transaction.accountToCredit),
-      ],
-      featureFlags: {},
-    });
-  });
-
-  afterAll(async () => {
-    await app.common.removeSpeculos();
-  });
-
-  it("should send ETH successfully", async () => {
-    await runSendTest(transaction);
-  });
-});
 ```
 
-### 16.3 Desktop to Mobile Translation
+The most important ones:
+- **`FEATURE_FLAGS`** — controls which UI features are enabled (modular drawer, Wallet 4.0, etc.)
+- **`SPECULOS_API_PORT`** — tells the app where to find the emulated device
+- **`DISABLE_TRANSACTION_BROADCAST`** — prevents tests from spending real crypto
 
-Here's a side-by-side comparison:
+### 3.5.4 `ElectronApplication` vs `Page`
 
-| Desktop (Playwright) | Mobile (Detox) |
-|---------------------|----------------|
-| `import { test } from "tests/fixtures/common"` | `import { app } from "../page"` (global) |
-| `test.describe("...", () => {` | `describe("...", () => {` |
-| `test.use({ userdata: "..." })` | `beforeAll(() => app.init({ ... }))` |
-| `test("...", async ({ app }) => {` | `it("...", async () => {` |
-| `await app.mainNavigation.openSettings()` | `await app.portfolio.navigateToSettings()` |
-| `page.getByTestId("btn")` | `element(by.id("btn"))` |
-| `page.getByTestId("btn").click()` | `element(by.id("btn")).tap()` |
-| `page.getByTestId("input").fill("text")` | `element(by.id("input")).typeText("text")` |
-| `expect(locator).toBeVisible()` | `await waitFor(element(by.id("x"))).toBeVisible().withTimeout(10000)` |
-
-### 16.4 Template: Write Your Own Mobile Test
+After launch, you have two objects:
 
 ```typescript
-import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
-
-describe("MY FEATURE NAME", () => {
-  beforeAll(async () => {
-    await app.init({
-      speculosApp: undefined,       // or account.currency.speculosApp
-      cliCommands: [],               // or [liveDataCommand(account)]
-      featureFlags: {},              // or { myFlag: { enabled: true } }
-    });
-  });
-
-  afterAll(async () => {
-    await app.common.removeSpeculos();
-  });
-
-  it("should do something", async () => {
-    await app.portfolio.waitForPortfolioPageToLoad();
-    await app.portfolio.navigateToSettings();
-    await waitForElementById("settings-screen", 10000);
-  });
-});
+const electronApp: ElectronApplication = await launchApp({ ... });
+const page: Page = await electronApp.firstWindow();
 ```
 
-### 16.5 Helper Functions Reference
+- **`electronApp`** — represents the whole application. Used for:
+  - Getting windows: `electronApp.firstWindow()`, `electronApp.windows()`
+  - Evaluating code in the main process: `electronApp.evaluate()`
+  - Closing the app: `electronApp.close()`
 
-The most commonly used helpers from `e2e/mobile/helpers/elementHelpers.ts`:
+- **`page`** — represents the main window. This is what you interact with 99% of the time:
+  - Finding elements: `page.getByTestId()`
+  - Clicking, typing, asserting: all the locator/action/assertion APIs
+  - Console logging: `page.on("console", msg => ...)`
+
+Some page objects need both — for example, `SwapPage` and `BuyAndSellPage` access webview windows through `electronApp`:
 
 ```typescript
-await tapById("send-button");                    // Tap by test ID
-await tapByText("Confirm");                      // Tap by visible text
-await typeTextById("amount-input", "0.001");     // Type into a text field
-await waitForElementById("success-msg", 30000);  // Wait for element
-await scrollToId("account-row-bitcoin");         // Scroll until element visible
-const text = await getTextOfElement("balance");  // Read text content
+export class SwapPage extends WebViewAppPage {
+  constructor(page: Page, electronApp?: ElectronApplication) {
+    super(page, electronApp);
+  }
+  // Access the webview window
+  const [, webview] = this.electronApp.windows();
+}
 ```
 
-These wrappers reduce the verbosity of raw Detox API calls and provide consistent timeout handling.
+### 3.5.5 The Application Startup Sequence
+
+After the Electron app launches, the fixture waits for it to be ready:
+
+```typescript
+// Get the first window
+const page = await electronApp.firstWindow();
+
+// Set generous timeout (CI can be slow)
+page.setDefaultTimeout(120000);
+
+// Attach network logging
+attachNetworkLogging(page, testInfo);
+
+// Record all console messages to a log file
+page.on("console", msg => {
+  safeAppendFile(logFile, `${txt}\n`);
+});
+
+// Start collecting webview logs
+const webviewCollector = new WebviewLogCollector();
+webviewCollector.start(electronApp);
+
+// Wait for the page HTML to load
+await page.waitForLoadState("domcontentloaded");
+
+// Wait for the loading screen to disappear
+await page.waitForSelector("#loader-container", { state: "hidden" });
+
+// NOW the test can start
+```
+
+The `#loader-container` is Ledger Live's splash screen. Once it disappears, the portfolio or onboarding screen is visible and the test can begin.
+
+### 3.5.6 Webviews
+
+A **webview** is an embedded browser window inside the Electron app. Ledger Live uses webviews for:
+- **Swap** — the exchange interface is a separate web app loaded in a webview
+- **Earn** — staking providers run in webviews
+- **Buy/Sell** — external payment providers
+- **Discover** — Live Apps marketplace
+
+When testing webview content, you access the webview window through `electronApp.windows()`:
+
+```typescript
+// The first window is the main app, subsequent ones are webviews
+const windows = electronApp.windows();
+const mainPage = windows[0];
+const webview = windows[1];  // The webview window
+
+// Now interact with the webview
+await webview.getByTestId("swap-amount-input").fill("0.01");
+```
+
+The `WebviewLogCollector` automatically captures console and network logs from all webviews for debugging.
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><a href="https://wix.github.io/Detox/docs/api/actions-on-element">Detox Actions API</a></li>
-<li><a href="https://wix.github.io/Detox/docs/api/expect">Detox Expect API</a></li>
-<li><a href="https://wix.github.io/Detox/docs/api/matchers">Detox Matchers</a></li>
-<li><a href="https://wix.github.io/Detox/docs/troubleshooting/running-tests">Detox Troubleshooting</a></li>
+<li><a href="https://playwright.dev/docs/api/class-electron">Playwright: Electron API</a> — full Electron testing reference</li>
+<li><a href="https://www.electronjs.org/docs/latest/">Electron: Official Documentation</a> — understanding the framework</li>
+<li><a href="https://www.electronjs.org/docs/latest/tutorial/process-model">Electron: Process Model</a> — main vs renderer process</li>
+<li><a href="https://playwright.dev/docs/api/class-electronapplication">Playwright: ElectronApplication class</a> — methods and properties</li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Mobile tests follow the same logical structure as desktop — describe block, setup, test steps, teardown. The differences are in the APIs (Detox vs Playwright) and the lifecycle (<code>app.init()</code> in <code>beforeAll</code> vs per-test fixtures). Use the helper functions to keep your tests concise and readable.
+<strong>Key takeaway:</strong> Electron bundles Chromium + Node.js into a desktop app. Playwright controls it by launching the compiled webpack bundle with isolated userdata and environment variables. The <code>page</code> object represents the main window, <code>electronApp</code> represents the whole app. Feature flags, Speculos ports, and test configuration all flow through environment variables at launch time.
 </div>
 
-### 16.6 Quiz
-
-<!-- ── Chapter 16 Quiz ── -->
+### 3.5.7 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
+<h3>Quiz — Electron Testing</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> What does the <code>--user-data-dir</code> flag do when launching the Electron app?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Sets the directory where the app binary is located</button>
+<button class="quiz-choice" data-value="B">B) Isolates each test's persistent data (accounts, settings, app.json) in a unique directory</button>
+<button class="quiz-choice" data-value="C">C) Specifies where to download updates</button>
+<button class="quiz-choice" data-value="D">D) Sets the working directory for the test runner</button>
+</div>
+<p class="quiz-explanation">Each test gets a unique UUID directory under <code>tests/artifacts/userdata/</code>. The <code>--user-data-dir</code> flag tells Electron to read/write its persistent state (like <code>app.json</code>) from that directory, ensuring complete test isolation.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> What is the purpose of <code>DISABLE_TRANSACTION_BROADCAST: "1"</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Disables network access entirely</button>
+<button class="quiz-choice" data-value="B">B) Prevents the app from connecting to Speculos</button>
+<button class="quiz-choice" data-value="C">C) Prevents the app from broadcasting real cryptocurrency transactions to the blockchain</button>
+<button class="quiz-choice" data-value="D">D) Disables test result reporting</button>
+</div>
+<p class="quiz-explanation">Without this flag, send transaction tests would actually broadcast transactions and spend real cryptocurrency (from the test seed). This flag ensures the app goes through the entire transaction flow but stops before the final broadcast step.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> How does Playwright know the app is ready for testing?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It waits for <code>domcontentloaded</code> and then waits for <code>#loader-container</code> to be hidden</button>
+<button class="quiz-choice" data-value="B">B) It uses a fixed 5-second delay</button>
+<button class="quiz-choice" data-value="C">C) It checks if the Electron process is running</button>
+<button class="quiz-choice" data-value="D">D) It sends a health check HTTP request to the app</button>
+</div>
+<p class="quiz-explanation">The fixture first waits for the HTML to load (<code>domcontentloaded</code>), then waits for the loading splash screen (<code>#loader-container</code>) to disappear. Only after both conditions are met does the test begin.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> When do you need the <code>electronApp</code> object instead of just <code>page</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Always — <code>page</code> alone is never enough</button>
+<button class="quiz-choice" data-value="B">B) Only when clicking buttons</button>
+<button class="quiz-choice" data-value="C">C) Only for taking screenshots</button>
+<button class="quiz-choice" data-value="D">D) When you need to access webview windows (Swap, Earn, Buy) or close the app</button>
+</div>
+<p class="quiz-explanation"><code>page</code> is the main window and handles 99% of interactions. <code>electronApp</code> is needed to: access additional windows (webviews), evaluate code in the main Node.js process, and close the application.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> What is the <code>FEATURE_FLAGS</code> environment variable?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A list of Playwright test tags</button>
+<button class="quiz-choice" data-value="B">B) A JSON string controlling which app features are enabled — merged from defaults, env overrides, and test-specific overrides</button>
+<button class="quiz-choice" data-value="C">C) The Firebase project configuration</button>
+<button class="quiz-choice" data-value="D">D) A comma-separated list of test file names to run</button>
+</div>
+<p class="quiz-explanation">Feature flags are JSON objects like <code>{"lldModularDrawer": {"enabled": true, "params": {...}}}</code>. They are merged from three sources: ENV (<code>E2E_FEATURE_FLAGS_JSON</code>), default flags in <code>common.ts</code>, and test-specific overrides via <code>test.use({ featureFlags: ... })</code>.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Codebase Deep Dive -- Every File Explained
+
+<div class="chapter-intro">
+This is your reference chapter. It catalogs every file in <code>e2e/desktop/tests/</code> with its purpose and how it connects to the rest of the suite. Keep this chapter open when you encounter an unfamiliar file — it will tell you what it does, why it exists, and where to look next.
+</div>
+
+### 3.6.1 Configuration Files
+
+| File | Purpose |
+|------|---------|
+| `playwright.config.ts` | Test runner configuration (covered in Ch 3.3.6) |
+| `tsconfig.json` | TypeScript config. Maps `~/*` to the desktop app source for type-checking |
+| `package.json` | Dependencies and scripts: `test:playwright`, `allure:generate`, `lint`, `typecheck` |
+| `.oxlintrc.json` | Linting rules for code quality |
+
+### 3.6.2 The Fixture File
+
+| File | Purpose |
+|------|---------|
+| `tests/fixtures/common.ts` | **The most important file.** Defines all test fixtures (covered in Ch 3.4.2-23.4) |
+
+### 3.6.3 Page Objects — The Class Hierarchy
+
+| File | Class | Extends | Purpose |
+|------|-------|---------|---------|
+| `page/abstractClasses.ts` | `PageHolder` | — | Base: holds `page` and optional `electronApp` |
+| | `Component` | `PageHolder` | Adds shared UI: `loadingSpinner`, `toaster`, `dropdownOptions` |
+| | `AppPage` | `Component` | Abstract base for all concrete page objects |
+| `page/index.ts` | `Application` | `PageHolder` | Hub: aggregates all 30+ page objects into `app.*` |
+
+### 3.6.4 Main Page Objects
+
+| File | Class | Purpose | Key Methods |
+|------|-------|---------|------------|
+| `page/portfolio.page.ts` | `PortfolioPage` | Dashboard screen | `clickAddAccountButton()`, `expectBalanceVisibility()`, `checkOperationHistory()`, `expectAccountsPersistedInAppJson()` |
+| `page/account.page.ts` | `AccountPage` | Single account detail | `clickSend()`, `clickReceive()`, `expectAccountBalance()`, `expectLastOperationsVisibility()`, `clickOnLastOperationAndReturnStatus()` |
+| `page/accounts.page.ts` | `AccountsPage` | Accounts list | `navigateToAccountByName()`, `countAccounts()`, `showParentAccountTokens()` |
+| `page/settings.page.ts` | `SettingsPage` | Settings screen | `goToAccountsTab()`, `clickHideEmptyTokenAccountsToggle()`, `changeLanguage()`, `clearCache()` |
+| `page/market.page.ts` | `MarketPage` | Market/prices | Market data and navigation |
+| `page/onboarding.page.ts` | `OnboardingPage` | First launch | `waitForLaunch()` |
+| `page/mainNavigation.page.ts` | `MainNavigationPage` | Top-level nav | `openTargetFromMainNavigation()`, `openSettings()` |
+| `page/speculos.page.ts` | `SpeculosPage` | Device control | `signSendTransaction()`, `expectValidAddressDevice()`, `shareViewKey()` |
+| `page/swap.page.ts` | `SwapPage` | Swap/exchange | Webview-based, complex flow orchestration |
+| `page/earn.dashboard.page.ts` | `EarnPage` | Earn/staking v1 | Provider navigation |
+| `page/earn.v2.dashboard.page.ts` | `EarnV2Page` | Earn/staking v2 | New earn UI |
+| `page/buyAndSell.page.ts` | `BuyAndSellPage` | Buy/Sell | External provider integration |
+| `page/liveApp.page.ts` | `LiveApp` | Discover/marketplace | App launching |
+| `page/lockscreen.page.ts` | `LockscreenPage` | Lock screen | `login()`, `checkInputErrorVisibility()` |
+
+### 3.6.5 Component Classes
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `component/layout.component.ts` | `Layout` | Sidebar buttons (Portfolio, Market, Accounts, etc.) and topbar buttons (Sync, Settings, Notifications) |
+| `component/drawer.component.ts` | `Drawer` | Generic side panel: `waitForDrawerToBeVisible()`, `closeDrawer()`, `selectAccountByName()` |
+| `component/modal.component.ts` | `Modal` | Generic modal: `continue()`, `close()`, `toggleMaxAmount()`, `scrollUntilOptionIsDisplayed()` |
+| `component/dialog.component.ts` | `Dialog` | Generic modular dialog |
+
+### 3.6.6 Modal, Drawer, and Dialog Objects
+
+**Modals** (overlay windows):
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `modal/add.account.modal.ts` | `AddAccountModal` | Account creation (legacy flow) |
+| `modal/send.modal.ts` | `SendModal` | Send transaction |
+| `modal/new.send.modal.ts` | `NewSendModal` | Send transaction (Wallet 4.0) |
+| `modal/receive.modal.ts` | `ReceiveModal` | Receive address display |
+| `modal/delegate.modal.ts` | `DelegateModal` | Staking delegation |
+| `modal/settings.modal.ts` | `SettingsModal` | App settings |
+| `modal/passwordlock.modal.ts` | `PasswordlockModal` | Password setup/login |
+| `modal/private.balance.modal.ts` | `PrivateBalanceModal` | Privacy feature |
+
+**Drawers** (side panels):
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `drawer/send.drawer.ts` | `SendDrawer` | Send confirmation details |
+| `drawer/operation.drawer.ts` | `OperationDrawer` | Transaction details |
+| `drawer/asset.drawer.ts` | `AssetDrawer` | Asset information |
+| `drawer/delegate.drawer.ts` | `DelegateDrawer` | Delegation details |
+| `drawer/swap.confirmation.drawer.ts` | `SwapConfirmationDrawer` | Swap verification |
+| `drawer/ledger.sync.drawer.ts` | `LedgerSyncDrawer` | Cloud sync |
+| `drawer/modular.scan.accounts.drawer.ts` | `ModularScanAccountsDrawer` | Device account scanning |
+| `drawer/choose.asset.drawer.ts` | `ChooseAssetDrawer` | Multi-asset selection |
+
+**Dialogs** (new modular UI):
+
+| File | Class | Purpose |
+|------|-------|---------|
+| `dialog/modular.dialog.ts` | `ModularDialog` | Routes to asset/network/account dialogs |
+| `dialog/modular.asset.dialog.ts` | `ModularAssetDialog` | Asset selection in new UI |
+| `dialog/modular.network.dialog.ts` | `ModularNetworkDialog` | Network selection in new UI |
+| `dialog/modular.account.dialog.ts` | `ModularAccountDialog` | Account selection in new UI |
+| `dialog/fearGreed.dialog.ts` | `FearAndGreedDialog` | Market sentiment |
+
+### 3.6.7 Utility Files
+
+| File | Purpose |
+|------|---------|
+| `utils/allureUtils.ts` | Allure helpers: `addTmsLink()`, `captureArtifacts()`, `addTeamOwner()` |
+| `utils/speculosUtils.ts` | `launchSpeculos()`, `cleanSpeculos()` |
+| `utils/electronUtils.ts` | `launchApp()` — Electron launch configuration |
+| `utils/featureFlagUtils.ts` | `isWallet40Enabled()`, flag presets |
+| `utils/featureFlagsJsonUtils.ts` | `parseExtraFeatureFlags()` — parse `E2E_FEATURE_FLAGS_JSON` |
+| `utils/cliUtils.ts` | `CLI.getAddress()`, `CLI.liveData()`, `CLI.tokenApproval()` |
+| `utils/customJsonReporter.ts` | Xray JSON report generation |
+| `utils/global.setup.ts` | Runs once before all tests: clean artifacts, get firmware version |
+| `utils/global.teardown.ts` | Runs once after all tests (CI): extract feature flags to env properties |
+| `utils/redux.ts` | `listenToReduxActions()`, `waitForReduxAction()` — state tracking |
+| `utils/userdata.ts` | `getUserdata()`, `waitForAccountsPersisted()` — app.json polling |
+| `utils/fileUtils.ts` | `safeAppendFile()`, `waitForFileToExist()`, file operations |
+| `utils/modularSelectorUtils.ts` | `getModularSelector()` — detects modular vs legacy UI |
+| `utils/networkLogging.ts` | `attachNetworkLogging()` — captures request failures |
+| `utils/webviewLogCollector.ts` | Collects console and network logs from webviews |
+| `utils/swapUtils.ts` | Swap test orchestration helpers |
+| `utils/waitFor.ts` | Custom wait helpers |
+| `utils/testInfoUtils.ts` | `isLastRetry()` and TestInfo helpers |
+
+### 3.6.8 Userdata JSON Files
+
+These are pre-configured app states that bypass setup steps:
+
+| File | State | Use When |
+|------|-------|----------|
+| `skip-onboarding.json` | Onboarding complete, no accounts | Testing account creation flows |
+| `skip-onboarding-with-last-seen-device.json` | Onboarding complete, device remembered | Most tests — skips device pairing |
+| `1AccountBTC1AccountETH.json` | Has 1 BTC + 1 ETH account | Testing with existing portfolio |
+| `1AccountDOT.json` | Has 1 Polkadot account | Polkadot-specific tests |
+| `speculos-tests-app.json` | Full Speculos test suite data | Complex multi-account tests |
+| `speculos-subAccount.json` | Parent + token accounts | Token/sub-account tests |
+| `erc20-0-balance.json` | ERC20 tokens with 0 balance | Token visibility tests |
+| `portfolioWithManyStablecoins.json` | Many stablecoin accounts | Performance/pagination tests |
+| `swap-history.json` | Pre-populated swap history | Swap history display tests |
+
+### 3.6.9 Test Data Enums (from `@ledgerhq/live-common`)
+
+| Enum | Location | Purpose |
+|------|----------|---------|
+| `Currency` | `live-common/e2e/enum/Currency` | Cryptocurrency definitions with `speculosApp`, `ticker`, `id`, `name` |
+| `Account` | `live-common/e2e/enum/Account` | Pre-defined accounts with addresses and currency references |
+| `AppInfos` | `live-common/e2e/enum/AppInfos` | Speculos app names and versions |
+| `Team` | `live-common/e2e/enum/Team` | Team names for Allure ownership |
+| `Device` | `live-common/e2e/enum/Device` | Device model identifiers |
+| `Fee` | `live-common/e2e/enum/Fee` | Fee strategies: SLOW, MEDIUM, FAST |
+
+### 3.6.10 The Modular Dialog System
+
+The codebase supports both **legacy** and **new modular** UI flows. The `getModularSelector()` function detects which is active:
+
+```typescript
+// From modularSelectorUtils.ts
+export async function getModularSelector(app, type: "ASSET" | "ACCOUNT") {
+  try {
+    // Wait up to 5 seconds for the modular dialog to appear
+    await app.modularDialog.waitForDialogToBeVisible(type, 5000);
+    return app.modularDialog;  // New UI is active
+  } catch {
+    return null;  // Fall back to legacy UI
+  }
+}
+```
+
+In tests, this creates a dual-path pattern:
+
+```typescript
+const selector = await getModularSelector(app, "ASSET");
+if (selector) {
+  // New modular flow
+  await selector.selectAssetByTicker(Currency.BTC);
+  await selector.selectNetwork(Currency.BTC);
+} else {
+  // Legacy modal flow
+  await app.addAccount.selectCurrency(Currency.BTC);
+}
+```
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> This chapter is your map. When you encounter an unfamiliar file, check the tables above to understand its role. The codebase has three layers: <strong>page objects</strong> (50+ files that encapsulate UI interactions), <strong>test specs</strong> (26 files that define test scenarios), and <strong>utilities</strong> (20+ files that handle infrastructure). The modular dialog system adds a dual-path pattern you will see in many tests.
+</div>
+
+### 3.6.11 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Codebase Deep Dive</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q1.</strong> What is the difference between <code>Modal</code>, <code>Drawer</code>, and <code>Dialog</code> in the codebase?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>Modal</code> is a centered overlay window, <code>Drawer</code> is a side panel that slides in, <code>Dialog</code> is the new modular UI system</button>
+<button class="quiz-choice" data-value="B">B) They are all the same thing with different names</button>
+<button class="quiz-choice" data-value="C">C) <code>Modal</code> is for errors, <code>Drawer</code> is for forms, <code>Dialog</code> is for confirmations</button>
+<button class="quiz-choice" data-value="D">D) <code>Modal</code> is legacy, <code>Drawer</code> and <code>Dialog</code> are the same new UI</button>
+</div>
+<p class="quiz-explanation">The three types represent different UI patterns: Modals are centered overlays (e.g., Add Account), Drawers slide in from the side (e.g., Operation details), and Dialogs are the newest modular UI system that replaces some legacy flows.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q2.</strong> What does <code>getModularSelector()</code> return when the new modular UI is NOT active?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) An error is thrown</button>
+<button class="quiz-choice" data-value="B">B) An empty object</button>
+<button class="quiz-choice" data-value="C">C) The legacy modal instance</button>
+<button class="quiz-choice" data-value="D">D) <code>null</code> — the test then uses the legacy flow</button>
+</div>
+<p class="quiz-explanation"><code>getModularSelector()</code> waits up to 5 seconds for the modular dialog. If it does not appear, it returns <code>null</code>, signaling the test to use the legacy modal flow. This creates the <code>if (selector) { ... } else { ... }</code> pattern.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q3.</strong> What is the purpose of the <code>skip-onboarding-with-last-seen-device.json</code> userdata file?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It creates a test account with Bitcoin</button>
+<button class="quiz-choice" data-value="B">B) It installs the Speculos app</button>
+<button class="quiz-choice" data-value="C">C) It provides pre-configured app state where onboarding is complete and the app remembers the last connected device</button>
+<button class="quiz-choice" data-value="D">D) It sets feature flags for the test</button>
+</div>
+<p class="quiz-explanation">Userdata files are Redux state snapshots. <code>skip-onboarding-with-last-seen-device</code> has <code>hasCompletedOnboarding: true</code> and remembers the last device. This is the most commonly used userdata because it skips the onboarding flow and device pairing, going straight to the portfolio.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q4.</strong> Which page objects receive <code>electronApp</code> in addition to <code>page</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) All page objects receive both</button>
+<button class="quiz-choice" data-value="B">B) Only those that need webview access: <code>SwapPage</code>, <code>BuyAndSellPage</code>, <code>EarnPage</code>, <code>EarnV2Page</code></button>
+<button class="quiz-choice" data-value="C">C) Only <code>SpeculosPage</code></button>
+<button class="quiz-choice" data-value="D">D) None — all use only <code>page</code></button>
+</div>
+<p class="quiz-explanation">In <code>page/index.ts</code>, most page objects are created with <code>new XxxPage(this.page)</code>. But Swap, Buy/Sell, and Earn need <code>new XxxPage(this.page, this.electronApp)</code> because they interact with webview windows, which require access to the ElectronApplication to get additional windows.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q5.</strong> Where do the <code>Currency</code>, <code>Account</code>, and <code>Team</code> enums live?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) In <code>@ledgerhq/live-common/e2e/enum/</code> — shared between desktop and mobile E2E suites</button>
+<button class="quiz-choice" data-value="B">B) In <code>e2e/desktop/tests/testdata/</code> — desktop-only</button>
+<button class="quiz-choice" data-value="C">C) In <code>playwright.config.ts</code></button>
+<button class="quiz-choice" data-value="D">D) In each individual test file</button>
+</div>
+<p class="quiz-explanation">Test data enums are defined in <code>@ledgerhq/live-common/e2e/enum/</code>, a shared package in the monorepo. This means both desktop and mobile E2E suites use the same currency, account, and team definitions, ensuring consistency.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Your Daily Workflow -- From Ticket to PR
+
+<div class="chapter-intro">
+You know the concepts, the architecture, and the codebase. Now it is time to learn the <strong>workflow</strong> — the exact sequence of steps from receiving a Jira ticket to having a merged PR. This chapter is procedural: follow these steps every time you work on an E2E test ticket.
+</div>
+
+### 3.7.1 Step 1: Read the Jira Ticket
+
+Every E2E task starts with a Jira ticket (e.g., `QAA-1139`). Read it carefully:
+
+- **What does it ask?** "Automate test X on desktop"
+- **Which Xray test cases?** Look for `B2CQA-XXXX` IDs — these are the test cases to link
+- **Is there a mobile reference?** Check if the test already exists in `e2e/mobile/`
+- **Which coins/devices?** The ticket or Xray case specifies supported platforms
+
+### 3.7.2 Step 2: Check What Already Exists
+
+Before writing anything, search the codebase:
+
+```bash
+# Search for similar test names
+grep -r "Add account" e2e/desktop/tests/specs/
+
+# Search for the currency
+grep -r "Currency.BTC" e2e/desktop/tests/specs/
+
+# Search for the Xray ticket
+grep -r "B2CQA-786" e2e/desktop/tests/
+
+# Check existing page objects for the feature
+ls e2e/desktop/tests/page/modal/
+ls e2e/desktop/tests/page/drawer/
+```
+
+You may find the test already partially exists, or that page objects already cover the flow.
+
+### 3.7.3 Step 3: Set Up Your Environment
+
+Run through this checklist before writing code:
+
+```bash
+# 1. Environment variables
+export MOCK=0
+export SPECULOS_DEVICE=nanoSP
+export SEED="your test seed phrase"
+export COINAPPS="/path/to/coin-apps"
+export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:master
+
+# 2. Docker is running
+docker info  # Should not error
+
+# 3. Update coin-apps
+cd $COINAPPS && git pull origin develop && cd -
+
+# 4. Install dependencies
+pnpm i
+
+# 4b. If CocoaPods lockfile error (mobile only):
+# You will see a cow ASCII art saying "CocoaPods lockfile is probably out of sync"
+rm -rf ~/.cocoapods/
+cd apps/ledger-live-mobile/ios/
+bundle install
+cd ../../..
+pnpm mobile pod
+# Then retry: pnpm i
+
+# 5. Build the app for testing
+pnpm build:lld:deps
+pnpm desktop build:testing
+
+# 6. Install Playwright dependencies
+pnpm e2e:desktop test:playwright:setup
+```
+
+### 3.7.4 Step 4: Explore the App Manually
+
+Launch the app and manually perform the flow you are automating:
+
+```bash
+pnpm desktop dev  # Launch in development mode
+```
+
+- Navigate to the feature
+- Open DevTools (`Cmd+Shift+I` on macOS, `Ctrl+Shift+I` on Linux/Windows)
+- Use the Elements panel to find `data-testid` attributes
+- Note which UI pattern is used: modal, drawer, or modular dialog
+- Write down the sequence of user actions
+
+### 3.7.5 Step 5: Plan Your Test Structure
+
+Before writing code, decide:
+
+| Decision | Options | How to Decide |
+|----------|---------|---------------|
+| **Userdata** | `skip-onboarding`, `skip-onboarding-with-last-seen-device`, etc. | Does your test need existing accounts? |
+| **speculosApp** | `Currency.BTC.speculosApp`, etc. | Which blockchain does the test interact with? |
+| **cliCommands** | `liveDataCommand(account)` or empty | Does the test need pre-populated account data? |
+| **featureFlags** | Specific overrides or none | Does the test need non-default features? |
+| **teamOwner** | `Team.WALLET_XP`, `Team.QAA`, etc. | Which team owns this feature? |
+| **Tags** | Device + currency + family + scope | Which devices and currencies does this test support? |
+
+### 3.7.6 Step 6: Write the Test
+
+Use this template:
+
+```typescript
+import { test } from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+
+test.describe("YOUR FEATURE", () => {
+  test.use({
+    teamOwner: Team.QAA,
+    userdata: "skip-onboarding-with-last-seen-device",
+    speculosApp: Currency.BTC.speculosApp,
+  });
+
+  test("YOUR TEST DESCRIPTION", {
+    tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+          "@bitcoin", "@family-bitcoin"],
+    annotation: { type: "TMS", description: "B2CQA-XXXX" },
+  }, async ({ app, userdataFile }) => {
+    await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+    // YOUR TEST STEPS HERE
+    await app.portfolio.clickAddAccountButton();
+    // ... more steps ...
+  });
+});
+```
+
+### 3.7.7 Step 7: Run Locally
+
+```bash
+# Run your specific test file
+pnpm e2e:desktop test:playwright your.spec.ts
+
+# Or filter by test name (alternative):
+pnpm e2e:desktop test:playwright --grep "YOUR TEST DESCRIPTION"
+
+# Run with debug mode (step-by-step) — see Chapter 3.3.8
+PWDEBUG=1 pnpm e2e:desktop test:playwright your.spec.ts
+
+# Run with single worker (easier to debug)
+pnpm e2e:desktop test:playwright your.spec.ts -- --workers=1
+```
+
+### 3.7.8 Step 8: Verify Stability
+
+**Run the test at least 3 times.** A test that passes once but fails on subsequent runs is **flaky** — and flaky tests are worse than no tests.
+
+```bash
+# Run 3 times
+for i in 1 2 3; do
+  echo "--- Run $i ---"
+  pnpm e2e:desktop test:playwright your.spec.ts
+done
+```
+
+Common flakiness causes:
+- Race conditions (element not ready)
+- Dynamic data (amounts change)
+- Network timing (API responses vary)
+- Selector instability (using text instead of testId)
+
+### 3.7.9 Step 9: Check the Allure Report
+
+```bash
+cd e2e/desktop
+allure serve allure-results
+```
+
+Verify:
+- Steps appear correctly in the report
+- TMS links are clickable and correct
+- Team ownership is set
+- Tags are correct
+- No unexpected warnings or errors
+
+### 3.7.10 Step 10: Commit, Push, Create PR
+
+```bash
+# Sync with develop and install dependencies
+git pull
+pnpm i
+# If install fails:
+pnpm clean
+pnpm i
+
+# Create a branch (following naming convention from Chapter 6)
+git checkout -b test/qaa-XXXX    # Replace XXXX with your Jira ticket number
+
+# Stage your changes
+git add e2e/desktop/tests/specs/your.spec.ts
+
+# Commit with conventional commit format (see Chapter 6.3)
+git commit -m "test(e2e): add first-time BTC account test for desktop"
+```
+
+Then use the Claude Code `/create-pr` command to create the PR with the correct structure:
+
+```
+/create-pr
+```
+
+This command will ask for your ticket URL, description, change type, scope, and test coverage. It creates a changeset, generates a structured PR body, pushes, creates a **draft PR**, and opens it in your browser. See Chapter 3.8.9 for a full walkthrough.
+
+**After the draft PR is created:**
+
+1. **Mark as ready** — In GitHub, click **"Ready for review"** at the bottom of the PR page to publish it
+2. **Merge after approval** — Once CI passes and the PR is approved, click the **"Merge pull request"** button in GitHub to merge your branch into `develop`
+3. **Update Xray** — If your change added or linked `xrayTicket` IDs (new or existing test), go to Xray in Jira:
+   - Search for the B2CQA ticket number (e.g., `B2CQA-786`)
+   - Set the **Status** flag to **Automated**
+   - In the **Automated In** field, specify the scope: `LLD` (Ledger Live Desktop), `LLM` (Ledger Live Mobile), `LLC` (Live Common), `Live App`, etc.
+4. Move the QAA Jira ticket to **Done** and add a comment linking the PR
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://playwright.dev/docs/debug">Playwright: Debugging</a> — PWDEBUG mode and trace viewer</li>
+<li><a href="https://playwright.dev/docs/test-ui-mode">Playwright: UI Mode</a> — interactive test debugging</li>
+<li><a href="https://www.conventionalcommits.org/">Conventional Commits</a> — commit message format</li>
+</ul>
+</div>
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> The workflow is always the same: Read ticket → Check existing code → Set up environment → Explore manually → Plan fixtures → Write test → Run locally → Verify stability (3x) → Check Allure → Commit and PR. Following this sequence every time prevents common mistakes like missing TMS links, wrong userdata, or flaky tests.
+</div>
+
+### 3.7.11 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Daily Workflow</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> How many times should you run a new test locally before considering it stable?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) 1 time — if it passes, it is stable</button>
+<button class="quiz-choice" data-value="B">B) At least 3 times — to catch intermittent failures</button>
+<button class="quiz-choice" data-value="C">C) 10 times — the more the better</button>
+<button class="quiz-choice" data-value="D">D) 0 times — CI will catch issues</button>
+</div>
+<p class="quiz-explanation">The wiki explicitly states: "Run test at least 3 times to ensure it is not flaky." A test that passes once but fails intermittently is worse than no test — it creates false alarms in CI and erodes trust in the suite.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q2.</strong> Before writing a new test, what should you check first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Whether the test or similar coverage already exists in the codebase</button>
+<button class="quiz-choice" data-value="B">B) Whether Playwright is installed</button>
+<button class="quiz-choice" data-value="C">C) Whether the CI pipeline is running</button>
+<button class="quiz-choice" data-value="D">D) Whether the Jira ticket has been assigned to you</button>
+</div>
+<p class="quiz-explanation">Always search the existing specs first. The test may already exist (just needs a new TMS link), or the page objects may already cover the flow (you just need to compose them). Duplicate coverage wastes maintenance effort.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q3.</strong> What is the correct commit message format for a new E2E test?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>Added new test for BTC account</code></button>
+<button class="quiz-choice" data-value="B">B) <code>fix: add BTC account test</code></button>
+<button class="quiz-choice" data-value="C">C) <code>WIP: BTC test</code></button>
+<button class="quiz-choice" data-value="D">D) <code>test(e2e): add first-time BTC account test for desktop</code></button>
+</div>
+<p class="quiz-explanation">The repo uses Conventional Commits: <code>&lt;type&gt;(&lt;scope&gt;): &lt;description&gt;</code>. For new tests, use <code>test(e2e):</code>. This format is required for consistent changelogs and CI automation.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q4.</strong> Which tool do you use to find <code>data-testid</code> attributes on a screen?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The Allure report</button>
+<button class="quiz-choice" data-value="B">B) The Playwright CLI</button>
+<button class="quiz-choice" data-value="C">C) The browser DevTools (Elements panel) in the running Electron app</button>
+<button class="quiz-choice" data-value="D">D) The Speculos REST API</button>
+</div>
+<p class="quiz-explanation">Launch the Ledger Live Desktop app (<code>pnpm desktop dev</code>), open DevTools with <code>Cmd+Shift+I</code>, and use the Elements panel to inspect DOM elements and find their <code>data-testid</code> attributes.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> What is the purpose of <code>PWDEBUG=1</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It enables verbose Speculos logging</button>
+<button class="quiz-choice" data-value="B">B) It opens the Playwright Inspector, pausing before each action so you can step through the test interactively</button>
+<button class="quiz-choice" data-value="C">C) It writes debug information to a file</button>
+<button class="quiz-choice" data-value="D">D) It disables timeouts</button>
+</div>
+<p class="quiz-explanation"><code>PWDEBUG=1</code> opens the Playwright Inspector — a GUI tool that shows the test's actions step by step. You can pause, resume, inspect locators, and see what the test sees. This is the most powerful debugging tool for E2E tests.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Real Ticket Walkthrough -- QAA-1139 (Add Account BTC)
+
+<div class="chapter-intro">
+This is your capstone chapter. Everything you learned in Chapters 22-28 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
+</div>
+
+### 3.8.1 Understanding the Ticket
+
+**Jira ticket:** QAA-1139
+**Xray test case:** B2CQA-786
+**Description:** "Add account when no account exists before (BTC)" — a first-time add account flow for Bitcoin on Desktop
+
+**What this means:**
+1. The app starts with NO existing accounts (empty portfolio)
+2. The user adds a BTC account for the first time
+3. The test verifies the account appears in the portfolio and account list
+
+**Context:** This test already exists in mobile (`e2e/mobile/specs/addAccount/addAccountBTC.spec.ts`). We need to ensure the desktop version also links the Xray test case.
+
+#### What Are Xray Tickets?
+
+**Xray** is a test management plugin for Jira. It extends Jira with dedicated issue types for testing: **Test**, **Test Execution**, **Test Plan**, and **Test Set**. In our workflow, two types of Jira tickets matter:
+
+| Ticket type | Example | Purpose |
+|---|---|---|
+| **QAA ticket** | `QAA-1139` | A work item — "automate this test", "fix this flaky test", etc. |
+| **Xray test case** (B2CQA) | `B2CQA-786` | A test scenario — "Add account when no account exists (BTC)". Lives in Xray. |
+
+The `QAA-1139` ticket tells you **what to do**. The `B2CQA-786` test case tells you **what the test should verify**.
+
+#### How `xrayTicket` Strings Flow to Xray and Allure
+
+In the test code, each currency entry has an `xrayTicket` field — a comma-separated string of B2CQA IDs:
+
+```typescript
+{ currency: Currency.BTC, xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073" }
+```
+
+Here is how this string flows through the system:
+
+1. **Test runs** → the framework reads the `xrayTicket` string and calls `addTmsLink()` for each ID
+2. **Allure collects** → each ID appears as a **TMS link** (Test Management System) in the Allure report
+3. **CI uploads** → the `allure-results/` directory is uploaded to the Allure server after each CI run
+4. **Xray reads** → Xray imports the Allure results and updates the execution status of each B2CQA test case (pass/fail)
+5. **Traceability** → stakeholders can now trace: Jira ticket → Xray test case → automated test → CI execution → report
+
+#### Why Linking Matters
+
+- **Coverage tracking** — PMs and QA leads see which Xray test cases have automation in the Xray coverage dashboard
+- **Test execution linking** — each CI run automatically updates Xray with pass/fail per test case
+- **Gap analysis** — if a B2CQA ID is missing from the code, the test runs but **doesn't report to Xray** — it is invisible coverage
+
+In this ticket, `B2CQA-786` exists in the mobile test's ticket list but is **missing** from the desktop test. That is the gap we need to close.
+
+### 3.8.2 Analyzing Existing Coverage
+
+The existing `add.account.spec.ts` already tests adding BTC:
+
+```typescript
+const currencies = [
+  { currency: Currency.BTC, xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073" },
+  // ... 17 more currencies
+];
+
+for (const currency of currencies) {
+  test.describe("Add Accounts", () => {
+    test.use({
+      userdata: "skip-onboarding-with-last-seen-device",
+      speculosApp: currency.currency.speculosApp,
+    });
+    test(`[${currency.currency.name}] Add account`, ...);
+  });
+}
+```
+
+The existing test uses `userdata: "skip-onboarding-with-last-seen-device"` which starts with **zero accounts** (empty portfolio). It clicks "Add Account", selects BTC, completes the flow, and verifies the account appears. This is exactly the "first time add account" scenario that `B2CQA-786` describes.
+
+**Conclusion:** We do not need a new test. The existing test already covers the scenario — we just need to add `B2CQA-786` to the `xrayTicket` string so Xray knows this test case is covered.
+
+> **Note:** The mobile reference at `e2e/mobile/specs/addAccount/addAccountBTC.spec.ts` already has `B2CQA-786` in its `tmsLinks` array. The desktop test is the only one missing it.
+
+### 3.8.3 Create a Branch
+
+Following the branch naming convention from Chapter 6, create a branch from `develop`:
+
+```bash
+git checkout develop
+git pull
+pnpm i
+# If install fails:
+pnpm clean
+pnpm i
+
+git checkout -b test/qaa-1139
+```
+
+The branch name uses the `<prefix>/qaa-<jira_ticket_number>` pattern. Since this ticket adds test coverage, the `test/` prefix is appropriate.
+
+### 3.8.4 Run the Test in Isolation
+
+Before touching any code, run the existing BTC add account test to build your mental model and create a baseline.
+
+**Prerequisites** (one-time setup — skip if already done):
+```bash
+# Ensure Docker is running (Speculos needs it)
+docker info
+
+# Set environment variables in your shell (e.g. ~/.zshrc)
+export MOCK=0
+export COINAPPS="/path/to/coin-apps"        # your local coin-apps clone
+export SEED="your 24-word test seed"
+export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:master"
+export SPECULOS_DEVICE="nanoSP"
+
+# Build the desktop app for testing
+pnpm i
+pnpm build:lld:deps
+pnpm build:cli
+pnpm desktop build:testing
+pnpm e2e:desktop test:playwright:setup      # Install Playwright browsers
+```
+
+**Run the test file:**
+```bash
+cd e2e/desktop
+pnpm test:playwright add.account.spec.ts
+```
+
+This runs ALL currencies in the file. To isolate just the BTC test, you have two options:
+
+**Option A — Grep filter** (quick, no code changes):
+```bash
+pnpm test:playwright --grep "Bitcoin.*Add account"
+```
+
+**Option B — Comment out other currencies** (most isolated, recommended for debugging):
+Edit `add.account.spec.ts` and temporarily comment out all entries except BTC in the `currencies` array, then run the whole file. Remember to restore the file after.
+
+> **Tip:** Use Playwright's debug mode to step through the test visually — see Chapter 3.3.8 for details:
+> ```bash
+> PWDEBUG=1 pnpm test:playwright add.account.spec.ts
+> ```
+
+**What you should observe:**
+1. Playwright launches Electron (Ledger Live Desktop)
+2. The app starts with empty portfolio (no accounts)
+3. The test clicks "Add Account" → modular drawer opens
+4. BTC is selected → Speculos scans and finds "Bitcoin 1"
+5. Account is added → portfolio shows balance and operations
+6. Navigation to Accounts → Bitcoin 1 → verifies details
+7. Test passes
+
+### 3.8.5 Implement the Change
+
+Open `e2e/desktop/tests/specs/add.account.spec.ts` and add `B2CQA-786` to the BTC entry's `xrayTicket` string:
+
+```typescript
+const currencies = [
+  {
+    currency: Currency.BTC,
+    xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073, B2CQA-786",
+    //                                                              ^^^^^^^^^^
+    //                                                    Added B2CQA-786 here
+  },
+```
+
+That is the only code change. The `xrayTicket` field is a comma-separated string — the framework's `addTmsLink()` helper splits it and registers each ID with Allure. After this change, `B2CQA-786` will appear in the Allure report and flow to Xray on the next CI run.
+
+### 3.8.6 Rerun the Tests
+
+Run the test again to confirm your change did not break anything:
+
+```bash
+pnpm test:playwright add.account.spec.ts
+```
+
+Then run it at least 3 times for stability:
+```bash
+pnpm test:playwright --grep "Bitcoin.*Add account" --repeat-each=3
+```
+
+All 3 runs should pass. If any run fails, investigate — it may be a flaky test or an environment issue (Docker not running, Speculos timeout, etc.). You only changed metadata, not behavior, so failures indicate an existing issue.
+
+### 3.8.7 Verify with Allure
+
+Generate and open the Allure report to confirm the new ticket ID appears:
+
+**Option A — Serve directly (recommended for quick checks):**
+```bash
+allure serve allure-results
+```
+
+**Option B — Generate a persistent report:**
+```bash
+pnpm allure:generate
+open allure-report/index.html        # macOS
+```
+
+In the report, navigate to **Suites** → **Add Accounts** → **[Bitcoin] Add account** and check the **Links** section. You should now see:
+- `B2CQA-2499`
+- `B2CQA-2644`
+- `B2CQA-2672`
+- `B2CQA-2073`
+- `B2CQA-786` — **this is the new one you just added**
+
+Each link is clickable and points to the Xray test case in Jira. If you ran the test before your change (in step 29.4), compare the reports — `B2CQA-786` was missing before and is now present.
+
+Press `Ctrl+C` in the terminal to stop the Allure server when done.
+
+### 3.8.8 Commit the Change
+
+Stage and commit following the Conventional Commits format from Chapter 6:
+
+```bash
+git add e2e/desktop/tests/specs/add.account.spec.ts
+git commit -m "test(e2e): link B2CQA-786 to BTC add account test on desktop"
+```
+
+The commit type is `test` (adding test coverage), the scope is `e2e`, and the description explains what was done and why.
+
+### 3.8.9 Create the PR with Claude Code
+
+The team uses a Claude Code command to create PRs with the correct structure, changeset, and Slack announcement. In your terminal, run:
+
+```
+/create-pr
+```
+
+Claude Code will ask you for:
+
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1139`
+2. **Ticket description** — "Link Xray test case B2CQA-786 to existing BTC add account test on desktop"
+3. **Change type** — `test`
+4. **Change scope** — `e2e/desktop`
+5. **Test coverage** — `yes` (the change itself is test metadata)
+6. **QA focus areas** — "BTC add account test, Allure TMS links"
+7. **UI changes** — `no`
+
+The command then:
+1. Reads `.claude/rules/git-workflow.md` to enforce commit conventions
+2. Creates a **changeset** via the `create-changeset` skill
+3. Generates a structured PR body with checklist, description, and context link
+4. Pushes the branch and creates a **draft PR** via `gh pr create --draft`
+5. Opens the PR in your browser
+6. Generates a Slack announcement via the `slack-pr-message` skill
+
+> **Reference:** The full `/create-pr` command is defined in `~/.claude/commands/create-pr.md`. It uses:
+> - `~/.claude/rules/git-workflow.md` — commit and branch naming conventions
+> - `~/.claude/skills/slack-pr-message/SKILL.md` — Slack message formatting
+
+### 3.8.10 Mark the PR as Ready and Merge
+
+After CI passes and your PR has been reviewed:
+
+1. In GitHub, navigate to your draft PR
+2. Click **"Ready for review"** at the bottom of the PR page — this publishes the PR and makes it mergeable
+3. Once the PR is approved, click the **"Merge pull request"** button in GitHub to merge your branch into `develop`
+4. **Update Xray:** Since you added `B2CQA-786` to an `xrayTicket` string, go to Xray in Jira:
+   - Search for `B2CQA-786`
+   - Set the **Status** flag to **Automated**
+   - In the **Automated In** field, select **LLD** (Ledger Live Desktop)
+5. Move `QAA-1139` to **Done** in Jira and add a comment: "Linked B2CQA-786 to existing desktop BTC add account test in PR #XXXX"
+6. The next CI run will automatically upload Allure results to Xray, updating `B2CQA-786` with the test execution status
+
+### 3.8.11 Reference: Writing a New Test from Scratch
+
+For this ticket, we only needed to add a ticket ID to an existing test. But for cases where a new test file is required, here is the full template with all patterns you need:
+
+```typescript
+import { test } from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+import { getModularSelector } from "tests/utils/modularSelectorUtils";
+
+test.describe("Add Account - First Time BTC", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,
+    userdata: "skip-onboarding-with-last-seen-device",  // No existing accounts
+    speculosApp: Currency.BTC.speculosApp,               // Bitcoin device app
+  });
+
+  test(
+    "Add BTC account when no account exists (first time)",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+            "@bitcoin", "@family-bitcoin"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-786",
+      },
+    },
+    async ({ app, userdataFile }) => {
+      // Link to Xray
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+      // Step 1: From empty portfolio, click Add Account
+      await app.portfolio.clickAddAccountButton();
+
+      // Step 2: Select BTC (modular dialog or legacy)
+      const selector = await getModularSelector(app, "ASSET");
+      if (selector) {
+        await selector.selectAssetByTicker(Currency.BTC);
+        await selector.selectNetwork(Currency.BTC);
+        await app.scanAccountsDrawer.selectFirstAccount();
+        await app.scanAccountsDrawer.clickCloseButton();
+      } else {
+        await app.addAccount.expectModalVisibility();
+        await app.addAccount.selectCurrency(Currency.BTC);
+        await app.addAccount.addAccounts();
+        await app.addAccount.done();
+      }
+
+      // Step 3: Verify account was created
+      await app.portfolio.expectBalanceVisibility();
+      await app.portfolio.expectAccountsPersistedInAppJson(userdataFile, 1, 5000);
+
+      // Step 4: Navigate to the new account
+      await app.mainNavigation.openTargetFromMainNavigation("accounts");
+      await app.accounts.navigateToAccountByName("Bitcoin 1");
+      await app.account.expectAccountVisibility("Bitcoin 1");
+      await app.account.expectAccountBalance();
+    },
+  );
+});
+```
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> The workflow is always: understand ticket → create branch (<code>&lt;prefix&gt;/qaa-&lt;number&gt;</code>) → run test in isolation → implement → rerun 3x → verify Allure → commit (Conventional Commits) → <code>/create-pr</code> → mark ready → merge → update Xray automation flag. Real E2E work is not always writing new tests — sometimes the right answer is linking an Xray ticket to existing coverage. Always check what exists before writing new code.
+</div>
+
+### 3.8.12 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Real Ticket Walkthrough</h3>
+<p class="quiz-subtitle">4 questions · 75% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> For QAA-1139, why was the correct approach to add the ticket ID to existing code instead of writing a new test?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Because writing new tests is not allowed</button>
+<button class="quiz-choice" data-value="B">B) Because the existing <code>add.account.spec.ts</code> already covers the "first time BTC add account" flow — the <code>skip-onboarding-with-last-seen-device</code> userdata starts with zero accounts</button>
+<button class="quiz-choice" data-value="C">C) Because BTC is not supported by Speculos</button>
+<button class="quiz-choice" data-value="D">D) Because the mobile test already provides coverage</button>
+</div>
+<p class="quiz-explanation">The existing test already starts with no accounts (empty portfolio), adds BTC, and verifies the result. Adding a duplicate test would waste maintenance effort. The correct action is to link the Xray ticket (<code>B2CQA-786</code>) to the existing test so it appears in coverage reports.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> In the test template, why is <code>getModularSelector()</code> used instead of directly calling <code>app.addAccount.selectCurrency()</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>selectCurrency()</code> does not exist</button>
+<button class="quiz-choice" data-value="B">B) The modular selector is faster</button>
+<button class="quiz-choice" data-value="C">C) The app has two UI paths (modular dialog and legacy modal) controlled by feature flags, and the test must handle both</button>
+<button class="quiz-choice" data-value="D">D) The modular selector is required for Speculos</button>
+</div>
+<p class="quiz-explanation">The <code>lldModularDrawer</code> feature flag controls whether the new modular dialog or the legacy modal is shown. Since feature flags can change between environments, the test detects which is active and follows the appropriate path.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> What userdata file would you use for a test that requires an EXISTING BTC account with balance?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>1AccountBTC1AccountETH.json</code> — it has pre-populated BTC and ETH accounts</button>
+<button class="quiz-choice" data-value="B">B) <code>skip-onboarding.json</code> — it has onboarding complete</button>
+<button class="quiz-choice" data-value="C">C) <code>skip-onboarding-with-last-seen-device.json</code> — it has no accounts</button>
+<button class="quiz-choice" data-value="D">D) No userdata — the test creates accounts from scratch</button>
+</div>
+<p class="quiz-explanation"><code>1AccountBTC1AccountETH.json</code> contains pre-configured state with 1 BTC account and 1 ETH account with balances. Use this when your test starts from a portfolio that already has accounts (e.g., send, receive, account details tests).</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> After merging your PR, what should you do in Jira?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Delete the ticket</button>
+<button class="quiz-choice" data-value="B">B) Reassign it to someone else</button>
+<button class="quiz-choice" data-value="C">C) Leave it as-is — CI will update it</button>
+<button class="quiz-choice" data-value="D">D) Move the ticket to Done and add a comment linking the PR</button>
+</div>
+<p class="quiz-explanation">After merge, move the ticket to Done and add a comment with the PR link. This closes the loop and provides traceability: anyone looking at the ticket can find the implementation.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Real Ticket Walkthrough -- QAA-1141 (Market Filter Starred)
+
+<div class="chapter-intro">
+This is your second real ticket walkthrough. Where Chapter 3.8 walked through a simple <strong>Add Account</strong> ticket, this one covers a different feature area — the <strong>Market page</strong> — and introduces new concepts: <strong>Wallet 4.0 feature flags</strong>, <strong>cross-platform coverage gaps</strong>, and <strong>the filter dropdown pattern</strong>. The workflow is the same; the context is new.
+</div>
+
+### 3.9.1 Understanding the Ticket
+
+**Jira ticket:** QAA-1141 (child of QAA-1145 "[LWD-LWM] — coverage gap")
+**Xray test case:** B2CQA-1879
+**Description:** "Market — filter starred asset" — verify that a user can star a coin on the market page and filter the list to show only starred assets
+
+**What this means:**
+1. The user navigates to the Market page
+2. Stars a coin (e.g., ETH or BTC)
+3. Activates the "starred" filter
+4. The list shows only starred coins
+
+**Context:** This test currently exists in `e2e/mobile/specs/market.spec.ts` but the Jira platform field indicates it should also be covered on Desktop (Windows/macOS/Linux). This is a **cross-platform coverage gap** — the scenario is automated on mobile but has no corresponding Xray link on desktop.
+
+#### What Is a Cross-Platform Coverage Gap?
+
+The QAA-1145 epic ("[LWD-LWM] — coverage gap") tracks scenarios that are automated on one platform (e.g., LLM — Ledger Live Mobile) but missing on another (e.g., LLD — Ledger Live Desktop). These gaps are discovered by comparing the Xray coverage dashboard across platforms:
+
+| Platform | B2CQA-1879 linked? | Test exists? |
+|----------|-------------------|-------------|
+| **LLM** (Mobile) | Yes — in `e2e/mobile/specs/market.spec.ts` | Yes |
+| **LLD** (Desktop) | **No** — not in any desktop test's TMS annotation | **Possibly** — need to check |
+
+Your job is to determine whether the desktop test already covers the scenario (in which case you just add the Xray link) or whether you need to write a new test.
+
+### 3.9.2 Analyzing Existing Coverage
+
+#### The Mobile Test (Reference)
+
+Open `e2e/mobile/specs/market.spec.ts` — this is the test we need to replicate on desktop:
+
+```typescript
+const tags: string[] = [
+  "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+  "@ethereum", "@family-evm",
+];
+
+describe("Market page for user with no device", () => {
+  const nanoApp = AppInfos.ETHEREUM;
+  const ticker = "ETH";
+
+  beforeAll(async () => {
+    await app.init({
+      speculosApp: nanoApp,
+      cliCommands: [
+        async (userdataPath?: string) => {
+          return CLI.liveData({
+            currency: nanoApp.name,
+            index: 0,
+            appjson: userdataPath,
+            add: true,
+          });
+        },
+      ],
+    });
+    await app.portfolio.waitForPortfolioPageToLoad();
+  });
+
+  $TmsLink("B2CQA-1879");
+  tags.forEach(tag => $Tag(tag));
+  it("should filter starred asset in the list", async () => {
+    await app.walletTabNavigator.navigateToMarket();
+    await app.market.searchAsset(ticker);
+    await app.market.expectMarketRowTitle(ticker);
+    await app.market.openAssetPage(ticker);
+    await app.market.starFavoriteCoin();
+    await app.market.backToAssetList();
+    await app.market.filterStaredAsset();
+    await app.market.expectMarketRowTitle(ticker);
+  });
+});
+```
+
+**What the mobile test does, step by step:**
+1. Initializes the app with an ETH Speculos app and pre-populated account data
+2. Navigates to the Market page
+3. Searches for "ETH"
+4. Opens the ETH asset page
+5. Taps the star button to mark ETH as a favorite
+6. Goes back to the market list
+7. Taps the "starred" filter toggle
+8. Verifies ETH is still visible (it should be — it is starred)
+
+**Key observation:** The mobile test uses `$TmsLink("B2CQA-1879")` (Jest/Detox syntax). On desktop, the equivalent is the `annotation.description` field in the Playwright test options.
+
+#### The Desktop Test (Already Exists!)
+
+Now search the desktop codebase:
+
+```bash
+grep -r "star" e2e/desktop/tests/specs/market.spec.ts
+```
+
+Open `e2e/desktop/tests/specs/market.spec.ts`:
+
+```typescript
+import { test } from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+
+test.describe("Market", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,
+    userdata: "speculos-tests-app",
+    featureFlags: LWD_WALLET_40_FF_ENABLED,
+  });
+
+  test(
+    "Market list content",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-4316",
+      },
+    },
+    async ({ app }) => {
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+      await app.marketBanner.clickExploreMarketHeader();
+      await app.market.validateMarketList();
+    },
+  );
+
+  test(
+    "Filters behavior",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-4315",           // <-- Only B2CQA-4315 here
+      },
+    },
+    async ({ app }) => {
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+      await app.marketBanner.clickExploreMarketHeader();
+      await app.market.validateMarketList();
+      await app.market.starCoin(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
+      await app.market.expectFilterDropdownToBeVisible();
+      await app.market.selectStarredAssetsFilter();
+      await app.market.expectCoinToBeVisible(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
+      await app.market.expectCoinToNotBeVisible(Account.ETH_1.currency.ticker);
+    },
+  );
+});
+```
+
+**What the desktop "Filters behavior" test does:**
+1. Navigates to the Market page via the market banner header
+2. Waits for the market list to load (BTC and ETH rows visible)
+3. Stars BTC
+4. Opens the filter dropdown
+5. Selects "Starred Assets"
+6. Verifies BTC **is** visible
+7. Verifies ETH is **not** visible (it was not starred)
+
+**Conclusion:** The desktop test covers **exactly** the same scenario as B2CQA-1879: star a coin → filter by starred → verify the list. The difference is cosmetic (mobile uses ETH, desktop uses BTC; mobile opens the asset page to star, desktop stars directly from the list). The functional behavior being tested — "filter starred asset" — is identical.
+
+We do **not** need a new test. We need to add `B2CQA-1879` to the existing annotation so Xray knows the desktop test covers this case.
+
+#### Mobile vs. Desktop: Key Differences
+
+| Aspect | Mobile | Desktop |
+|--------|--------|---------|
+| **Framework** | Detox + Jest | Playwright + Electron |
+| **TMS linking** | `$TmsLink("B2CQA-1879")` | `annotation: { type: "TMS", description: "B2CQA-1879" }` |
+| **Navigation** | `walletTabNavigator.navigateToMarket()` | `marketBanner.clickExploreMarketHeader()` |
+| **Starring** | Open asset page → tap star button | Click star icon directly on market row |
+| **Filtering** | `filterStaredAsset()` (toggle button) | `selectStarredAssetsFilter()` (dropdown select) |
+| **Coin used** | ETH | BTC |
+| **Assertion** | Verify starred coin row visible | Verify starred coin visible AND non-starred coin NOT visible |
+
+> **Note:** The desktop test is actually **more thorough** — it verifies both that the starred coin is visible AND that a non-starred coin is hidden. The mobile test only checks the positive case.
+
+### 3.9.3 Understanding the Desktop Market Architecture
+
+Before implementing, let us understand the key architectural elements this test uses. These are different from the Add Account flow in Chapter 3.8.
+
+#### Wallet 4.0 Feature Flags
+
+The desktop market test uses a feature flag:
+
+```typescript
+import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+
+test.use({
+  featureFlags: LWD_WALLET_40_FF_ENABLED,
+});
+```
+
+Open `e2e/desktop/tests/utils/featureFlagUtils.ts` to see what this enables:
+
+```typescript
+export const LWD_WALLET_40_FF_ENABLED: OptionalFeatureMap = {
+  lwdWallet40: {
+    enabled: true,
+    params: {
+      marketBanner: true,      // Shows market banner on portfolio page
+      graphRework: true,       // New graph rendering
+      quickActionCtas: true,   // Quick action buttons
+      mainNavigation: true,    // New navigation layout
+      assetSection: true,      // New asset section
+    },
+  },
+};
+```
+
+**Why this matters:** Wallet 4.0 changes the UI significantly. The market page is now accessed via a **Market Banner** on the portfolio page (clicking "Explore Market") rather than through the old sidebar navigation. The test must enable this feature flag so the banner and new UI are present.
+
+**What happens if you forget the feature flag?** The test will fail because:
+- `app.marketBanner.clickExploreMarketHeader()` looks for a `market-banner-button` element that only exists when `lwdWallet40.marketBanner` is `true`
+- The filter dropdown uses a different UI pattern in the Wallet 4.0 market page
+
+#### The `speculos-tests-app` Userdata
+
+Unlike the Add Account test (Chapter 3.8) which used `skip-onboarding-with-last-seen-device` (empty portfolio), the market test uses `speculos-tests-app`. This userdata file contains:
+- Onboarding already completed
+- A pre-configured app state suitable for Speculos-based tests
+- Pre-populated accounts (the test references `Account.BTC_NATIVE_SEGWIT_1` and `Account.ETH_1`)
+
+The market filter test does not interact with the blockchain (no send, receive, or device signing), so Speculos is not actively used during the test. The userdata simply provides the initial app state.
+
+#### Page Objects: MarketPage
+
+The `MarketPage` (`e2e/desktop/tests/page/market.page.ts`) encapsulates all market list interactions:
+
+```typescript
+export class MarketPage extends AppPage {
+  // Elements
+  private searchInput = this.page.getByTestId("market-search-input");
+  private coinRow = (ticker: string) => this.page.getByTestId(`market-${ticker}-row`);
+  private filterDropdown = this.page.getByText("Show").first();
+  private starButton = (ticker: string) => this.page.getByTestId(`market-${ticker}-star-button`);
+  private starredOptionFilter = this.page.getByRole("option", { name: "Starred Assets" });
+
+  // Key methods used in our test:
+  async starCoin(ticker: string) { ... }                // Click star icon on a row
+  async expectFilterDropdownToBeVisible() { ... }       // Assert dropdown exists
+  async selectStarredAssetsFilter() { ... }             // Open dropdown → click "Starred Assets"
+  async expectCoinToBeVisible(ticker: string) { ... }   // Assert a coin row is visible
+  async expectCoinToNotBeVisible(ticker: string) { ... } // Assert a coin row is NOT visible
+}
+```
+
+**Important selector detail:** The filter dropdown uses `this.page.getByText("Show").first()` — a text-based selector because the react-select component does not forward `data-testid`. The option uses `getByRole("option", { name: "Starred Assets" })` — a role-based selector. This is a real-world compromise you will encounter: sometimes `data-testid` is not available and you must use alternative selectors.
+
+#### Page Objects: MarketBannerPage
+
+The `MarketBannerPage` (`e2e/desktop/tests/page/marketBanner.page.ts`) handles the Wallet 4.0 banner on the portfolio page:
+
+```typescript
+export class MarketBannerPage extends AppPage {
+  private marketBannerHeader = this.page.getByTestId("market-banner-button");
+
+  async clickExploreMarketHeader() {
+    await this.marketBannerHeader.click();
+  }
+}
+```
+
+This page object navigates from the portfolio to the market page by clicking the banner. It replaces the old `layout.goToMarket()` method used in the legacy market spec.
+
+#### Page Object Registration
+
+Both page objects are registered in `e2e/desktop/tests/page/index.ts`:
+
+```typescript
+import { MarketPage } from "./market.page";
+import { MarketBannerPage } from "./marketBanner.page";
+
+export class Application extends PageHolder {
+  public market = new MarketPage(this.page);           // → app.market.*
+  public marketBanner = new MarketBannerPage(this.page); // → app.marketBanner.*
+  // ...
+}
+```
+
+This is why the test can call `app.market.starCoin(...)` and `app.marketBanner.clickExploreMarketHeader()` — the Application hub wires everything together.
+
+### 3.9.4 Create a Branch
+
+Following the branch naming convention from Chapter 6:
+
+```bash
+git pull
+pnpm i 
+// if install failure : 
+pnpm clean
+pnpm i
+
+git checkout -b test/qaa-1141
+```
+
+The `test/` prefix is appropriate because this ticket adds test coverage metadata (an Xray link).
+
+### 3.9.5 Run the Test in Isolation
+
+Before changing anything, run the existing test to build your mental model and create a baseline.
+
+**Run the market test file:**
+```bash
+PWDEBUG=1 pnpm e2e:desktop test:playwright e2e/desktop/tests/specs/market.spec.ts
+```
+
+To isolate the "Filters behavior" test specifically:
+```bash
+cd e2e/desktop
+PWDEBUG=1 pnpm test:playwright --grep "Filters behavior"
+```
+
+> **Note:** Unlike the Add Account test in Chapter 3.8, the market test does **not** require an active Speculos instance. It uses the `speculos-tests-app` userdata for initial state but does not perform any device interactions (no signing, no address verification). Docker must be running (the fixture still initializes Speculos as part of the standard setup), but the test itself only interacts with the market UI.
+
+**What you should observe:**
+1. Playwright launches Electron (Ledger Live Desktop) with Wallet 4.0 enabled
+2. The portfolio page shows the market banner
+3. The test clicks "Explore Market" on the banner → navigates to the market page
+4. The market list loads with BTC and ETH visible
+5. The test clicks the star icon next to BTC → BTC is now starred
+6. The test opens the "Show" dropdown and selects "Starred Assets"
+7. Only BTC remains visible; ETH disappears from the list
+8. Test passes
+
+### 3.9.6 Implement the Change
+
+Open `e2e/desktop/tests/specs/market.spec.ts` and add `B2CQA-1879` to the "Filters behavior" test's TMS annotation:
+
+```typescript
+  test(
+    "Filters behavior",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-4315, B2CQA-1879",
+        //                       ^^^^^^^^^^^^^^
+        //                  Added B2CQA-1879 here
+      },
+    },
+```
+
+That is the only code change. The `description` field is a comma-separated string — the framework's `addTmsLink()` helper splits it and registers each ID with Allure. After this change, `B2CQA-1879` will appear in the Allure report alongside `B2CQA-4315` and flow to Xray on the next CI run.
+
+#### How It Works Under the Hood
+
+The annotation flows through the system like this:
+
+1. **Test runs** → inside the test body, `addTmsLink(getDescription(test.info().annotations, "TMS").split(", "))` reads the annotation, splits `"B2CQA-4315, B2CQA-1879"` into `["B2CQA-4315", "B2CQA-1879"]`, and calls `addTmsLink()` for each
+2. **Allure collects** → each ID appears as a TMS link in the Allure report
+3. **CI uploads** → Allure results are uploaded to the reporting server
+4. **Xray reads** → Xray imports the results and updates the execution status of both `B2CQA-4315` and `B2CQA-1879`
+5. **Coverage dashboard** → `B2CQA-1879` now shows as "Automated" on LLD
+
+> **Comparison with Chapter 3.8:** In the Add Account test (Chapter 3.8), the TMS IDs were in an `xrayTicket` field on a data-driven currency object: `xrayTicket: "B2CQA-2499, B2CQA-2644, ..."`. Here, the IDs are in the Playwright `annotation.description` field. Both approaches end up calling `addTmsLink()` — they are just two patterns for attaching Xray IDs to tests. The annotation pattern is more common in newer tests; the `xrayTicket` pattern is used in data-driven tests with many currencies.
+
+### 3.9.7 Rerun the Tests and Verify Allure
+
+Run the test again to confirm nothing broke:
+
+```bash
+pnpm test:playwright market.spec.ts
+```
+
+Run it at least 3 times for stability:
+```bash
+pnpm test:playwright --grep "Filters behavior" --repeat-each=3
+```
+
+All 3 runs should pass. You only changed metadata, so failures indicate an existing issue (environment, Docker, network timing), not a regression from your change.
+
+**Verify the Allure report:**
+
+```bash
+allure serve allure-results
+```
+
+Navigate to **Suites** → **Market** → **Filters behavior** and check the **Links** section. You should see:
+- `B2CQA-4315` — the existing link
+- `B2CQA-1879` — **the new one you just added**
+
+Each link is clickable and points to the Xray test case in Jira. If you ran the test before your change (in step 30.5), compare the reports — `B2CQA-1879` was missing before and is now present.
+
+Press `Ctrl+C` to stop the Allure server when done.
+
+### 3.9.8 Commit and Create PR
+
+Stage and commit following the Conventional Commits format:
+
+```bash
+git add e2e/desktop/tests/specs/market.spec.ts
+git commit -m "test(e2e): link B2CQA-1879 to market filter starred test on desktop"
+```
+
+The commit type is `test` (adding test coverage), the scope is `e2e`, and the description explains what was done.
+
+Then use the Claude Code command to create the PR:
+
+```
+/create-pr
+```
+
+Claude Code will ask you for:
+
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1141`
+2. **Ticket description** — "Link Xray test case B2CQA-1879 to existing market filter starred test on desktop"
+3. **Change type** — `test`
+4. **Change scope** — `e2e/desktop`
+5. **Test coverage** — `yes` (the change itself is test metadata)
+6. **QA focus areas** — "Market page filter starred, Allure TMS links"
+7. **UI changes** — `no`
+
+### 3.9.9 Mark Ready, Merge, and Update Xray
+
+After CI passes and your PR is reviewed:
+
+1. In GitHub, click **"Ready for review"** to publish the PR
+2. Once approved, click **"Merge pull request"** to merge into `develop`
+3. **Update Xray:**
+   - Search for `B2CQA-1879` in Jira
+   - Set the **Status** flag to **Automated**
+   - In the **Automated In** field, add **LLD** (Ledger Live Desktop) — do not remove LLM, since both platforms now cover it
+4. Move `QAA-1141` to **Done** in Jira and add a comment: "Linked B2CQA-1879 to existing desktop market filter test in PR #XXXX"
+5. The next CI run will automatically upload Allure results to Xray, updating `B2CQA-1879` with the desktop test execution status
+
+> **Important:** When updating Xray's **Automated In** field, you are adding LLD alongside the existing LLM — not replacing it. This test case is now automated on **both** platforms.
+
+### 3.9.10 Reference: Writing a New Market Filter Test from Scratch
+
+For this ticket, we only needed to add a ticket ID to an existing test. But for cases where no desktop market filter test existed, here is the full template with all patterns you would need:
+
+```typescript
+import { test } from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+import { LWD_WALLET_40_FF_ENABLED } from "tests/utils/featureFlagUtils";
+
+test.describe("Market - Starred Filter", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,
+    userdata: "speculos-tests-app",               // Pre-populated app state
+    featureFlags: LWD_WALLET_40_FF_ENABLED,        // Wallet 4.0 UI (market banner)
+  });
+
+  test(
+    "Filter starred asset in market list",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5"],
+      annotation: {
+        type: "TMS",
+        description: "B2CQA-1879",
+      },
+    },
+    async ({ app }) => {
+      // Link to Xray
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+      // Step 1: Navigate to the Market page via Wallet 4.0 banner
+      await app.marketBanner.clickExploreMarketHeader();
+
+      // Step 2: Wait for the market list to load
+      await app.market.validateMarketList();
+
+      // Step 3: Star BTC from the market list
+      await app.market.starCoin(Account.BTC_NATIVE_SEGWIT_1.currency.ticker);
+
+      // Step 4: Open filter dropdown and select "Starred Assets"
+      await app.market.expectFilterDropdownToBeVisible();
+      await app.market.selectStarredAssetsFilter();
+
+      // Step 5: Verify only starred coin is visible
+      await app.market.expectCoinToBeVisible(
+        Account.BTC_NATIVE_SEGWIT_1.currency.ticker,
+      );
+      await app.market.expectCoinToNotBeVisible(
+        Account.ETH_1.currency.ticker,
+      );
+    },
+  );
+});
+```
+
+**Key decisions in this template:**
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| **Userdata** | `speculos-tests-app` | Market tests need pre-populated state, not an empty portfolio |
+| **Feature flags** | `LWD_WALLET_40_FF_ENABLED` | Required for market banner navigation and new filter UI |
+| **Navigation** | `marketBanner.clickExploreMarketHeader()` | Wallet 4.0 pattern — no sidebar navigation |
+| **Coin to star** | BTC via `Account.BTC_NATIVE_SEGWIT_1` | Uses the shared `Account` enum for consistency |
+| **Negative assertion** | `expectCoinToNotBeVisible(ETH)` | Proves the filter actually hides non-starred coins |
+| **No Speculos interaction** | No `speculosApp` in `test.use()` | This test does not interact with the device |
+
+### 3.9.11 Key Concepts Summary
+
+This walkthrough introduced several concepts not covered in Chapter 3.8:
+
+| Concept | What You Learned |
+|---------|-----------------|
+| **Cross-platform coverage gaps** | How to identify when a test exists on mobile but not desktop (or vice versa) by checking Xray links |
+| **Wallet 4.0 feature flags** | The `LWD_WALLET_40_FF_ENABLED` flag and how it changes the UI (market banner, navigation, filter patterns) |
+| **TMS annotation pattern** | Using `annotation: { type: "TMS", description: "..." }` instead of `xrayTicket` strings |
+| **Text and role selectors** | When `data-testid` is unavailable (react-select), use `getByText()` or `getByRole()` as fallbacks |
+| **Negative assertions** | `expectCoinToNotBeVisible()` — proving something is absent is as important as proving something is present |
+| **Automated In (multi-platform)** | When updating Xray, add the new platform alongside the existing one — do not replace |
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Cross-platform coverage gaps are common in Ledger Live because mobile and desktop share the same Xray test cases but have independent test suites. The investigation workflow is always: read the Jira ticket → find the mobile test → search for an equivalent desktop test → if it exists, add the Xray link; if not, write a new test using the mobile test as a behavioral reference. Always verify with Allure before submitting.
+</div>
+
+### 3.9.12 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Market Filter Starred Walkthrough</h3>
 <p class="quiz-subtitle">4 questions · 75% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> Translate this Playwright code to Detox: <code>await page.getByRole("button", { name: "Send" }).click();</code></p>
+<p><strong>Q1.</strong> Why does the desktop market test use <code>LWD_WALLET_40_FF_ENABLED</code> as a feature flag?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>await element(by.id("Send")).click();</code></button>
-<button class="quiz-choice" data-value="B">B) <code>await device.tap("Send");</code></button>
-<button class="quiz-choice" data-value="C">C) <code>await element(by.text("Send")).tap();</code></button>
-<button class="quiz-choice" data-value="D">D) <code>await tapByRole("button", "Send");</code></button>
+<button class="quiz-choice" data-value="A">A) It is required for Speculos to start</button>
+<button class="quiz-choice" data-value="B">B) It enables the legacy market page layout</button>
+<button class="quiz-choice" data-value="C">C) It enables the Wallet 4.0 UI which provides the market banner navigation and the new filter dropdown pattern</button>
+<button class="quiz-choice" data-value="D">D) It disables the market page for testing purposes</button>
 </div>
-<p class="quiz-explanation">Detox doesn't have role-based matchers like Playwright. The closest equivalent for a button with text "Send" is <code>element(by.text("Send")).tap()</code>. In Detox, <code>click()</code> is called <code>tap()</code>.</p>
+<p class="quiz-explanation">The <code>lwdWallet40</code> feature flag enables the Wallet 4.0 UI. With <code>marketBanner: true</code>, the portfolio page shows the "Explore Market" banner used for navigation. Without this flag, the market banner does not exist and <code>app.marketBanner.clickExploreMarketHeader()</code> would fail.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> What does <code>await app.common.removeSpeculos()</code> do in <code>afterAll</code>?</p>
+<p><strong>Q2.</strong> The mobile market test uses <code>$TmsLink("B2CQA-1879")</code>. What is the desktop equivalent?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Uninstalls the Speculos npm package</button>
-<button class="quiz-choice" data-value="B">B) Stops and removes the Speculos Docker container used by the test</button>
-<button class="quiz-choice" data-value="C">C) Deletes the Speculos configuration file</button>
-<button class="quiz-choice" data-value="D">D) Disconnects the WebSocket bridge</button>
+<button class="quiz-choice" data-value="A">A) <code>test.use({ tmsLink: "B2CQA-1879" })</code></button>
+<button class="quiz-choice" data-value="B">B) <code>annotation: { type: "TMS", description: "B2CQA-1879" }</code> in the test options, combined with <code>addTmsLink()</code> in the test body</button>
+<button class="quiz-choice" data-value="C">C) <code>xrayTicket: "B2CQA-1879"</code> in the test data</button>
+<button class="quiz-choice" data-value="D">D) There is no desktop equivalent — Xray only works with mobile</button>
 </div>
-<p class="quiz-explanation">After all tests in a describe block finish, <code>removeSpeculos()</code> stops the Docker container that was started in <code>app.init()</code>. This prevents Docker container leaks between test suites.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> Why do mobile E2E tests use explicit timeouts like <code>waitFor(...).withTimeout(10000)</code> while desktop tests usually don't?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Mobile tests are written in a different language</button>
-<button class="quiz-choice" data-value="B">B) Detox doesn't support any form of auto-waiting</button>
-<button class="quiz-choice" data-value="C">C) Mobile apps are always faster than desktop apps</button>
-<button class="quiz-choice" data-value="D">D) Playwright has built-in auto-wait (retries until element appears), while Detox requires explicit <code>waitFor().withTimeout()</code> for reliable waiting</button>
-</div>
-<p class="quiz-explanation">Playwright auto-waits by default — actions like <code>click()</code> automatically wait for the element to be visible, stable, and enabled. Detox does not have this built-in behavior, so you must use <code>waitFor</code> with explicit timeouts.</p>
+<p class="quiz-explanation">Desktop tests use Playwright's annotation system: the <code>annotation.description</code> field stores the B2CQA IDs, and <code>addTmsLink(getDescription(test.info().annotations, "TMS").split(", "))</code> registers them with Allure. This is different from the Jest/Detox <code>$TmsLink()</code> helper used on mobile, but both achieve the same result: linking the test to Xray.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> What is the Detox equivalent of Playwright's <code>page.getByTestId("amount").fill("0.5")</code>?</p>
+<p><strong>Q3.</strong> The desktop market page object uses <code>this.page.getByText("Show").first()</code> for the filter dropdown instead of <code>getByTestId()</code>. Why?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>await element(by.id("amount")).typeText("0.5");</code></button>
-<button class="quiz-choice" data-value="B">B) <code>await element(by.id("amount")).fill("0.5");</code></button>
-<button class="quiz-choice" data-value="C">C) <code>await typeTextById("amount", "0.5");</code> (either answer is correct)</button>
-<button class="quiz-choice" data-value="D">D) Both A and C are correct</button>
+<button class="quiz-choice" data-value="A">A) The react-select component does not forward <code>data-testid</code>, so a text-based selector is used as a pragmatic fallback</button>
+<button class="quiz-choice" data-value="B">B) Text selectors are always preferred over test IDs in Playwright</button>
+<button class="quiz-choice" data-value="C">C) The filter dropdown was recently added and nobody set up a test ID yet</button>
+<button class="quiz-choice" data-value="D">D) <code>getByTestId()</code> does not work in Electron apps</button>
 </div>
-<p class="quiz-explanation">Both <code>element(by.id("amount")).typeText("0.5")</code> (raw Detox) and <code>typeTextById("amount", "0.5")</code> (helper wrapper) are correct. The helper is preferred for consistency and built-in error handling.</p>
+<p class="quiz-explanation">Some third-party React components (like react-select) do not forward <code>data-testid</code> attributes to the rendered DOM. In these cases, the best alternative is to use <code>getByText()</code> or <code>getByRole()</code> selectors. The comment in the page object explains this explicitly: "using text selector because react-select doesn't forward data-testid".</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> After merging the PR, what should you set in Xray for B2CQA-1879's "Automated In" field?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Replace LLM with LLD</button>
+<button class="quiz-choice" data-value="B">B) Remove LLM since desktop now covers it</button>
+<button class="quiz-choice" data-value="C">C) Set it to LLD only</button>
+<button class="quiz-choice" data-value="D">D) Add LLD alongside the existing LLM — both platforms now automate this test case</button>
+</div>
+<p class="quiz-explanation">B2CQA-1879 was already automated on LLM (mobile). By adding the Xray link to the desktop test, it is now automated on both platforms. The "Automated In" field should reflect both: LLM and LLD. Never remove an existing platform when adding a new one.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
 ---
+
+
+## Exercises & Challenges
+
+<div class="chapter-intro">
+Reading is not enough — you need to practice. These exercises progress from read-only analysis to hands-on code writing. Each has a clear objective, estimated time, and verification method. Complete them in order.
+</div>
+
+### 3.10.1 Exercise 1: Trace the Fixture Lifecycle (30 min)
+
+**Objective:** Understand how fixtures wire together.
+
+**Instructions:**
+1. Open `e2e/desktop/tests/fixtures/common.ts`
+2. For each fixture (`userdataDestinationPath`, `speculos`, `electronApp`, `page`, `app`), identify:
+   - What other fixtures it depends on (appears in its parameter list)
+   - What setup it performs (before `use()`)
+   - What it provides to the test (argument to `use()`)
+   - What teardown it performs (after `use()`)
+3. Draw the dependency graph on paper or in a text file
+
+**Expected output:** A diagram like:
+```
+userdata → userdataOriginalFile → userdataDestinationPath
+                                          ↓
+speculosApp → speculos ←── cliCommands
+                  ↓
+              electronApp ←── featureFlags, env, lang, theme
+                  ↓
+                page ←── teamOwner
+                  ↓
+                 app
+```
+
+**Verification:** Compare your diagram against the fixture code. Every arrow should correspond to a fixture name appearing in another fixture's parameter list.
+
+### 3.10.2 Exercise 2: Add an Assertion to a Page Object (30 min)
+
+**Objective:** Practice the `@step` decorator and page object pattern.
+
+**Instructions:**
+1. Open `e2e/desktop/tests/page/portfolio.page.ts`
+2. Add a new method `expectNoAccountsMessage()` that:
+   - Uses the `@step` decorator with a descriptive message
+   - Checks that the "empty state" UI is visible (use `addAccountButton` as a proxy)
+   - Uses `expect().toBeVisible()`
+3. Save the file (do NOT commit yet — this is practice)
+
+**Template:**
+```typescript
+@step("Expect empty portfolio state")
+async expectNoAccountsMessage() {
+  // YOUR CODE HERE
+}
+```
+
+**Verification:** The method should follow the exact same pattern as `checkAddAccountButtonVisibility()` in the same file.
+
+### 3.10.3 Exercise 3: Read and Explain a Test (45 min)
+
+**Objective:** Prove you can read any test in the codebase.
+
+**Instructions:**
+1. Open `e2e/desktop/tests/specs/settings.spec.ts`
+2. Pick the first test in the file
+3. Write a line-by-line explanation of:
+   - What each import does
+   - What `test.use()` configures and why
+   - What each `tag` means
+   - What the annotation does
+   - What each `await app.*` call does in the user flow
+   - What the test verifies
+
+**Verification:** Your explanation should match the test's actual behavior. Run the test to confirm: `pnpm e2e:desktop test:playwright settings.spec.ts`
+
+### 3.10.4 Exercise 4: Debug a Broken Test (45 min)
+
+**Objective:** Practice identifying and fixing common test bugs.
+
+**Instructions:** Copy this test into a scratch file and find ALL the bugs:
+
+```typescript
+import { test } from "@playwright/test";  // BUG 1: wrong import
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { Currency } from "@ledgerhq/live-common/e2e/enum/Currency";
+
+test.describe("Broken Test", () => {
+  test.use({
+    teamOwner: Team.WALLET_XP,
+    userdata: "skip-onboarding",  // BUG 2: might need device-aware userdata
+    speculosApp: Currency.BTC.speculosApp,
+  });
+
+  test("Add BTC account", {
+    tag: ["@NanoSP"],
+    annotation: { type: "TMS", description: "B2CQA-XXXX" },
+  }, async ({ app }) => {
+    // BUG 3: missing addTmsLink call
+    app.portfolio.clickAddAccountButton();  // BUG 4: missing await
+    await app.addAccount.selectCurrency(Currency.BTC);
+    await app.addAccount.addAccounts();
+    await app.addAccount.done();
+    // BUG 5: no assertions — test never verifies the account was created
+  });
+});
+```
+
+**Bugs to find:**
+1. Wrong import source
+2. Userdata might not have last-seen device
+3. Missing `addTmsLink()` call
+4. Missing `await` on an async call
+5. No assertions after the flow
+
+**Verification:** Fix all 5 bugs and compare against the template in Chapter 3.7.6.
+
+### 3.10.5 Exercise 5: Write a Test from Scratch (60 min)
+
+**Objective:** Write a complete test for an existing flow.
+
+**Instructions:**
+1. Open `e2e/desktop/tests/specs/rename.account.spec.ts` and read it
+2. Write a NEW test in the same file (or a scratch file) that:
+   - Renames a BTC account (instead of the currency used in the existing test)
+   - Uses the correct userdata (needs an existing account)
+   - Has proper tags, annotations, and TMS links
+   - Verifies the rename persisted
+3. Run your test locally
+
+**Hints:**
+- You will need `cliCommands` to populate BTC account data
+- Look at how the existing rename test sets up its userdata
+- Check `app.account` for rename-related methods
+
+### 3.10.6 Exercise 6: Extend the Add Account Test (45 min)
+
+**Objective:** Add new assertions to an existing test.
+
+**Instructions:**
+1. After successfully understanding the add account test (Ch 3.8), add these verifications:
+   - After adding the account, check that the operation history shows at least one operation
+   - Verify the account name matches "Bitcoin 1"
+   - Click on the last operation and verify the operation drawer opens with correct info
+
+**Hint:** The existing test already does most of this. Study the assertions at the bottom of the `add.account.spec.ts` test and understand what each one verifies.
+
+### 3.10.7 Challenge: Write a Complete Send BTC Test (90 min)
+
+**Objective:** Write a full E2E test with no guidance.
+
+**Task:** Write a test that:
+1. Starts with an existing BTC account (pre-populated via CLI)
+2. Opens the Send flow from the account page
+3. Fills in a recipient address and amount
+4. Signs the transaction on Speculos
+5. Verifies the "Transaction sent" toaster appears
+6. Verifies the transaction appears in the operation list
+
+**No hints.** Use everything you learned in Chapters 22-30. Refer to:
+- `send.tx.spec.ts` for existing send test patterns
+- `send.modal.ts` for page object methods
+- `speculos.page.ts` for device signing
+- The daily workflow checklist (Ch 3.7)
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> These exercises progress from reading to writing. Complete Exercises 1-4 first — they build the analytical skills you need. Then tackle 5-6, which require code changes. The Challenge is your graduation test: if you can write a complete Send BTC test from zero, you are ready to work independently on E2E tickets.
+</div>
+
+---
+
+
+<a id="part-3-final-assessment"></a>
 
 ## Part 3 Final Assessment
 
+Part 3 took you from the desktop suite's architecture (PageHolder, Component, AppPage, Application) through Playwright core, fixtures, Electron specifics, Speculos integration, the codebase file-by-file, the daily workflow, two real ticket walkthroughs, and hands-on exercises. This assessment tests the load-bearing ideas you need in daily work. You must score 80% to pass. Take your time, revisit any chapter you stumble on, then move on to Part 4.
+
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 3 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions across all chapters · 80% to pass</p>
+<p class="quiz-subtitle">10 questions · 80% to pass · Covers Ch 3.1-3.11</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> The desktop E2E class hierarchy is:</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q1.</strong> Trace the class hierarchy for <code>AccountPage</code> from most-derived to root.</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>AppPage</code> → <code>PageHolder</code> → <code>Component</code></button>
-<button class="quiz-choice" data-value="B">B) <code>PageHolder</code> → <code>Component</code> → <code>AppPage</code> → SpecificPage</button>
-<button class="quiz-choice" data-value="C">C) <code>Component</code> → <code>AppPage</code> → <code>PageHolder</code></button>
-<button class="quiz-choice" data-value="D">D) SpecificPage → <code>Component</code> → <code>PageHolder</code></button>
+<button class="quiz-choice" data-value="A">A) <code>AccountPage</code> → <code>AppPage</code> → <code>Component</code> → <code>PageHolder</code></button>
+<button class="quiz-choice" data-value="B">B) <code>AccountPage</code> → <code>Application</code> → <code>Component</code> → <code>PageHolder</code></button>
+<button class="quiz-choice" data-value="C">C) <code>AccountPage</code> → <code>Component</code> → <code>AppPage</code> → <code>PageHolder</code></button>
+<button class="quiz-choice" data-value="D">D) <code>AccountPage</code> → <code>PageHolder</code> → <code>Component</code> → <code>AppPage</code></button>
 </div>
-<p class="quiz-explanation"><code>PageHolder</code> (holds the Page reference) → <code>Component</code> (adds shared UI elements) → <code>AppPage</code> (abstract page class) → SpecificPage (your concrete page objects like AccountPage, SettingsPage, etc.).</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> What is the purpose of userdata JSON profiles?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Store user credentials for authentication</button>
-<button class="quiz-choice" data-value="B">B) Configure CI workflow parameters</button>
-<button class="quiz-choice" data-value="C">C) Provide pre-configured app state (accounts, settings, onboarding) so tests start from a known state without manual setup</button>
-<button class="quiz-choice" data-value="D">D) Define feature flag defaults</button>
-</div>
-<p class="quiz-explanation">Userdata profiles contain serialized app state so tests don't need to go through onboarding, account creation, or settings configuration. This makes tests faster and more deterministic.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> How does the mobile E2E bridge communicate?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) HTTP REST API</button>
-<button class="quiz-choice" data-value="B">B) WebSocket</button>
-<button class="quiz-choice" data-value="C">C) gRPC</button>
-<button class="quiz-choice" data-value="D">D) Shared file system</button>
-</div>
-<p class="quiz-explanation">The bridge runs a WebSocket server (in <code>e2e/mobile/bridge/server.ts</code>) that the React Native app connects to for receiving test commands like <code>importAccounts</code> and <code>overrideFeatureFlag</code>.</p>
+<p class="quiz-explanation"><code>PageHolder</code> holds the <code>Page</code> reference. <code>Component</code> adds shared UI (<code>loadingSpinner</code>, <code>toaster</code>, <code>waitForPageDomContentLoadedState()</code>). <code>AppPage</code> is the abstract page. <code>AccountPage</code> is the concrete class. The <code>Application</code> hub is a separate aggregator, not part of the inheritance chain (Ch 3.1 §13.2).</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Which of these is NOT captured on test failure in the desktop suite?</p>
+<p><strong>Q2.</strong> In the fixture lifecycle documented in Ch 3.1, what is the correct startup order for a test that declares <code>speculosApp</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) UI screenshot</button>
-<button class="quiz-choice" data-value="B">B) Video recording</button>
-<button class="quiz-choice" data-value="C">C) Speculos device screenshot</button>
-<button class="quiz-choice" data-value="D">D) Database dump</button>
+<button class="quiz-choice" data-value="A">A) Electron → Speculos → userdata dir → Application hub</button>
+<button class="quiz-choice" data-value="B">B) Application hub → Electron → Speculos → userdata dir</button>
+<button class="quiz-choice" data-value="C">C) Speculos → userdata dir → Electron → Application hub</button>
+<button class="quiz-choice" data-value="D">D) userdata dir → Speculos (Docker + CLI) → Electron (with env vars) → Application hub</button>
 </div>
-<p class="quiz-explanation">There is no database — Ledger Live uses JSON files for local state. On failure, the suite captures: UI screenshot, video recording, Electron console logs, and Speculos device screenshot.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> Why do we need 30+ page objects in the Application class?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Each page object encapsulates one screen's locators and actions — this keeps tests readable, centralizes locator changes, and enables the <code>@step</code> decorator for Allure</button>
-<button class="quiz-choice" data-value="B">B) Playwright requires one page object per test file</button>
-<button class="quiz-choice" data-value="C">C) Each page object corresponds to one development team</button>
-<button class="quiz-choice" data-value="D">D) It's an over-engineered design that should be simplified</button>
-</div>
-<p class="quiz-explanation">Page objects enable: readable tests (call <code>app.settings.changeLanguage()</code> instead of raw locators), single-point-of-change (update a test ID in one place), and automatic Allure step traces via <code>@step</code>. The Application class aggregates them for convenient <code>app.</code> access.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q6.</strong> What does <code>pnpm e2e:desktop test:playwright -- --shard=2/4</code> do?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Runs only the second test in the suite</button>
-<button class="quiz-choice" data-value="B">B) Runs tests at 2x speed with 4 workers</button>
-<button class="quiz-choice" data-value="C">C) Splits the test suite into 4 parts and runs the 2nd part — used for parallel CI execution</button>
-<button class="quiz-choice" data-value="D">D) Runs the test 4 times and keeps the 2nd result</button>
-</div>
-<p class="quiz-explanation">Playwright sharding splits the entire test suite across N runners. <code>--shard=2/4</code> means "I am runner 2 of 4, give me my portion of the tests." Each shard runs independently and produces its own results, which are merged later.</p>
+<p class="quiz-explanation">The fixture lifecycle in §13.4 creates the unique userdata directory first, then launches the Speculos Docker container on a random port and executes CLI commands, then launches Electron with <code>SPECULOS_API_PORT</code> and <code>--user-data-dir</code>, then instantiates the <code>Application</code> hub with the live <code>Page</code>. Each stage depends on the previous one.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q7.</strong> In the mobile test template, why is <code>speculosApp: undefined</code> valid?</p>
+<p><strong>Q3.</strong> Why is <code>tests/fixtures/common.ts</code> considered the most important file in the desktop suite?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It means "use the default Speculos app"</button>
-<button class="quiz-choice" data-value="B">B) It means "this test doesn't need a Speculos device" — no Docker container will be started</button>
-<button class="quiz-choice" data-value="C">C) It's a TypeScript error that should be fixed</button>
-<button class="quiz-choice" data-value="D">D) It means "use a mock device instead of Speculos"</button>
+<button class="quiz-choice" data-value="A">A) It contains the list of all test specs and their tags</button>
+<button class="quiz-choice" data-value="B">B) It defines every fixture type and drives Speculos lifecycle, Electron launch, page-object creation, and teardown — every test flows through it</button>
+<button class="quiz-choice" data-value="C">C) It is the Playwright runner configuration (timeouts, retries, reporters)</button>
+<button class="quiz-choice" data-value="D">D) It exports the <code>Application</code> hub consumed by the specs</button>
 </div>
-<p class="quiz-explanation">Setting <code>speculosApp</code> to <code>undefined</code> tells the initialization to skip Speculos setup entirely. Tests that don't involve device interaction (settings, UI navigation) don't need it.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q8.</strong> What is the key difference in test isolation between desktop and mobile?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Desktop tests share state, mobile tests are isolated</button>
-<button class="quiz-choice" data-value="B">B) Both platforms provide full test isolation</button>
-<button class="quiz-choice" data-value="C">C) Neither platform provides test isolation</button>
-<button class="quiz-choice" data-value="D">D) Desktop has full isolation (fresh app per test via fixtures), mobile has partial isolation (shared app per describe block via <code>beforeAll</code>)</button>
-</div>
-<p class="quiz-explanation">Playwright fixtures create a fresh Electron instance, userdata directory, and page for every test. Detox shares the app instance within a describe block because native app launch is too slow to repeat per test.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q9.</strong> You want to write a desktop E2E test for a new staking feature behind a feature flag. Which fixture properties do you need?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>userdata</code>, <code>speculosApp</code>, <code>cliCommands</code>, <code>featureFlags</code>, <code>teamOwner</code></button>
-<button class="quiz-choice" data-value="B">B) Only <code>userdata</code> — everything else is auto-detected</button>
-<button class="quiz-choice" data-value="C">C) <code>speculosApp</code> and <code>featureFlags</code> — the rest is optional</button>
-<button class="quiz-choice" data-value="D">D) You don't use fixtures for staking tests</button>
-</div>
-<p class="quiz-explanation">A staking test needs: <code>userdata</code> (pre-configured state with accounts), <code>speculosApp</code> (device for signing), <code>cliCommands</code> (populate staking account data), <code>featureFlags</code> (enable the new staking flag), and <code>teamOwner</code> (for reporting).</p>
+<p class="quiz-explanation">Per Ch 3.7 and the Ch 3.1 quiz, <code>common.ts</code> owns the <code>TestFixtures</code> type, the Speculos fixture, Electron launch, Application instantiation, and the failure-capture teardown. <code>playwright.config.ts</code> configures the runner but does not orchestrate tests; <code>page/index.ts</code> only builds the hub.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q10.</strong> A mobile test that worked yesterday now fails with "Element not found: staking-button" after another team's PR was merged. What should you investigate first?</p>
+<p><strong>Q4.</strong> What does Playwright's auto-waiting do before a <code>click()</code> action?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Check if the Detox version was updated</button>
-<button class="quiz-choice" data-value="B">B) Rebuild the app from scratch</button>
-<button class="quiz-choice" data-value="C">C) Check if a feature flag or test ID was changed in the merged PR, and verify the element's <code>testID</code> prop still matches</button>
-<button class="quiz-choice" data-value="D">D) Increase the test timeout</button>
+<button class="quiz-choice" data-value="A">A) Waits a fixed one-second delay before clicking</button>
+<button class="quiz-choice" data-value="B">B) Takes a screenshot of the element and validates the DOM diff</button>
+<button class="quiz-choice" data-value="C">C) Retries five actionability checks — attached, visible, stable (not animating), receives pointer events, enabled — until the timeout is reached</button>
+<button class="quiz-choice" data-value="D">D) Polls the network for idle before dispatching the click</button>
 </div>
-<p class="quiz-explanation">Another team's PR could have: changed the <code>testID</code> prop on the element, modified a feature flag that controls the staking UI visibility, or restructured the component tree. Check the PR diff for changes to the staking screen and its feature flags.</p>
+<p class="quiz-explanation">Ch 3.3 §22.5 describes auto-waiting as Playwright's "killer feature": five actionability checks retried until timeout. This is why you rarely need manual <code>sleep()</code> calls in well-written specs.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q5.</strong> When a <code>data-testid</code> attribute is present on the target element, which locator should you prefer?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>getByTestId()</code> — it is the most stable because test IDs exist only for testing and are not touched by design, translation, or accessibility refactors</button>
+<button class="quiz-choice" data-value="B">B) <code>getByText()</code> — visible text is easy to read and review</button>
+<button class="quiz-choice" data-value="C">C) <code>locator()</code> with a CSS selector — CSS is the most expressive API</button>
+<button class="quiz-choice" data-value="D">D) <code>getByRole()</code> — ARIA roles are the accessibility standard</button>
+</div>
+<p class="quiz-explanation">Ch 3.3 §22.2 ranks <code>getByTestId()</code> first when a test ID is available. Text and role locators are still useful, but they break when copy or ARIA attributes change. CSS selectors are a last resort.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q6.</strong> In a custom fixture defined with <code>base.extend&lt;T&gt;()</code>, what is the meaning of the <code>use()</code> callback?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It registers the fixture globally so any test in the suite can import it</button>
+<button class="quiz-choice" data-value="B">B) It is a synchronous accessor that returns the fixture value to the test</button>
+<button class="quiz-choice" data-value="C">C) It tells Playwright to reuse the fixture between tests (worker scope)</button>
+<button class="quiz-choice" data-value="D">D) It is the boundary between setup and teardown: code before <code>use(value)</code> runs before the test, <code>value</code> is what the test receives, and code after <code>use()</code> runs after the test (even on failure)</button>
+</div>
+<p class="quiz-explanation">Ch 3.4 §23.2 describes the <code>use()</code> callback pattern explicitly: setup → <code>await use(resource)</code> → teardown. Teardown runs regardless of test outcome, which is why fixtures are the correct place for resource cleanup.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q7.</strong> What is the difference between <code>electronApp</code> and <code>page</code> after <code>launchApp()</code> returns?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) They are aliases for the same object; use whichever is convenient</button>
+<button class="quiz-choice" data-value="B">B) <code>electronApp</code> represents the whole application (used for <code>firstWindow()</code>, <code>windows()</code>, main-process <code>evaluate()</code>, <code>close()</code>); <code>page</code> represents the main window and exposes the locator/action/assertion API used 99% of the time</button>
+<button class="quiz-choice" data-value="C">C) <code>electronApp</code> is the renderer process and <code>page</code> is the main process</button>
+<button class="quiz-choice" data-value="D">D) <code>page</code> is only available after <code>#loader-container</code> is hidden; <code>electronApp</code> is available earlier</button>
+</div>
+<p class="quiz-explanation">Ch 3.5 §24.4 contrasts the two: <code>electronApp</code> is for app-level operations and window enumeration, <code>page</code> is the main window. Page objects that touch webviews (Swap, Buy/Sell) need both, because the webview is reached via <code>electronApp.windows()</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q8.</strong> How does the desktop suite access the content of a Swap or Buy/Sell <strong>webview</strong>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Via <code>electronApp.windows()</code> — subsequent windows after the first one are the webviews, and each is a full Playwright <code>Page</code></button>
+<button class="quiz-choice" data-value="B">B) By switching frames on the main <code>page</code> with <code>page.frame({ name: "webview" })</code></button>
+<button class="quiz-choice" data-value="C">C) By launching a second Playwright browser instance pointed at the webview URL</button>
+<button class="quiz-choice" data-value="D">D) Webviews cannot be tested with Playwright; they are covered by unit tests only</button>
+</div>
+<p class="quiz-explanation">Ch 3.5 §24.6 shows the pattern: <code>const [, webview] = electronApp.windows();</code> then interact with <code>webview.getByTestId(...)</code>. Webviews are separate windows, not frames. The <code>WebviewLogCollector</code> collects console/network logs from all webview windows for failure triage.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q9.</strong> In the QAA-1139 walkthrough, what was the actual code change that closed the coverage gap?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A new spec file <code>add.account.btc.spec.ts</code> was created from the mobile reference test</button>
+<button class="quiz-choice" data-value="B">B) A new page object <code>AddAccountBtcPage</code> was added and wired into the <code>Application</code> hub</button>
+<button class="quiz-choice" data-value="C">C) <code>B2CQA-786</code> was appended to the BTC entry's <code>xrayTicket</code> string in <code>add.account.spec.ts</code> — the existing test already covered the scenario and only needed the Xray link</button>
+<button class="quiz-choice" data-value="D">D) A feature flag was overridden via <code>test.use({ featureFlags: { ... } })</code> to enable the new add-account flow</button>
+</div>
+<p class="quiz-explanation">Ch 3.9 §29.2-29.5 showed that the existing <code>add.account.spec.ts</code> BTC entry already covered "first time add account" through <code>userdata: "skip-onboarding-with-last-seen-device"</code>. The fix was a single-line metadata change so Xray could map the test case to the automation. Framework helper <code>addTmsLink()</code> splits the comma-separated <code>xrayTicket</code> string and registers each ID with Allure.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q10.</strong> How does the desktop suite scale to large test volumes in CI?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) By disabling Speculos in CI and running tests against a mocked device</button>
+<button class="quiz-choice" data-value="B">B) Via Playwright <strong>sharding</strong> (<code>--shard=N/M</code>) — each shard runs independently on its own runner with its own Speculos containers, and the Allure results from all shards are merged for the final report</button>
+<button class="quiz-choice" data-value="C">C) By collapsing all specs into a single file to avoid per-file startup cost</button>
+<button class="quiz-choice" data-value="D">D) By increasing <code>workers</code> to match the number of specs, regardless of runner size</button>
+</div>
+<p class="quiz-explanation">Ch 3.1 §13.5 documents the sharding strategy used in CI: <code>pnpm e2e:desktop test:playwright -- --shard=1/4</code> (and 2/4, 3/4, 4/4) on parallel runners. Each shard manages its own Speculos containers (random ports, §13.4) and its own Allure output; results are merged post-run. Sharding scales across machines; workers scale within a machine — the two are complementary.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -1028,3 +3598,6 @@ These wrappers reduce the verbosity of raw Detox API calls and provide consisten
 
 ---
 
+<div class="chapter-outro">
+<strong>Next:</strong> Part 4 dives into Mobile E2E with Detox — the architecture differences from desktop (native runner, WebSocket bridge, <code>app.init()</code> in <code>beforeAll</code>), your first mobile test, the desktop-to-mobile translation patterns, and the mobile-specific workflow. The Playwright and Speculos foundations you built here transfer directly; only the driver changes.
+</div>
