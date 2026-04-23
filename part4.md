@@ -5739,9 +5739,9 @@ Steps:
    A syntax error here will kill every spec in `specs/swap/otherTestCases/`, so validate before moving on.
 7. **(Optional) Trim noise.** LLD may have filled your account block with additional fields the fixture does not use (per-session feature-flag overrides, analytics breadcrumbs). Nothing forces you to trim them — but if the fixture grows past what feels reasonable, compare against neighbouring accounts already in the file and delete the fields they don't include.
 
-### 4.10.10 Phase 4 — Extend the Addresses Enum and Implement the Spec
+### 4.10.10 Phase 4 — Extend the Addresses Enum, Teach the Driver about ERC20 Names, and Implement the Spec
 
-Two files change: `Addresses.ts` gets two new constants, and the new spec file wires everything together.
+Three files change: `Addresses.ts` gets two new constants, `swap.page.ts`'s CSV assertion gains an ERC20 parent-name fallback, and the new spec file wires everything together.
 
 **Step 1 — Extend `libs/ledger-live-common/src/e2e/enum/Addresses.ts`:**
 
@@ -5764,7 +5764,54 @@ export enum Addresses {
 
 The last two entries are the `from` and `to` addresses you captured from the CSV in Phase 2. Keep the existing `SWAP_HISTORY_*` constants untouched — step 1 still consumes them.
 
-**Step 2 — Create the spec** at `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts`:
+**Step 2 — Teach `swap.page.ts` that ERC20 rows export the parent account's name, not the token account's name.** Ledger Live's CSV exporter writes the *parent* Ethereum account's `accountName` (e.g., `"Ethereum 1"`) when the row involves an ERC20 TokenAccount — not the token-side name (`"Tether USD 1"`). The existing `checkExportedFileContents` asserted on `swap.accountToCredit.accountName`, which works for native-ETH step 1 but breaks on any ERC20 pair. Update the driver helper to fall back to the parent when the account is an ERC20 TokenAccount.
+
+Open `e2e/mobile/page/trade/swap.page.ts` and replace the existing `checkExportedFileContents` method with:
+
+```typescript
+@Step("Check contents of exported operations file")
+async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) {
+  const targetFilePath = path.resolve(__dirname, "../../artifacts/ledgerwallet-swap-history.csv");
+  const fileContents = await fs.readFile(targetFilePath, "utf-8");
+
+  // If sender or receiver is a ERC20 token, the csv export takes the parent name
+  let accountToDebitNameInCsv: string;
+  let accountToCreditNameInCsv: string;
+
+  if (swap.accountToDebit.tokenType === TokenType.ERC20 && swap.accountToDebit.parentAccount) {
+    accountToDebitNameInCsv = swap.accountToDebit.parentAccount.accountName;
+  } else {
+    accountToDebitNameInCsv = swap.accountToDebit.accountName;
+  }
+  if (swap.accountToCredit.tokenType === TokenType.ERC20 && swap.accountToCredit.parentAccount) {
+    accountToCreditNameInCsv = swap.accountToCredit.parentAccount.accountName;
+  } else {
+    accountToCreditNameInCsv = swap.accountToCredit.accountName;
+  }
+
+  jestExpect(fileContents).toContain(provider.name);
+  jestExpect(fileContents).toContain(id);
+  jestExpect(fileContents).toContain(swap.accountToDebit.currency.ticker);
+  jestExpect(fileContents).toContain(swap.accountToCredit.currency.ticker);
+  jestExpect(fileContents).toContain(swap.amount);
+  jestExpect(fileContents).toContain(accountToDebitNameInCsv);
+  jestExpect(fileContents).toContain(swap.accountToDebit.address);
+  jestExpect(fileContents).toContain(accountToCreditNameInCsv);
+  jestExpect(fileContents).toContain(swap.accountToCredit.address);
+}
+```
+
+What changed, line-by-line:
+
+- Two new locals `accountToDebitNameInCsv` / `accountToCreditNameInCsv` resolve the correct account name to assert against.
+- Each local is set to the **parent** `accountName` when the side is an ERC20 TokenAccount (guarded on both `tokenType === TokenType.ERC20` and the presence of `parentAccount`, so a malformed enum entry can't trigger a null dereference), and falls back to the account's own `accountName` otherwise.
+- The `toContain(swap.accountToDebit.accountName)` and `toContain(swap.accountToCredit.accountName)` assertions are replaced with the resolved locals.
+- Ticker, address, amount, provider, and `swapId` assertions are unchanged — those already read the right source.
+- `TokenType` must be in scope. If it is not already imported at the top of the file, add it alongside the existing enum imports, e.g. `import { TokenType } from "@ledgerhq/live-common/e2e/enum/Account"` (verify the exact export path against the file — it lives alongside `TokenAccount`).
+
+This change is backward-compatible: step 1 (SOL → native ETH) takes neither `if` branch, so `accountToCreditNameInCsv` still resolves to `"Ethereum 1"` (the step-1 expectation). No adjustment to step 1 is required — but your rerun matrix must still include it, because a driver change always has to clear the existing green before you trust it on the new case.
+
+**Step 3 — Create the spec** at `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts`:
 
 ```ts
 import { Account, TokenAccount } from "@ledgerhq/live-common/e2e/enum/Account";
@@ -5870,11 +5917,14 @@ Paste a screenshot of the step tree into the PR body when you open the review.
 
 ### 4.10.13 Commit the Change
 
-Three concerns, three commits is cleanest:
+Four concerns, four commits is cleanest:
 
 ```bash
 git add libs/ledger-live-common/src/e2e/enum/Addresses.ts
 git commit -m "test(mobile): add SWAP_HISTORY_ERC20_* addresses to Addresses enum"
+
+git add e2e/mobile/page/trade/swap.page.ts
+git commit -m "test(mobile): handle ERC20 parent-name fallback in swap CSV assertion"
 
 git add e2e/mobile/userdata/swap-history.json
 git commit -m "test(mobile): add ERC20 (USDT) swap history entry to swap-history userdata"
@@ -5883,7 +5933,7 @@ git add e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.sp
 git commit -m "test(mobile): add ERC20 receive scenario to swap history export (QAA-702)"
 ```
 
-Why three commits: each concern is independently reversible and reviewable. The `Addresses` enum change touches live-common and may want isolated review by that module's owners; the fixture change is reusable for future SPL/BSC scenarios; the spec is the coverage delivery. If the team's norm is one commit per PR (check recent merged PRs under `e2e/mobile/`), squash on merge.
+Why four commits: each concern is independently reversible and reviewable. The `Addresses` enum change touches live-common and may want isolated review by that module's owners; the `swap.page.ts` change is a driver-level contract that affects every swap spec that ever runs `checkExportedFileContents`, so reviewers will want to inspect it alone; the fixture change is reusable for future SPL/BSC scenarios; the spec is the coverage delivery. If the team's norm is one commit per PR (check recent merged PRs under `e2e/mobile/`), squash on merge.
 
 Conventional-Commit shape is per `.claude/rules/git-workflow.md`: `<type>(scope): <imperative description>`. Scope is `mobile` (matching the `e2e/mobile/` root). Type is `test` — we are strictly adding coverage; no product behaviour moves.
 
@@ -5927,25 +5977,26 @@ Once this template is green, adding USDC, DAI, or LINK is mechanical. Each new s
 
 If the team later asks for a dedicated B2CQA per currency (e.g. `B2CQA-9999 — Swap history export, USDC receive`), flip `tmsLinks` to the new ID. Until then, reuse `B2CQA-604` — that is the commitment recorded in Pavlo's comment.
 
-### 4.10.16 Reference — Changes That May Be Required in `checkExportedFileContents`
+### 4.10.16 Reference — Why `checkExportedFileContents` Needed the ERC20 Branch
 
-The driver's assertion at `swap.page.ts:163-176` reads:
+Phase 4 Step 2 changed a driver shared by every swap export spec. The change deserves a short memo so future readers understand why step 1 did not need it.
 
-```typescript
-jestExpect(fileContents).toContain(swap.accountToCredit.currency.ticker);
-jestExpect(fileContents).toContain(swap.accountToCredit.accountName);
-jestExpect(fileContents).toContain(swap.accountToCredit.address);
-```
+**What Ledger Live's CSV exporter actually writes.** When you export swap history, the CSV's "From account" / "To account" columns render the **account display label as shown in the wallet UI**. For a native account (ETH, SOL, BTC), that label is the account's own `accountName` — `"Ethereum 1"`, `"Solana 1"`. For an ERC20 TokenAccount (`Account.ETH_USDT_1`, `Account.ETH_USDC_1`), the wallet UI shows the **parent** ETH account's name because the token sub-account is mounted under it — "Ethereum 1" holds both the native ETH balance and every ERC20 balance at that address. The CSV preserves that hierarchy: ERC20 rows export `"Ethereum 1"`, not `"Tether USD 1"`.
 
-For `TokenAccount.ETH_USDT_1`:
+**Why step 1 passed without the branch.** Step 1 swaps SOL → native ETH. `swap.accountToCredit` is `Account.ETH_1`, not a TokenAccount. Its `accountName` is already `"Ethereum 1"`. `tokenType` is absent (falsy), so the new `if` branch is skipped and the assertion runs unchanged on `swap.accountToCredit.accountName`. Backward compatibility is free.
 
-- `currency.ticker` → `"USDT"` (from `Currency.ETH_USDT` at `libs/ledger-live-common/src/e2e/enum/Currency.ts:98`)
-- `accountName` → `"Tether USD 1"`
-- `address` → the parent Ethereum address (`0x8526F5…0110`)
+**Why QAA-702 would fail without the branch.** In the ERC20 case, `swap.accountToCredit` is `TokenAccount.ETH_USDT_1` with `accountName = "Tether USD 1"`. The CSV never contains that string — it contains `"Ethereum 1"`. Without the parent-name fallback, `toContain("Tether USD 1")` fails on the very first assertion; the driver cannot even describe what the CSV actually says.
 
-All three are already assertable without modification. **Do not change the driver pre-emptively.** If and only if your Detox run surfaces a specific `toContain` miss — for example the CSV writes `"Tether USD"` as the account name instead of `"Tether USD 1"`, meaning the index suffix is not exported — consider a minimal fix in that `toContain` line (e.g., loosen to `currency.name` or assert the substring that the app actually emits). Any such change is a driver change, affects step 1 too, and must be justified in the PR body.
+**Two guards, not one.** The condition is `tokenType === TokenType.ERC20 && parentAccount`. Both checks matter:
 
-> **Verify:** run the spec once, let the assertion fail loudly if it will, then decide. Do not guess.
+- `tokenType === TokenType.ERC20` narrows to the CSV-formatting case. If Ledger Live ever exports SPL (Solana) or other token families with a different CSV rule, this branch must be extended, not reused.
+- `parentAccount` is a defensive null-check. A malformed enum entry (`tokenType` set, `parentAccount` missing) would otherwise throw on `parentAccount.accountName`.
+
+**What it does not cover.** The symmetric case — a swap where the DEBIT side is an ERC20 — is also handled by Step 2's code (the `accountToDebit` branch). No ERC20-debit spec exists yet in the mobile suite; when one lands (e.g., QAA-715: "USDT → BTC from-ERC20 swap history"), this branch is the reason it will not need a second driver change.
+
+**What it does not patch.** `currency.ticker`, `currency.address`, `provider.name`, `swapId`, and `swap.amount` were already correct for every account type. Those assertions are untouched.
+
+> **If a future CSV format change breaks this assumption,** revisit the branch. The truth is what the CSV writes, not what our enum holds — always read the artifact first (`e2e/mobile/artifacts/ledgerwallet-swap-history.csv`) before blaming the spec.
 
 ### 4.10.17 PR Checklist
 
@@ -5958,7 +6009,8 @@ All three are already assertable without modification. **Do not change the drive
 - [ ] Reviewers: `@ledgerhq/wallet-xp` + Swap-automation owner
 - [ ] QAA-702 linked in the PR description
 - [ ] `libs/ledger-live-common/src/e2e/enum/Addresses.ts` has the two new `SWAP_HISTORY_ERC20_*` constants and nothing else was moved
-- [ ] No changes to `swap.other.ts` or `swap.page.ts` (unless 4.10.16 applied — then justify)
+- [ ] `e2e/mobile/page/trade/swap.page.ts` `checkExportedFileContents` has the ERC20 parent-name fallback (Phase 4 Step 2) and the step-1 spec still passes after the driver change
+- [ ] No changes to `swap.other.ts`
 
 <div class="chapter-outro">
 <strong>Key takeaway.</strong> QAA-702 is a surgical coverage addition, not a rewrite. The driver is already ERC20-safe; the page object's assertions already read ticker/accountName/address from any <code>Account | TokenAccount</code>; only two things were genuinely missing — a spec file declaring the USDT receive scenario, and a matching entry in the <code>swap-history</code> userdata fixture. The work that carries weight is the <em>diligence</em>: reading the driver first, inspecting the fixture to know whether you are adding or reusing, matching the <code>swapId</code> and <code>provider</code> fields byte-for-byte, and running three times before opening the PR. That is the loop every real QAA ticket rewards.
@@ -6023,7 +6075,7 @@ All three are already assertable without modification. **Do not change the drive
 <button class="quiz-choice" data-value="C">C) Delete the fixture entry</button>
 <button class="quiz-choice" data-value="D">D) Change <code>Swap</code>'s constructor</button>
 </div>
-<p class="quiz-explanation">A red assertion is evidence, not a verdict. Read the artifact; compare it to the expected substring. Most of the time the mismatch is a fixture field (e.g., the account name in the userdata differs from <code>accountName</code> in the enum) — not a driver bug.</p>
+<p class="quiz-explanation">A red assertion is evidence, not a verdict. Read the artifact; compare it to the expected substring. In QAA-702 the CSV turns out to contain <code>"Ethereum 1"</code> (the parent account's name) rather than <code>"Tether USD 1"</code> — a CSV-formatting behaviour the driver did not yet account for, which is exactly why Phase 4 Step 2 adds the ERC20 parent-name fallback to <code>checkExportedFileContents</code>. Sometimes the mismatch is a fixture field, sometimes it is a driver contract the product has changed under you. The investigation rule is the same either way: read the artifact first, decide second.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
