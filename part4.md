@@ -5582,65 +5582,13 @@ async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) 
 - **Matches the bug.** LIVE-19533 was triggered by an ERC20 receive; USDT is the archetype.
 - **USDT is the highest-volume ERC20 Ledger Live users receive from swaps.** USDC is a close second, covered in 4.10.13 as the obvious follow-up.
 - **The enum entry already exists.** `TokenAccount.ETH_USDT_1` is defined at `libs/ledger-live-common/src/e2e/enum/Account.ts:319` with `accountName: "Tether USD 1"`, `Currency.ETH_USDT` (ticker `"USDT"`), and `parentAccount: Account.ETH_1`.
-- **Re-uses step 1's seed.** The `swap-history` userdata already contains a USDT `TokenAccountRaw` under the Ethereum parent at `0x8526F50A2FA870B1B7b91cc054aa06799dAc0110` — the same address as `Addresses.SWAP_HISTORY_ETH_TO`. This is not a coincidence. ERC20 balances are held *at the parent Ethereum account's address*; there is no separate "USDT address". We will reuse the enum constant directly.
+- **Reuses the step-1 spec shape exactly.** Only three fields change in the spec: the receive-side account (`TokenAccount.ETH_USDT_1` instead of `Account.ETH_1`), the `swapId`, and the two address constants (because the swap we capture in Phase 2 will be executed on a different SOL/ETH holder pair from step 1 — we will add two new entries to `Addresses.ts`).
 
-**Alternative considered: SOL → USDC.** Equally valid; `TokenAccount.ETH_USDC_1` exists at `Account.ts:310`. If the Swap team prefers USDC as the first ERC20 scenario, the only changes are the enum name and the `swapId`. Either choice discharges the ticket. We pick USDT and mention USDC in the reference section.
+**Alternative considered: SOL → USDC.** Equally valid; `TokenAccount.ETH_USDC_1` exists at `Account.ts:310`. If the Swap team prefers USDC as the first ERC20 scenario, the only changes are the enum name and the captured `swapId`. Either choice discharges the ticket. We pick USDT and mention USDC in the reference section.
 
-**Why not ETH → USDT?** A native-to-ERC20 swap would cover the scenario too, but the step 1 precedent (`SOL_1` as debit) and the fixture shape (SOL history + ETH destination) make **keeping the debit side as SOL** the lowest-churn change. One data axis moves — the Receive side — which is what the ticket asks for.
+**Why not ETH → USDT?** A native-to-ERC20 swap would cover the scenario too, but the step-1 precedent (`SOL_1` as debit) and the fixture shape (SOL history on the sending side) make **keeping the debit side as SOL** the lowest-churn change. One data axis moves — the Receive side — which is what the ticket asks for.
 
-### 4.10.5 Checking the Userdata Fixture
-
-The driver hardcodes `userdata: "swap-history"` → `e2e/mobile/userdata/swap-history.json`. We need to know whether it already contains a SOL → USDT swap operation.
-
-From the repo root:
-
-```bash
-grep -n "\"swapId\"\|\"provider\":\|\"receiverAccountId\"" \
-  e2e/mobile/userdata/swap-history.json
-```
-
-You get exactly two entries — both SOL → **native ETH** — at `$.accounts[?].data.swapHistory[]`:
-
-```json
-{
-  "status": "finished",
-  "provider": "exodus",
-  "operationId": "js:2:solana:21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub:solanaSub-...-OUT",
-  "swapId": "wQ90NrWdvJz5dA4",
-  "receiverAccountId": "js:2:ethereum:0x8526F50A2FA870B1B7b91cc054aa06799dAc0110:",
-  "fromAmount": "70000000",
-  "toAmount": "3546620000000000"
-}
-```
-
-There is no ERC20-receive operation. That means **we have to add one** before the new spec can pass. This is the main piece of "real work" in the ticket.
-
-The append goes into the SOL account's `swapHistory` array (same place as the existing two entries, so the UI picks it up on the SOL side). The new entry:
-
-```json
-{
-  "status": "finished",
-  "provider": "exodus",
-  "operationId": "js:2:solana:21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub:solanaSub-<operation-hash>-OUT",
-  "swapId": "<new-swap-id>",
-  "receiverAccountId": "js:2:ethereum:0x8526F50A2FA870B1B7b91cc054aa06799dAc0110:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
-  "tokenId": "ethereum/erc20/usd_tether__erc20_",
-  "fromAmount": "70000000",
-  "toAmount": "25000000"
-}
-```
-
-Three fields to notice:
-
-- **`receiverAccountId`** now points to the **USDT sub-account** of the ETH parent. The encoded suffix (`+ethereum%2Ferc20%2F...`) is how live-common disambiguates the token account from the parent. You can copy the exact suffix from the existing USDT `TokenAccountRaw` already in `swap-history.json` (grep for `"tokenId": "ethereum/erc20/usd_tether__erc20_"`) — the token sub-account is already present under the ETH parent; we are only adding the swap-history entry that references it.
-- **`tokenId`** is required on ERC20 receive entries; it is absent from the two native-receive entries.
-- **`swapId`** must be new and unique in the fixture. Use a fresh short alphanumeric (e.g., `"ERC20TestUsdt01"`). It does **not** need to exist at Exodus, because the driver's assertion only reads the CSV — it does not query the partner.
-
-> **Verify before you commit:** run `jq '[.[] | .data.swapHistory | length] | add' e2e/mobile/userdata/swap-history.json` and confirm the count increased by 1. Run `jq` again on the new entry to make sure the JSON is valid. A broken fixture kills every spec in `specs/swap/otherTestCases/`.
-
-**Handover path.** If extending the fixture feels risky (it is a 2.3 MB file owned by the Swap-automation sub-team), you have a legitimate escape hatch: open a companion ticket in QAA-919's epic asking the fixture owner to add the ERC20 op, pause your branch, and land the spec in a second PR once the fixture merges. This is slower but cleaner politically. For most onboarding-level contributions, extending the fixture inline is fine — the diff is one JSON object.
-
-### 4.10.6 Create a Branch
+### 4.10.5 Create a Branch
 
 Following the repo convention for new E2E coverage — `test/` prefix, ticket slug:
 
@@ -5653,9 +5601,9 @@ pnpm i
 git checkout -b test/qaa-702-swap-history-erc20-export
 ```
 
-Why `test/` and not `feat/`: the change lives entirely under `e2e/mobile/` and `e2e/mobile/userdata/`. We are shipping test coverage, not product behaviour. This matches the commit type we will use below (`test(mobile): ...`) — check recent PRs landing swap specs to confirm the team's current preference; `feat(mobile):` is also tolerated.
+Why `test/` and not `feat/`: the change lives entirely under `e2e/mobile/`, `e2e/mobile/userdata/`, and `libs/ledger-live-common/src/e2e/enum/`. We are shipping test coverage, not product behaviour. This matches the commit type we will use below (`test(mobile): ...`) — check recent PRs landing swap specs to confirm the team's current preference; `feat(mobile):` is also tolerated.
 
-### 4.10.7 Run the Baseline in Isolation
+### 4.10.6 Run the Baseline in Isolation
 
 Never judge your own change against a broken baseline. Confirm step 1 is green **before** touching anything.
 
@@ -5663,10 +5611,10 @@ Never judge your own change against a broken baseline. Confirm step 1 is green *
 
 ```bash
 # iOS — needs macOS + Xcode
-pnpm --filter e2e-mobile run build:ios:debug
+pnpm --filter ledger-live-mobile-e2e-tests run build:ios:debug
 
 # Android — needs Android SDK + a running emulator
-pnpm --filter e2e-mobile run build:android:debug
+pnpm --filter ledger-live-mobile-e2e-tests run build:android:debug
 ```
 
 **Run step 1 alone:**
@@ -5676,28 +5624,163 @@ cd e2e/mobile
 pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperations"
 ```
 
-Expected output: **1 test passing**, the SOL → Ethereum export. The test takes about 45–90 seconds end-to-end (Speculos boot, app launch, userdata hydration, navigation, CSV write, CSV read, teardown).
+Expected output: **1 test passing**, the SOL → native-ETH export. The test takes about 45–90 seconds end-to-end (Speculos boot, app launch, userdata hydration, navigation, CSV write, CSV read, teardown).
 
 If this run is red, **stop**. It means either your environment is broken (Speculos not running, wrong Detox build, stale metro cache) or the step 1 spec has started failing for unrelated reasons. Chapters 4.4 (Toolchain) and 4.8 (Running & Debugging) walk through the recovery paths. Fix the environment first; resume QAA-702 once the baseline is green.
 
-### 4.10.8 Implement the Change
+### 4.10.7 Phase 1 — Check if the Pair Exists in the Current Fixture
 
-Two files change: the new spec, and the userdata fixture.
+The driver hardcodes `userdata: "swap-history"` → `e2e/mobile/userdata/swap-history.json`. We need to know whether it already contains a SOL → USDT swap operation. Rather than grepping through 5,000 lines of dense JSON, load the fixture into Ledger Live Desktop and browse the swap history in the product UI — faster, and it lets you see the entries as a user would.
 
-**Step 1 — Create the spec.** New file `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts`:
+**On macOS the LLD state file is** `~/Library/Application Support/Ledger Live/app.json` (Linux: `~/.config/Ledger Live/app.json`; Windows: `%AppData%/Ledger Live/app.json`). The fixture file has the same shape as that app state, by design.
 
-```typescript
+Steps:
+
+1. **Quit Ledger Live Desktop** completely (Cmd-Q on macOS). A running instance will overwrite any change you make on disk when it exits.
+2. **Back up your personal state** so you can restore it after:
+
+   ```bash
+   cd "$HOME/Library/Application Support/Ledger Live"
+   mv app.json app2.json
+   ```
+3. **Copy the fixture in:**
+
+   ```bash
+   cp /path/to/ledger-live/e2e/mobile/userdata/swap-history.json \
+      "$HOME/Library/Application Support/Ledger Live/app.json"
+   ```
+4. **Relaunch Ledger Live Desktop.** It will hydrate with the fixture's accounts and swap history.
+5. **Navigate to Swap → History.** Scan for any SOL → USDT entries.
+
+You will find **two SOL → native-ETH** operations (both `wQ90NrWdvJz5dA4`) and **no ERC20 receive entry**. That is the gap QAA-702 asks us to close — so we need to produce a real ERC20-receive swap and fold it into the fixture.
+
+> **Restore your personal state when you're done experimenting:** quit LLD, rename `app2.json` back to `app.json`. Don't forget this — running your personal account list through a dev build of LLD is not the mistake we want to debug.
+
+### 4.10.8 Phase 2 — Create the Pair on a Real Device
+
+To produce a genuine swap operation we execute it for real, then scrape the result off the exported CSV.
+
+1. **Start from the fixture state** (Phase 1 step 3 already put the fixture in `app.json`). Launch LLD.
+2. **Plug in a Ledger device** loaded with the **QAA test seed**. That seed owns the Solana account (`Solana 1`) already present in the fixture — otherwise the swap won't sign.
+3. **Open Swap.** Choose **SOL** as the *from* asset (pick your existing Solana 1 account), **USDT** on Ethereum as the *to* asset.
+4. **Enter the minimum amount — `0.07` SOL** (on French locale, LLD renders this as `0,07` — the comma form is what the Swap class stores, and what you'll pass back in the spec below).
+5. **Select a quote.** Today only **NEAR Intents** quotes this pair; take it. Quote availability drifts over time, so note whatever you use.
+6. **Confirm the swap on the device.** Let it execute to completion.
+7. **Go to Swap → History.** Confirm the new entry shows up.
+8. **Click "Export operations"** to generate the CSV, then open the file.
+9. **Capture three values from the CSV** — you will need them verbatim for Phase 3 and Phase 4:
+   - The **swap ID** (UUID, e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`).
+   - The **Solana sender address** — the SOL holder that paid for the swap.
+   - The **Ethereum recipient address** — the ETH holder that received the USDT.
+
+Because the swap was executed on the QAA seed (not the synthetic fixture seed from step 1), both addresses will be new — they do NOT match `SWAP_HISTORY_SOL_FROM` or `SWAP_HISTORY_ETH_TO`. That's why we will add two new `Addresses.ts` constants in Phase 4.
+
+### 4.10.9 Phase 3 — Import the New Operation into the Test Fixture
+
+After Phase 2 the new swap lives in your local `app.json` at `~/Library/Application Support/Ledger Live/app.json`. It needs to be copied into the test fixture `e2e/mobile/userdata/swap-history.json` so the spec has something to assert against.
+
+The scale mismatch: `app.json` is roughly **25,000 lines** (full LLD state — every account, every operation, every cached balance, every feature-flag override), while `swap-history.json` is closer to **5,000 lines** (trimmed to what the swap suite actually needs). You do **not** want to wholesale replace the fixture with your personal dump. Instead, extract just the Solana account block containing the new swap and graft it in.
+
+Steps:
+
+1. **Open `app.json` in an editor** that can handle a 25k-line file (VS Code is fine). Format it (`jq '.' app.json > app.formatted.json` or run your editor's Prettier-on-save) so the indentation matches the fixture.
+2. **Search for the swap ID** you captured in Phase 2 — e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`. You will land inside the Solana account's `data.swapHistory` array. Scroll out to the enclosing *accounts[i]* wrapper — the `{ "data": { ... }, "version": 1 }` object.
+3. **Copy the entire accounts[i] wrapper** — from the opening `{` (immediately before `"data": {`) through the matching closing `}` after `"version": 1`. Example shape (abbreviated):
+
+   ```json
+   {
+     "data": {
+       "id": "js:2:solana:FDaDTiZbkXh5H5mdfsW3UHVME15qgMPAcKE7JowzU61Z:solanaSub",
+       "freshAddress": "FDaDTiZbkXh5H5mdfsW3UHVME15qgMPAcKE7JowzU61Z",
+       "operationsCount": 3,
+       "operations": [ /* … */ ],
+       "currencyId": "solana",
+       "balance": "77232851",
+       "swapHistory": [
+         {
+           "status": "finished",
+           "provider": "nearintents",
+           "operationId": "js:2:solana:…-OUT",
+           "swapId": "1172570f-5a02-43b9-83fc-cad47bfd12f3",
+           "receiverAccountId": "js:2:ethereum:0x70AAEEe70118a065ddF84dF6669b496A447C8CcC:",
+           "tokenId": "ethereum/erc20/usd_tether__erc20_",
+           "fromAmount": "69637880",
+           "toAmount": "5623953.000000000000000000000000000000000106324",
+           "finalAmount": "5.611443"
+         },
+         {
+           "status": "finished",
+           "provider": "nearintents",
+           "operationId": "js:2:solana:…-OUT",
+           "swapId": "1172570f-5a02-43b9-83fc-cad47bfd12f3",
+           "receiverAccountId": "js:2:ethereum:0x70AAEEe70118a065ddF84dF6669b496A447C8CcC:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
+           "tokenId": "js:2:ethereum:0x70AAEEe70118a065ddF84dF6669b496A447C8CcC:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
+           "fromAmount": "69637880",
+           "toAmount": "5622578",
+           "finalAmount": "5.611443"
+         }
+       ],
+       "name": "Solana 1",
+       "starred": false
+     },
+     "version": 1
+   }
+   ```
+
+   Notice the pattern: LLD stores **two** entries per ERC20 swap — one addressed to the parent ETH account (native form) and one to the ETH+token sub-account (the `+ethereum%2Ferc20%2F...` suffix). Keep both; the driver's CSV export assertion reads whichever the UI hands it.
+4. **Open `e2e/mobile/userdata/swap-history.json`.** Search for the existing step-1 swap ID, `wQ90NrWdvJz5dA4`. You'll find it inside the existing SOL account block.
+5. **Paste your copied accounts[i] wrapper immediately after** the existing SOL account block's closing `}`. Fix the commas: the previous block must end with `,`, and yours is followed by whatever separator (`,` or `]`) was there already.
+6. **Validate the JSON:**
+
+   ```bash
+   jq '.' e2e/mobile/userdata/swap-history.json > /dev/null
+   ```
+
+   A syntax error here will kill every spec in `specs/swap/otherTestCases/`, so validate before moving on.
+7. **(Optional) Trim noise.** LLD may have filled your account block with additional fields the fixture does not use (per-session feature-flag overrides, analytics breadcrumbs). Nothing forces you to trim them — but if the fixture grows past what feels reasonable, compare against neighbouring accounts already in the file and delete the fields they don't include.
+
+### 4.10.10 Phase 4 — Extend the Addresses Enum and Implement the Spec
+
+Two files change: `Addresses.ts` gets two new constants, and the new spec file wires everything together.
+
+**Step 1 — Extend `libs/ledger-live-common/src/e2e/enum/Addresses.ts`:**
+
+```ts
+export enum Addresses {
+  BTC_NATIVE_SEGWIT_1 = "bc1q2dh3p38d3pavjkvvk7wr25dcdnclvjnll9kta9",
+  SANCTIONED_ETHEREUM = "0x04DBA1194ee10112fE6C3207C0687DEf0e78baCf",
+  ETH_2 = "0xc79c7a29c40Ce8F5746af2c956F93F27e2820307",
+  ETH_OTHER_SEED = "0xce12D0A5cFf4A88ECab96ff8923215Dff366127b",
+  SOL_OTHER_SEED = "DLVArScX1BQEr7gZSSpHMGMq7HKKFKdFF82Cs6PvEKVC",
+  SOL_GIGA_1_ATA_ADDRESS = "4h9zusLsPZsZVajWH1Dtgd4ccopL4fvNAE7T8LxX4H1g",
+  SOL_GIGA_2_ATA_ADDRESS = "FWS3ZK9E4vc6Wz29vWzPpY7CLNebBRYe1FaxY7EdQDGf",
+  SOL_WIF_2_ATA_ADDRESS = "FDFqWGGg9mP1JBVLS4UXDhs4y5mHnHNDXQxCGUHr81Vz",
+  SWAP_HISTORY_SOL_FROM = "21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub",
+  SWAP_HISTORY_ETH_TO = "0x8526F50A2FA870B1B7b91cc054aa06799dAc0110",
+  SWAP_HISTORY_ERC20_SOL_FROM = "FDaDTiZbkXh5H5mdfsW3UHVME15qgMPAcKE7JowzU61Z",
+  SWAP_HISTORY_ERC20_ETH_USDT_TO = "0x70AAEEe70118a065ddF84dF6669b496A447C8CcC",
+}
+```
+
+The last two entries are the `from` and `to` addresses you captured from the CSV in Phase 2. Keep the existing `SWAP_HISTORY_*` constants untouched — step 1 still consumes them.
+
+**Step 2 — Create the spec** at `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts`:
+
+```ts
 import { Account, TokenAccount } from "@ledgerhq/live-common/e2e/enum/Account";
 import { Provider } from "@ledgerhq/live-common/e2e/enum/Provider";
 import { Addresses } from "@ledgerhq/live-common/e2e/enum/Addresses";
 import { runExportSwapHistoryOperationsTest } from "./swap.other";
 
+const solMinAmount = "0,07";
+const swapId = "1172570f-5a02-43b9-83fc-cad47bfd12f3";
+
 const swapHistoryERC20TestConfig = {
-  swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, "0.07"),
-  provider: Provider.EXODUS,
-  swapId: "ERC20TestUsdt01",
-  addressFrom: Addresses.SWAP_HISTORY_SOL_FROM,
-  addressTo: Addresses.SWAP_HISTORY_ETH_TO,
+  swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, solMinAmount),
+  provider: Provider.NEAR_INTENTS,
+  swapId,
+  addressFrom: Addresses.SWAP_HISTORY_ERC20_SOL_FROM,
+  addressTo: Addresses.SWAP_HISTORY_ERC20_ETH_USDT_TO,
   tmsLinks: ["B2CQA-604"],
   tags: [
     "@NanoSP",
@@ -5726,41 +5809,16 @@ runExportSwapHistoryOperationsTest(
 
 Field-by-field justification:
 
-- **`swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, "0.07")`** — debit side unchanged (SOL, same as step 1, same fixture entry origin); credit side is now the ERC20 token account. The amount `"0.07"` matches the `fromAmount` on the fixture entry (70000000 lamports = 0.07 SOL); the driver asserts this string appears in the CSV. `Swap` is a global injected by the Jest environment — do not `import` it.
-- **`provider: Provider.EXODUS`** — must match the `"provider": "exodus"` field we wrote into the fixture.
-- **`swapId: "ERC20TestUsdt01"`** — the exact string we added to the fixture. The driver looks this up to verify the CSV row.
-- **`addressFrom: Addresses.SWAP_HISTORY_SOL_FROM`** — unchanged. Same Solana holder as step 1.
-- **`addressTo: Addresses.SWAP_HISTORY_ETH_TO`** — reuse of step 1's Ethereum holder. **This is the important bit.** USDT is an ERC20 token; its balance and operations are indexed under the *parent Ethereum address*, not under a separate "USDT address". The holder address is the same whether you receive native ETH or USDT. No new constant in `Addresses.ts` is needed.
-- **`tmsLinks: ["B2CQA-604"]`** — reuse of the same Xray case ID per Pavlo's comment. In the Allure output this spec will display a `B2CQA-604` badge alongside step 1's identical badge; Xray is fine with two automated executions mapping to one test case.
-- **`tags`** — we kept both families because the pair is cross-family (SOL → USDT on Ethereum). A CI filter restricted to `@family-evm` should still pick this spec up, since `@family-evm` is present.
+- **`swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, solMinAmount)`** — debit is `Account.SOL_1`, credit is the ERC20 token account `TokenAccount.ETH_USDT_1`. Note the `TokenAccount` import is added to the same `@ledgerhq/live-common/e2e/enum/Account` module as the base `Account` enum. The amount is passed as the string `"0,07"` (comma form — that's what the fixture stores under the French locale). `Swap` is a global injected by the Jest environment — do not `import` it.
+- **`solMinAmount = "0,07"`** hoisted to a named constant so the magic number doesn't get lost in the object.
+- **`provider: Provider.NEAR_INTENTS`** — must match the `"provider": "nearintents"` field in the fixture entry you just pasted.
+- **`swapId`** hoisted and set to the UUID you copied from the CSV; the driver uses it verbatim to locate the CSV row.
+- **`addressFrom: Addresses.SWAP_HISTORY_ERC20_SOL_FROM`** — the Solana holder the swap was executed from (captured in Phase 2, added to the enum in Step 1 above).
+- **`addressTo: Addresses.SWAP_HISTORY_ERC20_ETH_USDT_TO`** — the Ethereum holder that received the USDT. Two new constants, not a reuse of step 1's — different seed, different addresses.
+- **`tmsLinks: ["B2CQA-604"]`** — reuse of the same Xray case ID per Pavlo's step-2 comment on the ticket. In the Allure output this spec will display a `B2CQA-604` badge alongside step 1's identical badge; Xray is fine with two automated executions mapping to one test case.
+- **`tags`** — same set as step 1. The pair is cross-family (SOL → USDT on Ethereum) so both `@family-solana` and `@family-evm` apply; a CI filter on either will pick this spec up.
 
-**Step 2 — Extend the userdata fixture.** Open `e2e/mobile/userdata/swap-history.json` and locate the SOL account's `swapHistory` array (around line 4181 — right after the two `wQ90NrWdvJz5dA4` entries). Append the ERC20-receive entry shown in 4.10.5:
-
-```json
-,
-{
-  "status": "finished",
-  "provider": "exodus",
-  "operationId": "js:2:solana:21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub:solanaSub-<fresh-hash>-OUT",
-  "swapId": "ERC20TestUsdt01",
-  "receiverAccountId": "js:2:ethereum:0x8526F50A2FA870B1B7b91cc054aa06799dAc0110:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
-  "tokenId": "ethereum/erc20/usd_tether__erc20_",
-  "fromAmount": "70000000",
-  "toAmount": "25000000"
-}
-```
-
-Replace `<fresh-hash>` with any unique ~88-char base58-looking string (copy from the existing `wQ90NrWdvJz5dA4` operationId and flip a few characters). Validate with:
-
-```bash
-jq '.' e2e/mobile/userdata/swap-history.json > /dev/null   # JSON well-formed
-jq '[.[] | .data.swapHistory | length] | add' \
-  e2e/mobile/userdata/swap-history.json                    # should be 3 (was 2)
-```
-
-> **Verify:** confirm the `receiverAccountId` suffix matches the existing USDT `TokenAccountRaw` id in the same file. Search for `"tokenId": "ethereum/erc20/usd_tether__erc20_"` — the sub-account should already exist under the ETH parent at `0x8526F5...0110`. Mismatched suffixes mean the swap entry will render in the UI as an orphan and the export may omit it.
-
-### 4.10.9 Rerun the Tests
+### 4.10.11 Rerun the Tests
 
 With the spec and fixture in place, run only the new file:
 
@@ -5771,10 +5829,11 @@ pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperationsERC20"
 
 **On the first run, expect RED.** Typical first-fail causes, in order of likelihood:
 
-1. **Fixture JSON is malformed** — most common. `jq .` on the file catches this in one command. Fix the comma/brace that went missing when you appended.
-2. **`swapId` mismatch** between spec and fixture. Re-read both strings; the driver compares byte-for-byte.
-3. **`toContain` miss on `swap.amount`.** The amount `"0.07"` you passed to the `Swap` constructor must appear *as written* in the CSV. If you see a `toContain("0.07")` failure, check the fixture's `fromAmount` (70000000 = 0.07 SOL at 9 decimals) matches what you claimed in the spec.
-4. **`toContain` miss on `swap.accountToCredit.accountName`** — the driver asserts that `"Tether USD 1"` appears in the exported CSV. If the product has recently renamed the default USDT account label, you will need to align `TokenAccount.ETH_USDT_1.accountName` with reality (a live-common change — separate concern).
+1. **Fixture JSON is malformed** — most common. `jq .` on the file catches this in one command. Fix the comma/brace that went missing when you pasted the accounts block in Phase 3.
+2. **`swapId` mismatch** between spec and fixture. The UUID you captured from the CSV (e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`) must appear verbatim in both files; the driver compares byte-for-byte.
+3. **`toContain` miss on `swap.amount`.** The amount string you pass to the `Swap` constructor must appear *as written* in the CSV. Here it is `"0,07"` (comma — the locale form Ledger Live writes to the CSV). If you see a `toContain("0,07")` failure, open the CSV and confirm what character the app actually used; on an English-locale build it may write `0.07` instead, in which case align the spec's `solMinAmount` with the CSV.
+4. **`provider` mismatch.** `Provider.NEAR_INTENTS` resolves to the string `"nearintents"` in the enum; the fixture entry must use the same key. If you took the swap through a different provider, update both.
+5. **`toContain` miss on `swap.accountToCredit.accountName`** — the driver asserts that `"Tether USD 1"` appears in the exported CSV. If the product has recently renamed the default USDT account label, you will need to align `TokenAccount.ETH_USDT_1.accountName` with reality (a live-common change — separate concern, cover it in a follow-up PR).
 
 Walk failures by opening the Detox console output, then the Allure report (next section), then iterating. Do **not** change the driver to "work around" a fixture problem. The driver is shared; it is correct for step 1 and for every sibling in `swap.other.ts`.
 
@@ -5788,7 +5847,7 @@ done
 
 All three passes is the acceptance bar.
 
-### 4.10.10 Verify with Allure
+### 4.10.12 Verify with Allure
 
 From `e2e/mobile/`:
 
@@ -5809,11 +5868,14 @@ This runs `allure generate ./artifacts` then `allure open`. In the report:
 
 Paste a screenshot of the step tree into the PR body when you open the review.
 
-### 4.10.11 Commit the Change
+### 4.10.13 Commit the Change
 
-Two concerns, two commits is cleanest:
+Three concerns, three commits is cleanest:
 
 ```bash
+git add libs/ledger-live-common/src/e2e/enum/Addresses.ts
+git commit -m "test(mobile): add SWAP_HISTORY_ERC20_* addresses to Addresses enum"
+
 git add e2e/mobile/userdata/swap-history.json
 git commit -m "test(mobile): add ERC20 (USDT) swap history entry to swap-history userdata"
 
@@ -5821,11 +5883,11 @@ git add e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.sp
 git commit -m "test(mobile): add ERC20 receive scenario to swap history export (QAA-702)"
 ```
 
-Why two commits: the fixture change is reusable — a future SPL or BSC-token scenario may want to add further entries without touching the spec, and having the fixture commit stand alone makes reverts and cherry-picks precise. If the team's norm is one commit per PR (check recent merged PRs under `e2e/mobile/`), squash on merge.
+Why three commits: each concern is independently reversible and reviewable. The `Addresses` enum change touches live-common and may want isolated review by that module's owners; the fixture change is reusable for future SPL/BSC scenarios; the spec is the coverage delivery. If the team's norm is one commit per PR (check recent merged PRs under `e2e/mobile/`), squash on merge.
 
 Conventional-Commit shape is per `.claude/rules/git-workflow.md`: `<type>(scope): <imperative description>`. Scope is `mobile` (matching the `e2e/mobile/` root). Type is `test` — we are strictly adding coverage; no product behaviour moves.
 
-### 4.10.12 Open the PR with `/create-pr`
+### 4.10.14 Open the PR with `/create-pr`
 
 From the repo root:
 
@@ -5855,17 +5917,17 @@ After CI is green and approvals land:
 3. Move `QAA-702` to **Done** and comment "Step 2 of B2CQA-604 automated in PR #XXXX, spec `swapExportHistoryOperationsERC20.spec.ts`"
 4. In Xray, **B2CQA-604 already reads as Automated** (step 1 did that). If there is a "scenario steps covered" tracking field, mark step 2 as covered. Otherwise no Xray field changes — both steps share the same card.
 
-### 4.10.13 Reference — Extending to Other ERC20 Receive Currencies
+### 4.10.15 Reference — Extending to Other ERC20 Receive Currencies
 
-Once this template is green, adding USDC, DAI, or LINK is mechanical:
+Once this template is green, adding USDC, DAI, or LINK is mechanical. Each new scenario requires **the same four-phase loop**: check fixture (Phase 1) → execute real swap on device (Phase 2) → import JSON block (Phase 3) → spec + `Addresses` entry (Phase 4).
 
-- **USDC.** Replace `TokenAccount.ETH_USDT_1` with `TokenAccount.ETH_USDC_1` (Account.ts:310, accountName `"USD Coin 1"`, `Currency.ETH_USDC`). Add a matching `swap-history.json` entry with the USDC tokenId (verify the exact string in live-common's token registry). New `swapId`. File name `swapExportHistoryOperationsERC20_USDC.spec.ts`.
+- **USDC.** Replace `TokenAccount.ETH_USDT_1` with `TokenAccount.ETH_USDC_1` (Account.ts:310, accountName `"USD Coin 1"`, `Currency.ETH_USDC`). Execute a fresh SOL → USDC swap on the QAA seed, capture the new `swapId` + addresses, append two new `Addresses` entries (`SWAP_HISTORY_ERC20_USDC_SOL_FROM`, `SWAP_HISTORY_ERC20_ETH_USDC_TO`), add the account block to `swap-history.json`, and name the spec `swapExportHistoryOperationsERC20_USDC.spec.ts`.
 - **DAI, LINK, MATIC-on-mainnet.** Same pattern. If the `TokenAccount` enum does not have the entry you need, add it to `libs/ledger-live-common/src/e2e/enum/Account.ts` in a **separate PR** first — the enum file is shared with desktop and wants to be reviewed in isolation.
-- **SPL / Solana tokens (e.g. ETH → GIGA).** Different family, but the driver does not care. The constraint is fixture content: SPL ops have `tokenId` in a different namespace and the `receiverAccountId` suffix is Solana-specific. Take the existing `SOL_GIGA_1` `TokenAccountRaw` in `swap-history.json` (if present) as the template.
+- **SPL / Solana tokens (e.g. ETH → GIGA).** Different family, but the driver does not care. The constraint is fixture content: SPL ops have `tokenId` in a different namespace and the `receiverAccountId` suffix is Solana-specific. Phases 1-3 stay identical; Phase 4 uses `TokenAccount.SOL_GIGA_1` (or equivalent) and Solana-side `Addresses` constants.
 
 If the team later asks for a dedicated B2CQA per currency (e.g. `B2CQA-9999 — Swap history export, USDC receive`), flip `tmsLinks` to the new ID. Until then, reuse `B2CQA-604` — that is the commitment recorded in Pavlo's comment.
 
-### 4.10.14 Reference — Changes That May Be Required in `checkExportedFileContents`
+### 4.10.16 Reference — Changes That May Be Required in `checkExportedFileContents`
 
 The driver's assertion at `swap.page.ts:163-176` reads:
 
@@ -5885,7 +5947,7 @@ All three are already assertable without modification. **Do not change the drive
 
 > **Verify:** run the spec once, let the assertion fail loudly if it will, then decide. Do not guess.
 
-### 4.10.15 PR Checklist
+### 4.10.17 PR Checklist
 
 - [ ] New spec file compiles and runs in isolation
 - [ ] `swap-history.json` validates under `jq .`
@@ -5895,13 +5957,14 @@ All three are already assertable without modification. **Do not change the drive
 - [ ] PR body includes the Allure step-tree screenshot and the fixture-diff highlight
 - [ ] Reviewers: `@ledgerhq/wallet-xp` + Swap-automation owner
 - [ ] QAA-702 linked in the PR description
-- [ ] No changes to `swap.other.ts` or `swap.page.ts` (unless 4.10.14 applied — then justify)
+- [ ] `libs/ledger-live-common/src/e2e/enum/Addresses.ts` has the two new `SWAP_HISTORY_ERC20_*` constants and nothing else was moved
+- [ ] No changes to `swap.other.ts` or `swap.page.ts` (unless 4.10.16 applied — then justify)
 
 <div class="chapter-outro">
 <strong>Key takeaway.</strong> QAA-702 is a surgical coverage addition, not a rewrite. The driver is already ERC20-safe; the page object's assertions already read ticker/accountName/address from any <code>Account | TokenAccount</code>; only two things were genuinely missing — a spec file declaring the USDT receive scenario, and a matching entry in the <code>swap-history</code> userdata fixture. The work that carries weight is the <em>diligence</em>: reading the driver first, inspecting the fixture to know whether you are adding or reusing, matching the <code>swapId</code> and <code>provider</code> fields byte-for-byte, and running three times before opening the PR. That is the loop every real QAA ticket rewards.
 </div>
 
-### 4.10.16 Quiz
+### 4.10.18 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz — QAA-702 Walkthrough</h3>
@@ -5919,37 +5982,37 @@ All three are already assertable without modification. **Do not change the drive
 <p class="quiz-explanation">The test case ID is the contract between Xray and the suite. Pavlo's comment is the single source of truth that the ERC20 scenario belongs under <code>B2CQA-604</code> as step 2 — both specs will carry the same <code>tmsLinks</code> entry.</p>
 </div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> Why is <code>addressTo</code> set to <code>Addresses.SWAP_HISTORY_ETH_TO</code> instead of a new ERC20-specific constant?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> Why do we add <code>SWAP_HISTORY_ERC20_SOL_FROM</code> and <code>SWAP_HISTORY_ERC20_ETH_USDT_TO</code> to <code>Addresses.ts</code> instead of reusing the existing <code>SWAP_HISTORY_SOL_FROM</code> / <code>SWAP_HISTORY_ETH_TO</code> constants?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The <code>Addresses</code> enum is frozen and cannot be extended</button>
-<button class="quiz-choice" data-value="B">B) ERC20 balances and operations are indexed at the parent Ethereum account's address — there is no separate "USDT address". The holder address is the same whether you receive native ETH or USDT</button>
-<button class="quiz-choice" data-value="C">C) Detox cannot hold more than one address constant in memory</button>
-<button class="quiz-choice" data-value="D">D) The fixture does not care about addresses</button>
+<button class="quiz-choice" data-value="A">A) The existing constants are frozen</button>
+<button class="quiz-choice" data-value="B">B) ERC20 tokens require a dedicated non-parent address</button>
+<button class="quiz-choice" data-value="C">C) The Phase-2 swap was executed on the QAA device seed, which has different Solana and Ethereum holders than the step-1 synthetic fixture seed. The new spec's <code>addressFrom</code> / <code>addressTo</code> must match the holders that actually produced the CSV row the spec asserts against</button>
+<button class="quiz-choice" data-value="D">D) Detox forbids reusing enum members across specs</button>
 </div>
-<p class="quiz-explanation">A <code>TokenAccount</code> inherits its address from its <code>parentAccount</code>. <code>TokenAccount.ETH_USDT_1</code>'s parent is <code>Account.ETH_1</code>, which lives at <code>SWAP_HISTORY_ETH_TO</code> in the fixture. Reusing that constant is both correct and the minimum-churn change.</p>
+<p class="quiz-explanation">The driver writes <code>swap.accountToDebit.address = addressFrom</code> / <code>accountToCredit.address = addressTo</code> before calling <code>checkExportedFileContents</code>, which asserts those addresses appear in the exported CSV. If we reused step 1's constants the assertion would fail — the CSV was produced by a different seed and therefore contains different holder addresses. New capture → new constants.</p>
 </div>
 
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> You inspect <code>swap-history.json</code> before coding. You find two swap entries, both SOL &rarr; native ETH. What is the correct next step?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q3.</strong> You load <code>swap-history.json</code> into Ledger Live Desktop (Phase 1) and the Swap → History screen shows only two SOL → native-ETH entries, no ERC20 receive. What is the correct next step?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Skip the ticket — the fixture is not ready</button>
-<button class="quiz-choice" data-value="B">B) Write the spec anyway; the fixture will catch up</button>
-<button class="quiz-choice" data-value="C">C) Delete the existing entries and regenerate</button>
-<button class="quiz-choice" data-value="D">D) Append a new ERC20-receive entry to the SOL account's <code>swapHistory</code> array, validate with <code>jq</code>, then write the spec that references the new entry's <code>swapId</code>/<code>provider</code></button>
+<button class="quiz-choice" data-value="A">A) Hand-craft a synthetic ERC20 entry in the JSON using dummy values</button>
+<button class="quiz-choice" data-value="B">B) Execute a real SOL → USDT swap on the QAA device (Phase 2), export the CSV, extract <code>swapId</code>/<code>addressFrom</code>/<code>addressTo</code>, then graft the new account block from your local <code>app.json</code> into the fixture (Phase 3)</button>
+<button class="quiz-choice" data-value="C">C) Write the spec anyway; the fixture will catch up</button>
+<button class="quiz-choice" data-value="D">D) Skip the ticket — the fixture is not ready</button>
 </div>
-<p class="quiz-explanation">The driver reads the fixture at <code>beforeAll</code> via <code>userdata: "swap-history"</code>. A spec referencing a non-existent swap row will fail on <code>toContain(swapId)</code>. The fixture and the spec are two halves of the same change.</p>
+<p class="quiz-explanation">Fixture entries must describe real, verifiable swaps. Synthesising fake <code>swapId</code>/<code>operationId</code> values leads to drift between the fixture and live-common's account-ID encoding. The 4-phase workflow produces an authentic entry and guarantees all three identifiers (swap ID, from address, to address) come from the same observation.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> The driver calls <code>jestExpect(fileContents).toContain(swap.amount)</code>. You passed <code>"0.07"</code> to the <code>Swap</code> constructor. The fixture's <code>fromAmount</code> is <code>"70000000"</code>. Why is the assertion still correct?</p>
+<p><strong>Q4.</strong> The driver calls <code>jestExpect(fileContents).toContain(swap.amount)</code>. You pass <code>"0,07"</code> (comma) to the <code>Swap</code> constructor via <code>solMinAmount</code>. The fixture's <code>fromAmount</code> is <code>"69637880"</code>. Why is the assertion still correct?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CSV export is human-readable, expressed in SOL units (e.g., <code>"0.07 SOL"</code>); <code>fromAmount</code>'s integer lamports are how live-common stores balances internally. The assertion reads the CSV, not the fixture</button>
+<button class="quiz-choice" data-value="A">A) The CSV export is human-readable in display units (SOL) using the running app's locale — the French locale renders <code>0,07 SOL</code>. <code>fromAmount</code>'s integer lamports are live-common's internal storage. The assertion reads the CSV, not the fixture</button>
 <button class="quiz-choice" data-value="B">B) <code>toContain</code> silently coerces numeric types</button>
-<button class="quiz-choice" data-value="C">C) The driver divides by 10^8 before asserting</button>
+<button class="quiz-choice" data-value="C">C) The driver divides by 10^9 before asserting</button>
 <button class="quiz-choice" data-value="D">D) The assertion is known-broken but nobody has fixed it</button>
 </div>
-<p class="quiz-explanation">Internal units (lamports, wei) and display units (SOL, ETH) are different representations of the same amount. The CSV shows display units; that is what <code>"0.07"</code> matches. The fixture's <code>fromAmount: "70000000"</code> is 0.07 SOL at 9 decimals — consistent, not contradictory.</p>
+<p class="quiz-explanation">Internal units (lamports) and display units (SOL) are different representations of the same amount. The CSV shows display units with the locale's decimal separator; that is what <code>"0,07"</code> matches on a French-locale build. The fixture's <code>fromAmount: "69637880"</code> is 0.069637880 SOL at 9 decimals — within rounding of the 0,07 the user typed, and stored separately from what the CSV shows.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
