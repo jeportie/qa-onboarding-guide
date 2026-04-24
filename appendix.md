@@ -941,7 +941,333 @@ If the name doesn't match, rename it in Android Studio (Device Manager → Edit 
 
 ---
 
-## F: Glossary
+## F: Git Cheat Sheet
+
+<div class="chapter-intro">
+<strong>Why this matters.</strong> Ledger Live is a large monorepo with hundreds of PRs a week. Commits go through <code>commitlint</code>, <code>gitleaks</code>, GPG signing, and pre-commit hooks. A few git missteps can corrupt your local <code>develop</code>, lose a merge commit, or force-push over a teammate's work. This section collects the commands you'll use every day, plus the ones you'll reach for when things go sideways.
+</div>
+
+### Everyday inspection
+
+```bash
+git status                              # working tree + staged state
+git status --short                      # compact one-letter status
+git diff                                # unstaged changes
+git diff --cached                       # staged changes (what will commit)
+git log --oneline -10                   # last 10 commits, compact
+git log --oneline develop..HEAD         # commits on current branch not on develop
+git log --format=%B -1                  # full message of last commit
+git log -1 --format=%B | awk '{print length, $0}'  # line lengths of last commit msg
+git blame <file>                        # who last changed each line
+git show <sha>                          # full diff of one commit
+```
+
+### Branching
+
+```bash
+git switch <branch>                     # modern replacement for checkout
+git switch -c feat/my-feature develop   # create new branch from develop
+git checkout <branch>                   # older equivalent (still works)
+git branch                              # list local branches
+git branch -a                           # + remote tracking branches
+git branch --show-current               # current branch name
+git branch --contains <sha>             # which branches contain this commit
+git branch -d <branch>                  # delete merged branch
+git branch -D <branch>                  # force delete (unmerged) - careful
+```
+
+### Staging & committing
+
+```bash
+git add <file>                          # stage a specific file (preferred)
+git add -p                              # stage by hunks (interactive)
+git restore --staged <file>             # unstage without losing changes
+git commit -m "subject"                 # single-line message
+```
+
+**Multi-line commit with heredoc** (preserves line breaks exactly — use this whenever you need a body):
+
+```bash
+git commit -m "$(cat <<'EOF'
+type(scope): short imperative subject
+
+- body bullet one, wrapped at 100 chars max
+- body bullet two
+  continuation line, 2-space indented to read as a continuation
+EOF
+)"
+```
+
+**Amending the last commit:**
+
+```bash
+git commit --amend -m "new subject"     # change message only
+git commit --amend --no-edit            # keep message, add newly staged changes
+git commit --amend                      # opens $EDITOR to edit the message
+```
+
+⚠️ **Never amend a commit that has already been pulled by someone else** — you'll rewrite shared history. Amending is safe on your own feature branch that only you push to.
+
+### Pulling & fetching
+
+```bash
+git fetch origin                        # update all remote refs, no merge
+git fetch origin develop                # fetch only develop
+git pull                                # fetch + merge (or rebase if configured)
+git pull --rebase                       # fetch + rebase local commits on top
+git pull --ff-only                      # refuse if not a fast-forward
+```
+
+### Merging
+
+```bash
+git merge <branch>                      # merge branch into current
+git merge --no-ff <branch>              # force a merge commit even if FF possible
+git merge --abort                       # bail out of a conflicted merge
+git commit                              # finalize merge after resolving conflicts
+```
+
+### Rebasing
+
+```bash
+git rebase <base>                       # replay current branch commits onto <base>
+git rebase origin/develop               # rebase feature branch onto latest develop
+git rebase --continue                   # after resolving conflicts
+git rebase --skip                       # drop current conflicted commit
+git rebase --abort                      # return to pre-rebase state
+git rebase -i <base>                    # interactive: reword, squash, fixup, drop
+```
+
+**Interactive rebase actions** (change the leading `pick` keyword in the editor):
+
+| Action | Effect |
+|---|---|
+| `pick` | keep the commit as-is |
+| `reword` (`r`) | keep the diff, rewrite the message |
+| `edit` (`e`) | pause here so you can `--amend` content |
+| `squash` (`s`) | merge into previous commit, combine messages |
+| `fixup` (`f`) | merge into previous commit, **discard** this message |
+| `drop` (`d`) | delete the commit entirely |
+
+### Pushing (safely)
+
+```bash
+git push                                # push current branch to its tracked remote
+git push -u origin feat/my-feature      # set upstream on first push
+git push --force-with-lease             # force push, refuses if remote moved (SAFE)
+git push --force                        # force push, clobbers remote (DANGEROUS)
+```
+
+🚫 **Never** `--force` push to `develop` or `main`. Use `--force-with-lease` on your feature branches only.
+
+### Resetting & undoing
+
+```bash
+git reset --soft <ref>                  # move HEAD, keep staging + working tree
+git reset --mixed <ref>                 # move HEAD, keep working tree only (default)
+git reset --hard <ref>                  # move HEAD, wipe staging + working tree
+git restore <file>                      # discard working-tree changes to one file
+git restore --source=HEAD~1 <file>      # restore file to its version 1 commit back
+git revert <sha>                        # create a NEW commit that undoes <sha>
+```
+
+**Common scenarios:**
+
+| Want to… | Command |
+|---|---|
+| Undo last commit, keep changes staged | `git reset --soft HEAD~1` |
+| Undo last commit, keep changes unstaged | `git reset HEAD~1` |
+| Nuke last commit entirely | `git reset --hard HEAD~1` |
+| Realign local `develop` with `origin/develop` | `git fetch && git reset --hard origin/develop` |
+| Squash last 4 commits into 1 | `git reset --soft HEAD~4 && git commit -m "..."` |
+
+### Recovery — `reflog` is your safety net
+
+Every HEAD move is logged. Even after a bad `reset --hard`, the old commit is still in the reflog for ~30 days.
+
+```bash
+git reflog                              # every HEAD move with timestamps
+git reflog --date=iso -n 20             # with absolute dates
+git reset --hard HEAD@{5}               # reset to HEAD state 5 moves ago
+git checkout HEAD@{yesterday}           # check out yesterday's HEAD
+```
+
+### Stashing
+
+```bash
+git stash                               # save uncommitted changes, clean WD
+git stash -u                            # include untracked files
+git stash push -m "WIP swap fix"        # named stash
+git stash list                          # show all stashes
+git stash pop                           # restore most recent + remove from stack
+git stash apply stash@{2}               # restore a specific stash, keep in stack
+git stash drop stash@{0}                # delete a stash
+```
+
+### Cherry-picking
+
+```bash
+git cherry-pick <sha>                   # copy one commit to current branch
+git cherry-pick <sha1>..<sha2>          # range (exclusive of sha1)
+git cherry-pick --continue              # after resolving conflicts
+git cherry-pick --abort                 # bail out
+```
+
+### Resolving merge conflicts
+
+**With `git-conflict.nvim`** (install it in your nvim config — the only decent conflict plugin in this setup):
+
+1. Open the file in nvim
+2. `]x` / `[x` — jump to next / previous conflict
+3. `co` — choose **ours** (current branch / HEAD)
+4. `ct` — choose **theirs** (incoming branch)
+5. `cb` — keep **both** (⚠️ only safe when no duplicate keys / invalid syntax result)
+6. `c0` — discard the entire conflict block
+7. `:GitConflictListQf` — populate quickfix with all conflicts in the repo
+
+**Manual (plain vim), if no plugin:**
+
+```
+/<<<<<<<       then n to cycle markers
+dd             on each marker line, or
+V}d            to delete one whole side in visual-block mode
+```
+
+**After resolving:**
+```bash
+git add <file>
+git commit                              # for plain merge
+git rebase --continue                   # during a rebase
+git cherry-pick --continue              # during a cherry-pick
+```
+
+### Comparing branches
+
+```bash
+git log --oneline A..B                  # commits on B but not on A
+git log --oneline --left-right A...B    # both sides of divergence, prefixed < / >
+git rev-list --left-right --count A...B # "X  Y" = X on A only, Y on B only
+git diff A...B                          # diff from merge-base of A and B to B
+```
+
+### Diagnosing a diverged local branch
+
+If `git rev-list --left-right --count develop...origin/develop` returns anything other than `0 0`, your local `develop` has drifted — usually from an accidental rebase or a pull that rewrote history. Safe recovery:
+
+```bash
+git fetch origin
+git switch develop
+git reset --hard origin/develop
+```
+
+Do **not** try to merge the mess back — you'll duplicate commits.
+
+---
+
+### Ledger Live conventions
+
+**Target branch.** Feature PRs target `develop`, never `main`. `main` is protected and only receives merges from `develop` at release time.
+
+**Branch naming:**
+
+| Prefix | Use for |
+|---|---|
+| `feat/` | New features |
+| `fix/` or `bugfix/` | Bug fixes |
+| `support/` | Refactor, tests, CI improvements |
+| `chore/` | Maintenance, tooling, configs |
+| `test/` | Test-only additions (common for QA tickets) |
+| `docs/` | Documentation only |
+
+Use kebab-case, keep names short, one branch = one concern. Include the Jira ticket when relevant: `test/qaa-1136-desktop-swap`.
+
+**Conventional Commits** (enforced by `commitlint`):
+
+```
+type(scope): short imperative subject
+
+optional body, wrapped at 100 chars per line
+bullet continuations indented 2 spaces
+
+optional footer (BREAKING CHANGE: ..., Refs: LIVE-1234)
+```
+
+| Type | Use for |
+|---|---|
+| `feat` | New feature |
+| `fix` | Bug fix |
+| `test` | Add/update tests |
+| `docs` | Documentation only |
+| `style` | Formatting, no code change |
+| `refactor` | Restructure without behavior change |
+| `perf` | Performance improvement |
+| `chore` | Maintenance, tooling, configs |
+| `ci` | CI/CD changes |
+
+Common scopes: `desktop`, `mobile`, `common`, `coin`, `<family>` (e.g. `ethereum`, `solana`), or a package name.
+
+**Commitlint rules that bite:**
+
+- `body-max-line-length`: body lines must be **≤ 100 chars**
+- `body-leading-blank`: a blank line **must** separate the subject from the body
+- `subject-case`: subject must be lowercase after the colon (`: add`, not `: Add`)
+- `type-enum`: type must be one of the allowed list above
+
+**Test your commit message locally before pushing:**
+```bash
+git log -1 --format=%B | pnpm exec commitlint
+```
+
+**Changesets.** Every behavior-changing PR on a published package ships a `.changeset/*.md` file:
+```bash
+pnpm changeset                          # interactive: pick packages + bump level
+```
+Commit the generated file alongside your code. CI will fail without it when required.
+
+**GPG signing.** Ledger requires GPG-signed commits on protected branches. If you see `gpg: signing failed: No secret key`, ensure `user.signingkey` is configured and `gpg-agent` is running:
+```bash
+git config --global user.signingkey <YOUR_KEY_ID>
+gpg --list-secret-keys --keyid-format=long
+```
+
+---
+
+### GitHub CLI (`gh`)
+
+```bash
+gh auth login                           # one-time setup
+gh pr create --title "..." --body "..."
+gh pr view                              # details of PR for current branch
+gh pr view 16716 --json state,mergedAt
+gh pr list --author "@me" --state open
+gh pr checks                            # CI status for current PR
+gh pr checkout 16716                    # check out a PR locally
+gh pr review --approve                  # approve a PR
+gh issue view QAA-702                   # view a GitHub issue
+gh api repos/LedgerHQ/ledger-live/pulls/16716/comments  # raw API call
+gh run list --branch $(git branch --show-current)       # recent CI runs for branch
+gh run watch                            # live-tail the most recent run
+gh run rerun <run-id>                   # re-run a failed workflow
+```
+
+---
+
+### Common gotchas at Ledger
+
+1. **Local `develop` diverging from origin.** Caused by accidental `pull --rebase` or someone running a rebase on the wrong branch. Fix with `git fetch && git reset --hard origin/develop` — never try to merge the mess back.
+2. **`gpg: signing failed`** after switching shells or entering a sandbox. Verify the key (`gpg --list-secret-keys`), restart `gpg-agent`.
+3. **Pre-commit hook rewriting staged files.** If a linter auto-fixes, the first commit may fail. Re-run `git add` on the affected files and `git commit` again.
+4. **`pnpm-lock.yaml` conflicts.** Do **not** hand-edit. Accept either side, then `pnpm install` to regenerate.
+5. **Force-pushing after a teammate rebased.** `--force-with-lease` refuses and saves you. Always prefer it over `--force`.
+6. **Amending a pushed commit.** Safe only on your own feature branch. Follow with `git push --force-with-lease`.
+7. **Uncommitted work blocking a pull.** `git stash` → `git pull --rebase` → `git stash pop`.
+8. **"Detached HEAD" after `git checkout <sha>`.** Use `git switch -c new-branch` to save your position as a real branch before making changes.
+9. **Missing Jira ticket in the PR title.** Ledger Live PR titles typically follow `[LWDM|LWM|...] type(scope): description` — check your team's convention.
+10. **Changeset file missing.** CI fails on PRs that modify published packages without a `.changeset/*.md`. Run `pnpm changeset` before opening the PR.
+
+---
+
+## G: Glossary
 
 | Term | Definition |
 |------|------------|

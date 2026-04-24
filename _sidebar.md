@@ -72,4 +72,5 @@
   - [C: Ledger Live Stack](appendix#c-ledger-live-stack)
   - [D: Devices & Coins](appendix#d-supported-devices-amp-coins)
   - [E: Troubleshooting FAQ](appendix#e-troubleshooting-faq)
-  - [F: Glossary](appendix#f-glossary)
+  - [F: Git Cheat Sheet](appendix#f-git-cheat-sheet)
+  - [G: Glossary](appendix#g-glossary)
