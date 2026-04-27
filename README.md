@@ -10,7 +10,7 @@
 <div style="display: flex; justify-content: center; gap: 12px; margin: 24px 0; flex-wrap: wrap;">
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">55 Chapters</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">63 Interactive Quizzes</span>
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">6 Appendices</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">7 Appendices</span>
 </div>
 
 ---
@@ -63,7 +63,7 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 | **5** | [CLI Automation](part5.md) | 5.1-5.9 | wallet-cli & Bun/Bunli primer, Device Management Kit, codebase deep dive, account descriptors V1, mock-DMK testing, daily CLI workflow, QAA-615 spike walkthrough |
 | **6** | [Swap Live App](part6.md) | 6.1-6.4 | Live Apps in Ledger Wallet, Swap architecture, releases & Firebase environments, QAA-1136 walkthrough |
 | **7** | [Mastery & Contributing](part7.md) | 7.1-7.4 | Test strategy & best practices, cross-platform debugging, CI/CD & test sharding, AI agents & automation |
-| **A** | [Appendix](appendix.md) | A-F | Commands, env vars, Ledger Live stack, devices, troubleshooting FAQ, glossary |
+| **A** | [Appendix](appendix.md) | A-G | Commands, env vars, Ledger Live stack, devices, troubleshooting FAQ, git cheat sheet, glossary |
 
 ---
 
