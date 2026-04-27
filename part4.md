@@ -4088,7 +4088,7 @@ Why a custom script? Because the TypeScript program has to include cross-workspa
 
 #### `scripts/build-ai-artifact.sh`
 
-A shell script that post-processes Allure results and collects them into an archive for AI-assisted failure analysis. Enabled by the `generate_ai_artifacts` input on the reusable CI workflow; see Part 6 Chapter 6.3.
+A shell script that post-processes Allure results and collects them into an archive for AI-assisted failure analysis. Enabled by the `generate_ai_artifacts` input on the reusable CI workflow; see Part 7 Chapter 7.3.
 
 #### `types/global.d.ts`
 
@@ -4598,7 +4598,7 @@ Handy when a directory is known-broken and you want to skip it wholesale without
 pnpm test:ios:debug -- --maxWorkers=1 --cleanup --reuse
 ```
 
-- `--maxWorkers=1` — run tests serially in a single process. This is actually the **default** (and only supported) configuration for mobile E2E; the codebase sets `maxWorkers: 1` in `jest.config.js` because Detox can only drive one device per worker and the bridge port would collide with parallel workers. CI achieves parallelism across **shards**, not workers (Chapter 6.3).
+- `--maxWorkers=1` — run tests serially in a single process. This is actually the **default** (and only supported) configuration for mobile E2E; the codebase sets `maxWorkers: 1` in `jest.config.js` because Detox can only drive one device per worker and the bridge port would collide with parallel workers. CI achieves parallelism across **shards**, not workers (Chapter 7.3).
 - `--cleanup` — uninstall the app at the end of the run. Without this, the app stays on the simulator and subsequent runs start faster (but may see stale Redux persist state).
 - `--reuse` — skip the install step and reuse the binary already on the device. Fastest iteration mode when nothing has been rebuilt.
 - `--forceExit` — kill Jest's process even if there are unhandled handles. Used in CI to avoid timing out on lingering WebSocket connections.
@@ -4674,7 +4674,7 @@ await $`pnpm e2e:mobile run ${testType === "e2e" ? "test" : "mock:test"}:ios:${t
 
 > **Verify:** the exact shape of the command and the `mock:test` / `test:ios` script split can drift between refactors — when you need the literal command line a shard runs, open `apps/ledger-live-mobile/scripts/e2e-ci.mjs` on the branch you care about.
 
-`filteredArgs` is every trailing positional argument that isn't one of the recognized flags — in practice, the list of spec file paths computed by the sharding step (Chapter 6.3.5).
+`filteredArgs` is every trailing positional argument that isn't one of the recognized flags — in practice, the list of spec file paths computed by the sharding step (Chapter 7.3.5).
 
 **The mock/e2e split.** The `mock` path uses the bridge mock device (no Speculos required — see Chapter 4.6 and 37.10). The `e2e` path uses a real Speculos container. CI almost always uses `--e2e` because scheduled runs exercise real device flows; `mock` is kept as an option for speed-critical smoke passes.
 
@@ -4954,7 +4954,7 @@ await device.reverseTcpPort(52619);
 - Use **`selectMockDevice`** when you're testing app-side logic and any valid-looking response is sufficient. 80% of specs are this.
 - Use **real Speculos** when the test asserts against on-device screens (confirming an address matches what the device shows), when you need signature randomness to match a specific seed, or when you're validating a transaction-signing flow end-to-end.
 
-The Chapter 6.3 CI workflow has a `speculos_device` input to pick which device firmware Speculos emulates — `nanoX`, `stax`, `flex`, etc.
+The Chapter 7.3 CI workflow has a `speculos_device` input to pick which device firmware Speculos emulates — `nanoX`, `stax`, `flex`, etc.
 
 ### 4.8.11 Chapter 4.8 Quiz
 
@@ -5026,7 +5026,7 @@ The Chapter 6.3 CI workflow has a `speculos_device` input to pick which device f
 <button class="quiz-choice" data-value="C">C) Each Detox worker needs its own device and bridge port; parallel workers would collide on port 8099 and on the single booted simulator. CI parallelizes across <em>shards</em> (separate GitHub runners), not workers</button>
 <button class="quiz-choice" data-value="D">D) It is a historical artifact — the value could be raised but nobody has tested it</button>
 </div>
-<p class="quiz-explanation">Mobile E2E is constrained at the device level: one simulator per process, one bridge WebSocket per simulator. Horizontal scaling therefore happens at the runner level — each CI shard is its own runner with its own simulator/emulator(s) (Chapter 6.3).</p>
+<p class="quiz-explanation">Mobile E2E is constrained at the device level: one simulator per process, one bridge WebSocket per simulator. Horizontal scaling therefore happens at the runner level — each CI shard is its own runner with its own simulator/emulator(s) (Chapter 7.3).</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -6210,7 +6210,7 @@ Reading and watching are not enough. The exercises below move from minor POM add
 
 **Hints.**
 - Use a `if: github.event_name == 'schedule'` guard so the matrix entry does not run on every PR.
-- The sharding algorithm (Chapter 6.3) is irrelevant here — you are opting out of sharding by setting shard count to 1.
+- The sharding algorithm (Chapter 7.3) is irrelevant here — you are opting out of sharding by setting shard count to 1.
 
 **Stretch goal.** Add a Slack notification step that posts the Allure link to `#qa-mobile` on failure.
 

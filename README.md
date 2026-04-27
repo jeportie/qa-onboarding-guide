@@ -8,8 +8,8 @@
 </div>
 
 <div style="display: flex; justify-content: center; gap: 12px; margin: 24px 0; flex-wrap: wrap;">
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">45 Chapters</span>
-  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">52 Interactive Quizzes</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">55 Chapters</span>
+  <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">63 Interactive Quizzes</span>
   <span style="background: #f1f5f9; color: #475569; padding: 6px 14px; border-radius: 99px; font-size: 0.85em; font-weight: 500;">6 Appendices</span>
 </div>
 
@@ -19,9 +19,9 @@
 
 **Welcome to the Ledger Live QA team.**
 
-This guide is your single reference for everything you need to become an effective QA Automation Engineer on Ledger Live. It starts with the Ledger ecosystem itself — products, hardware, teams, release cycle, ticket flow — then walks you through the full stack: monorepo, shared tooling, desktop E2E, mobile E2E, the Swap Live App, and the mastery layer covering test strategy, debugging, CI/CD, and AI-assisted automation.
+This guide is your single reference for everything you need to become an effective QA Automation Engineer on Ledger Live. It starts with the Ledger ecosystem itself — products, hardware, teams, release cycle, ticket flow — then walks you through the full stack: monorepo, shared tooling, desktop E2E, mobile E2E, CLI automation, the Swap Live App, and the mastery layer covering test strategy, debugging, CI/CD, and AI-assisted automation.
 
-Every chapter builds on the previous one. Each ends with an interactive quiz (80% to pass). Part 0 grounds you in the company; Parts 1-2 give you the common vocabulary; Parts 3-4 are your desktop and mobile deep dives; Part 5 covers the Swap Live App; Part 6 closes with the contributor mindset.
+Every chapter builds on the previous one. Each ends with an interactive quiz (80% to pass). Part 0 grounds you in the company; Parts 1-2 give you the common vocabulary; Parts 3-5 are your desktop, mobile, and CLI deep dives; Part 6 covers the Swap Live App; Part 7 closes with the contributor mindset.
 
 </div>
 
@@ -34,7 +34,7 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 
 <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; border-top: 3px solid #8b5cf6;">
   <strong style="color: #8b5cf6;">Structure</strong><br>
-  <span style="color: #475569; font-size: 0.92em;">Seven progressive parts (0 through 6) plus six appendices, ordered so you never meet a concept before you need it.</span>
+  <span style="color: #475569; font-size: 0.92em;">Eight progressive parts (0 through 7) plus six appendices, ordered so you never meet a concept before you need it.</span>
 </div>
 
 <div style="background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 20px; border-top: 3px solid #22c55e;">
@@ -60,8 +60,9 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 | **2** | [Shared Tooling](part2.md) | 2.1-2.5 | Git + changesets, pnpm/Turbo, Speculos device emulation, Firebase & feature flags, Allure & Xray |
 | **3** | [Desktop E2E](part3.md) | 3.1-3.10 | Desktop architecture + first test, Playwright zero-to-advanced, Electron, codebase catalog, daily workflow, QAA-1139 & QAA-1141 walkthroughs, exercises |
 | **4** | [Mobile E2E](part4.md) | 4.1-4.11 | Mobile architecture + first test, React Native primer, mobile toolchain, Detox zero-to-advanced, bridge + POMs, daily workflow, QAA-702 walkthrough, exercises |
-| **5** | [Swap Live App](part5.md) | 5.1-5.4 | Live Apps in Ledger Wallet, Swap architecture, releases & Firebase environments, QAA-1136 walkthrough |
-| **6** | [Mastery & Contributing](part6.md) | 6.1-6.4 | Test strategy & best practices, cross-platform debugging, CI/CD & test sharding, AI agents & automation |
+| **5** | [CLI Automation](part5.md) | 5.1-5.9 | wallet-cli & Bun/Bunli primer, Device Management Kit, codebase deep dive, account descriptors V1, mock-DMK testing, daily CLI workflow, QAA-615 spike walkthrough |
+| **6** | [Swap Live App](part6.md) | 6.1-6.4 | Live Apps in Ledger Wallet, Swap architecture, releases & Firebase environments, QAA-1136 walkthrough |
+| **7** | [Mastery & Contributing](part7.md) | 7.1-7.4 | Test strategy & best practices, cross-platform debugging, CI/CD & test sharding, AI agents & automation |
 | **A** | [Appendix](appendix.md) | A-F | Commands, env vars, Ledger Live stack, devices, troubleshooting FAQ, glossary |
 
 ---

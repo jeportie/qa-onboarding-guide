@@ -1,195 +1,304 @@
-## Test Strategy & Best Practices
+## Live Apps in Ledger Wallet
 
 <div class="chapter-intro">
-Knowing how to write a test is not enough — you need to know <strong>which</strong> tests to write, <strong>how</strong> to structure them, and <strong>what</strong> to do when they become flaky. This chapter covers the testing pyramid, naming conventions, page object best practices, data-driven testing, and flaky test management. These are the principles that separate a test suite that helps from one that hinders.
+A Live App is not a React component. It is not a screen. It is an embedded webview, loaded from a remote URL, sandboxed behind a strict API, and versioned independently from the Wallet shell itself. Understanding Live Apps is a prerequisite to understanding Swap — and several other high-value surfaces in Ledger Wallet.
 </div>
 
-### 6.1.1 The Testing Pyramid at Ledger
+### 6.1.1 What Is a Live App?
+
+A **Live App** is a web application that renders inside Ledger Wallet (desktop and mobile) in a sandboxed webview and communicates with the Wallet through a well-defined JSON-RPC bridge called **Wallet API**.
+
+In practice, a Live App is:
+
+- A **separate repo** (not part of `ledger-live`) owned by the feature team
+- A **separate deployment** — the Swap Live App is containerized and shipped to AWS EKS via ArgoCD; other Live Apps may run on their own infrastructure, but the pattern is always "independent of the Wallet release train"
+- A **manifest entry** declared inside `ledger-live` that tells the Wallet shell: "load this URL, expose these Wallet-API permissions, show this icon, put it in that tab"
+- A **sandboxed runtime** — the Live App cannot touch the device, blockchain, or accounts directly; every privileged action must go through the Wallet API
+
+This split matters because it decouples the Live App team's velocity from the Wallet shell's velocity. Swap can release multiple times per week without waiting for a desktop release; the market team can iterate on discover surfaces without touching native code.
+
+### 6.1.2 Why Live Apps Exist
+
+Before Live Apps, every new feature had to ship inside `ledger-live-desktop` and `ledger-live-mobile`. That model broke down quickly:
+
+| Constraint | Consequence |
+|---|---|
+| One release cadence for the whole Wallet | Feature teams blocked by Wallet release train |
+| Native code changes for every feature | High risk, long review, long QA cycle |
+| Shared bundle size | Every feature grows the installer |
+| Shared codebase ownership | Feature teams needed desktop/mobile expertise |
+| Single regulatory posture | One non-compliant feature risked the whole app |
+
+Live Apps solve all five:
+
+- Each app ships on its own cadence (Swap ships independently of the Wallet)
+- No native code — features are standard web apps
+- Bundle size in the Wallet is zero (the webview loads the app remotely)
+- The feature team owns the repo, the CI/CD, and the ops
+- Legal / compliance boundaries can be drawn **per Live App**, not per Wallet version (critical for MiCA)
+
+### 6.1.3 Architecture -- How a Live App Loads
+
+Here is the data flow when a user opens Swap from inside Ledger Wallet:
 
 ```
-            /\
-           /  \
-          / E2E \          ← Playwright (Desktop), Detox (Mobile)
-         / with  \            Real device flows via Speculos
-        / Speculos \
-       /────────────\
-      /  Integration  \    ← Jest + MSW + RTL
-     /   Tests (API    \      API mocking, Redux state, component interaction
-    /    + Component)    \
-   /──────────────────────\
-  /      Unit Tests         \ ← Jest
- /   Pure functions, utils,   \   Fast, isolated, no side effects
-/   reducers, selectors         \
-─────────────────────────────────
+User taps "Swap" tab
+       │
+       ▼
+Wallet shell reads the manifest
+  for "swap" (manifest-api)
+       │
+       ▼
+Wallet mounts a webview/iframe
+  pointing at the Live App URL
+  (e.g. swap-v3.apps.ledger.com)
+       │
+       ▼
+Live App boots and calls
+  window.ledgerLive.accounts.list()
+       │
+       ▼
+Wallet API bridge intercepts the
+  call, checks manifest permissions,
+  returns account list
+       │
+       ▼
+Live App shows quotes. User picks
+  one. App calls
+  walletApi.exchange.start()
+       │
+       ▼
+Wallet shell drives the device
+  signing flow through Speculos /
+  a real device
+       │
+       ▼
+Live App shows the "transaction
+  sent" state
 ```
 
-| Layer | Speed | Confidence | Cost | Quantity |
-|-------|-------|-----------|------|----------|
-| Unit | ~1ms/test | Low (isolated) | Cheap | Many |
-| Integration | ~100ms/test | Medium | Moderate | Some |
-| E2E | ~30s-5min/test | High (real flows) | Expensive | Few, critical paths |
+The three layers to remember:
 
-**What goes where:**
-- **Unit tests**: Currency formatters, fee calculators, transaction builders, Redux reducers, utility functions
-- **Integration tests**: Screen rendering with mocked APIs, Redux store interactions, navigation flows, hook behavior
-- **E2E tests**: Critical user journeys — onboarding, send/receive, portfolio, settings. Full stack including Speculos.
+1. **Manifest** — configuration in `ledger-live`, declares where to load the app from and what it is allowed to do
+2. **Live App** — the web app itself, loaded in a webview, owns its UX
+3. **Wallet API** — the JSON-RPC bridge between the two; the **only** way a Live App touches accounts, signing, or the network on behalf of the user
 
-### 6.1.2 Test Naming Conventions
+### 6.1.4 The Manifest API
 
-```typescript
-// ✅ Good -- describes user-visible behavior
-test("user can send 0.001 BTC from a funded account", async () => { ... });
-test("portfolio displays correct total balance across all accounts", async () => { ... });
-test("onboarding flow completes successfully with Nano S Plus", async () => { ... });
+Manifests live inside `ledger-live`. They declare how each Live App is exposed inside the Wallet — which URL to load per environment, which Wallet-API permissions to grant, which icon to show, which platforms it supports.
 
-// ❌ Bad -- describes implementation or is vague
-test("should call sendTransaction API", async () => { ... });
-test("test portfolio page", async () => { ... });
-test("it works", async () => { ... });
-```
+The manifest service is consumed by both desktop and mobile. For each Live App there is typically one manifest per environment.
 
-### 6.1.3 Page Object Best Practices
+**Manifest schema (from the Wallet API spec).** Every manifest validated by `@ledgerhq/wallet-api-manifest-validator` carries this shape:
 
-**Rule 1: One action = one method**
-```typescript
-// ✅ Granular, composable
-@step("Fill recipient address")
-async fillRecipient(address: string) { ... }
+| Field | Type | Purpose |
+|---|---|---|
+| `id` | `string` | Manifest unique id (e.g., `swap-live-app-aws`) |
+| `name` | `string` | Display name shown in the Wallet (e.g., `"Swap"`) |
+| `url` | `string` | The URL the Wallet loads in the webview |
+| `homepageUrl` | `string` | Canonical homepage for the app |
+| `platform` / `platforms` | `"desktop" \| "mobile" \| "all"` or array | Which Wallet shells load this app |
+| `apiVersion` | `string` | Wallet-API semver range the app expects (e.g., `^2.0.0`) |
+| `manifestVersion` | `string` | Manifest schema version |
+| `branch` | `"stable" \| "experimental" \| "soon" \| "debug"` | Stability channel exposed to users |
+| `categories` | `string[]` | Catalog tabs (e.g., `["exchange"]`) |
+| `currencies` | `string[]` or `"*"` | Which currencies the app supports |
+| `content.shortDescription` / `content.description` | `TranslatableString` | Copy shown in the catalog |
+| `permissions` | `AppPermission[]` | The **capability allow-list** — see below |
+| `domains` | `string[]` | Allowed navigation domains inside the webview |
+| `private` | `boolean` (optional) | Hides the app from the public catalog |
 
-// ❌ Monolithic, inflexible
-async doEverything(address: string, amount: string) { ... }
-```
+**Real permission list (extract from the Swap dev manifest** — `apps/live-app/manifests/manifest.dev.json`**):**
 
-**Rule 2: Assertions belong in tests, not page objects**
-```typescript
-// ✅ Page object provides data, test asserts
-const balance = await portfolioPage.getBalance();
-expect(balance).toBe("1.5 BTC");
-
-// ❌ Page object owns the assertion
-await portfolioPage.assertBalanceIs("1.5 BTC");
-```
-
-**Rule 3: Always use `@step` decorator** for Allure reporting.
-
-### 6.1.4 Data-Driven Testing
-
-```typescript
-const currencies = [
-  { name: "Bitcoin",  ticker: "BTC", amount: "0.001",  address: "bc1q..." },
-  { name: "Ethereum", ticker: "ETH", amount: "0.01",   address: "0x..." },
-  { name: "Solana",   ticker: "SOL", amount: "0.1",    address: "..." },
-];
-
-for (const currency of currencies) {
-  test(`can send ${currency.name}`, async ({ app }) => {
-    await app.send.selectCurrency(currency.ticker);
-    await app.send.fillRecipient(currency.address);
-    await app.send.fillAmount(currency.amount);
-    await app.send.confirm();
-  });
+```json
+{
+  "id": "swap-live-app-aws",
+  "name": "Swap DEV",
+  "url": "http://localhost:3000",
+  "platforms": ["android", "ios", "desktop"],
+  "apiVersion": "^2.0.0",
+  "branch": "experimental",
+  "categories": ["exchange"],
+  "currencies": "*",
+  "permissions": [
+    "account.list",
+    "account.request",
+    "currency.list",
+    "custom.exchange.start",
+    "custom.exchange.complete",
+    "custom.exchange.swap",
+    "device.exchange",
+    "device.transport",
+    "exchange.start",
+    "exchange.complete",
+    "transaction.sign",
+    "transaction.signAndBroadcast",
+    "wallet.capabilities",
+    "wallet.userId"
+  ]
 }
 ```
 
-### 6.1.5 Flaky Test Management
+Every permission maps to one or more JSON-RPC methods the Live App can invoke. Anything not whitelisted is denied at the bridge layer, even if the Live App tries to invoke it — which is the Wallet's defence against a compromised or malicious app iframe.
 
-| Cause | Solution |
-|-------|----------|
-| Race conditions | Use `await expect(locator).toBeVisible()` instead of `page.waitForTimeout()` |
-| Slow CI runners | Increase timeouts for CI; keep them tight locally |
-| Speculos startup timing | Use health checks (`/events`) before running tests |
-| Network latency | Mock external APIs or use retry logic |
-| Shared state between tests | Ensure each test starts from a clean app state |
+**One manifest per environment.** The URL field differs by environment; everything else stays structurally similar:
 
-**When you encounter a flaky test:**
-1. Reproduce locally (run 10 times: `--repeat-each=10`)
-2. Check if it is environment-specific (CI vs local)
-3. Look at the Allure timeline for timing issues
-4. Fix the root cause — do not just add retries
-5. If a quick fix is not possible, use `test.fixme()` and file an issue
+| Environment | Manifest | Live App URL (public) |
+|---|---|---|
+| **Local dev** | local override (`manifest.dev.json` in the repo) | `http://localhost:3000` |
+| **Staging** | `manifest-api` staging | `swap-live-app-stg.ledger-test.com` |
+| **Pre-prod** | `manifest-api` pre-prod | `swap-live-app-ppr.ledger-test.com` |
+| **Production** | `manifest-api` prod | `swap-live-app.ledger.com` |
 
-```typescript
-test.fixme("send flow times out on CI", async ({ app }) => {
-  // TODO: Fix timing issue -- see JIRA LL-12345
-});
+### 6.1.5 The Wallet API
+
+Wallet API is the [**JSON-RPC 2.0**](https://www.jsonrpc.org/specification) contract between the Wallet shell and any embedded Live App. The transport is **`postMessage`** between the parent window (the Wallet) and the iframe (the Live App) — not HTTP, not WebSocket. This matters: there is no network round-trip for a Wallet-API call, but the Wallet still enforces every permission inside the shell.
+
+Wallet API is split across a **Client** (bundled inside the Live App) and a **Server** (hosted by the Wallet shell):
+
+```
+  ┌─────────────────┐      postMessage      ┌──────────────────┐
+  │   Live App      │ ◄──── JSON-RPC ────►  │  Wallet shell    │
+  │  (webview)      │         2.0           │   (Ledger Live)  │
+  │                 │                       │                  │
+  │ wallet-api-     │                       │ wallet-api-      │
+  │ client          │                       │ server           │
+  └─────────────────┘                       └──────────────────┘
+@ledgerhq/wallet-api-client    │          @ledgerhq/wallet-api-server
+                               │
+                   @ledgerhq/wallet-api-core
+                   (shared types and errors)
 ```
 
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://martinfowler.com/bliki/TestPyramid.html">Martin Fowler: Test Pyramid</a></li>
-<li><a href="https://testing.googleblog.com/2015/04/just-say-no-to-more-end-to-end-tests.html">Google Testing Blog: Just Say No to More End-to-End Tests</a></li>
-<li><a href="https://martinfowler.com/bliki/PageObject.html">Martin Fowler: Page Object pattern</a></li>
-<li><a href="https://playwright.dev/docs/best-practices">Playwright Best Practices</a></li>
-</ul>
-</div>
+**Canonical JSON-RPC methods (from `/spec/rpc/README.md` in the Wallet API repo).** These are the calls a Swap Live App relies on:
+
+| Method | Purpose |
+|---|---|
+| `transaction.sign` | User signs a transaction on the device — returns the raw signed tx |
+| `transaction.broadcast` | Broadcasts a previously signed transaction — returns the tx hash |
+| `message.sign` | User signs an EIP-191 / EIP-712 message on the device |
+| `account.list` | List accounts the user has in the Wallet |
+| `account.request` | Prompt the user to pick (or create) an account for the Live App |
+| `account.receive` | Show a "Verify on device" address for an account |
+| `currency.list` | List currencies supported in the Wallet |
+| `exchange.start` | Start an exchange (swap/buy/sell) flow — returns a `deviceTransactionId` |
+| `exchange.complete` | Finish the exchange after backend payload is retrieved — device signs |
+| `wallet.capabilities` | Query which Wallet-API features the host supports |
+| `wallet.userId` | Get an opaque, stable per-Wallet user identifier |
+
+A minimal request / response pair, verbatim to the spec:
+
+```json
+// request
+{ "jsonrpc": "2.0", "id": 1, "method": "transaction.sign",
+  "params": { "accountId": "...", "transaction": { }, "params": { "useApp": "Ethereum" } } }
+// response
+{ "jsonrpc": "2.0", "id": 1, "result": { } }
+```
+
+**Canonical error types (from `/spec/core/errors.md`).** Every Wallet-API error is a `PlatformError` (`title`, `description`, `errorCode`) wrapped in the JSON-RPC 2.0 error envelope. Four error codes matter for swap QA:
+
+| Code | Title | When QA sees it |
+|---|---|---|
+| `100` | `AccountNotFound` | The Live App passed an `accountId` the Wallet cannot match — usually a stale fixture or a currency the Wallet has not added |
+| `101` | `AccountNotMain` | A sub-account was used where a main account was expected — common mistake when a test targets a token account by mistake |
+| `102` | `AccountAndTransactionNotLinked` | The transaction object is for a different currency family than the account — the single most frequent "I swear I typed the right thing" error in fixture-driven tests |
+| `103` | `TransactionNotProvided` | The transaction object is missing or malformed — often after a build that dropped a required field |
+
+**Two things to internalize as a QA:**
+
+1. **Everything is audited at the bridge** — if a Wallet-API call is rejected, the Wallet shell returns a `PlatformError` with a clear code. Grep for the error code and title before assuming a code bug; the manifest `permissions` list is usually where the truth lives.
+2. **The Wallet API is versioned** — manifests declare `apiVersion` (e.g., `^2.0.0`). The Wallet shell and the Live App can evolve independently but the version range must overlap, so cross-version testing matters when either side bumps.
+
+### 6.1.6 Live Apps in the Ledger Wallet Catalog
+
+The Wallet ships several production Live Apps. Each has its own repo, team, Firebase, and release cycle. The most important ones for QA:
+
+| Live App | What it does | Team | Where it lives |
+|---|---|---|---|
+| **Swap** | Crypto-to-crypto swap across multiple providers (CEX + DEX) | Swap | Swap tab / CTA from account |
+| **PTX (Buy/Sell)** | Buy and sell crypto with fiat through MoonPay / Coinify / Banxa | PTX | Buy / Sell buttons |
+| **Earn** | Staking and yield across supported chains | Earn | Earn tab |
+| **Discover** | Third-party Live Apps (wallet-connect, NFT marketplaces, etc.) | Discover | Discover tab |
+| **MoonPay (Buy)** | MoonPay's own Live App, wrapped via PTX | PTX + MoonPay | Buy flow |
+| **Recover / Ledger Sync** | Account recovery and cross-device sync | Recover | Settings |
+
+All of them follow the same pattern: separate repo, manifest entry, Wallet-API permissions, sandboxed webview. The complexity hides in the business logic, the partner integrations, and the legal constraints — which is exactly where QA spends its time.
+
+### 6.1.7 QA Implications of the Live App Model
+
+The Live App model changes how QA thinks about bugs:
+
+- A bug in the Wallet shell (device flow, account sync, wallet-api bridge) affects **all** Live Apps → reproduce on at least two Live Apps before blaming the shell
+- A bug in the Live App (quote rendering, provider selection, KYC flow) is **scoped** to that repo → open the ticket in the Live App's Jira project, not in the Wallet's
+- An end-to-end test that opens a Live App has to wait for the webview to load; this is slower and flakier than intra-Wallet navigation — budget for it
+- Release windows are **per Live App** → a swap regression does not require a Wallet hotfix; the swap team rolls back swap
+- Firebase feature flags can live in two projects at once — one for the Wallet, one for the Live App — and a QA session may need to coordinate both (see Chapter 6.3)
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> E2E tests are expensive. Every test you write should earn its place by covering a critical path that lower-level tests cannot. When a test becomes flaky, fix the root cause — adding retries or timeouts just delays the problem.
+<strong>Key takeaway:</strong> A Live App is a remote, sandboxed web app wired into Ledger Wallet through a manifest and the Wallet API. Each Live App has its own repo, deployment, Firebase, and release cadence — which is why Swap QA work rarely happens inside <code>ledger-live</code> alone. The Wallet shell is the runtime; the Live App is the product.
 </div>
 
-### 6.1.6 Quiz
-
-<!-- ── Chapter 6.1 Quiz ── -->
+### 6.1.8 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
+<h3>Quiz -- Live Apps in Ledger Wallet</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> Why should E2E tests be reserved for critical paths rather than testing everything?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because Playwright and Detox are unreliable tools</button>
-<button class="quiz-choice" data-value="B">B) Because E2E tests are slow, expensive, and harder to maintain — they should validate what lower layers cannot</button>
-<button class="quiz-choice" data-value="C">C) Because the QA team does not have CI access</button>
-<button class="quiz-choice" data-value="D">D) Because unit tests already cover everything</button>
-</div>
-<p class="quiz-explanation">E2E tests provide the highest confidence but at the highest cost (~30s-5min per test vs ~1ms for unit). They should cover critical user journeys that cannot be adequately validated by unit or integration tests alone.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> Where should test assertions live?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) In page object methods, close to the UI interaction</button>
-<button class="quiz-choice" data-value="B">B) In the test file itself — page objects provide actions and data, tests decide what to assert</button>
-<button class="quiz-choice" data-value="C">C) In shared assertion utility files</button>
-<button class="quiz-choice" data-value="D">D) In the fixture setup</button>
-</div>
-<p class="quiz-explanation">If a page object asserts <code>balance === "1.5 BTC"</code>, it can't be reused in a test that expects a different balance. Page objects should be assertion-free (except soft checks like <code>isVisible()</code>).</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> Which of the following is NOT a characteristic of a production-ready E2E test?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It has a clear, descriptive test name with tags</button>
-<button class="quiz-choice" data-value="B">B) It uses page objects with <code>@step</code> decorators</button>
-<button class="quiz-choice" data-value="C">C) It can run independently in any order</button>
-<button class="quiz-choice" data-value="D">D) It uses <code>page.waitForTimeout(5000)</code> to ensure stability</button>
-</div>
-<p class="quiz-explanation"><code>waitForTimeout</code> is a hardcoded wait that makes tests slow and flaky. Production-ready tests use proper locator waits (<code>waitFor({ state: "visible" })</code>) instead of fixed delays.</p>
-</div>
-
 <div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> A test passes locally but fails 30% of the time on CI. What is the best first step?</p>
+<p><strong>Q1.</strong> What is a Live App, architecturally?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Add <code>page.waitForTimeout(10000)</code> before the failing step</button>
-<button class="quiz-choice" data-value="B">B) Mark the test as <code>test.skip()</code> and move on</button>
-<button class="quiz-choice" data-value="C">C) Run the test 10 times locally with <code>--repeat-each=10</code> and compare CI vs local Allure timelines</button>
-<button class="quiz-choice" data-value="D">D) Delete the test and rewrite it from scratch</button>
+<button class="quiz-choice" data-value="A">A) A native screen inside <code>ledger-live-desktop</code></button>
+<button class="quiz-choice" data-value="B">B) A plugin DLL loaded into the Electron main process</button>
+<button class="quiz-choice" data-value="C">C) A remote web application loaded into a sandboxed webview and talking to the Wallet over the Wallet API</button>
+<button class="quiz-choice" data-value="D">D) A background worker running on the device</button>
 </div>
-<p class="quiz-explanation">Reproducing the flakiness locally (10 repetitions) is the first step. Comparing CI and local timelines in Allure can reveal timing differences, race conditions, or environment-specific issues.</p>
+<p class="quiz-explanation">A Live App is a remote web app embedded in a sandboxed webview. It never runs native code. Everything privileged (accounts, signing, network) is brokered by the Wallet API bridge.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> Which statement about Live App releases is true?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A new Live App version requires a new Ledger Wallet release</button>
+<button class="quiz-choice" data-value="B">B) Each Live App releases independently from the Wallet shell, on its own cadence</button>
+<button class="quiz-choice" data-value="C">C) Live Apps are rebuilt on every Wallet CI run</button>
+<button class="quiz-choice" data-value="D">D) Live Apps are stored inside the installer and updated via Electron auto-updater</button>
+</div>
+<p class="quiz-explanation">Decoupled releases are the main reason Live Apps exist. Swap, for example, can ship several times a week without Wallet desktop or mobile releasing at all. The manifest points at a URL that the Live App team updates independently.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> In the testing pyramid, which layer should have the MOST tests?</p>
+<p><strong>Q3.</strong> The Wallet API is best described as...</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Unit tests — fast, cheap, isolated</button>
-<button class="quiz-choice" data-value="B">B) Integration tests — medium speed, moderate confidence</button>
-<button class="quiz-choice" data-value="C">C) E2E tests — high confidence, real flows</button>
-<button class="quiz-choice" data-value="D">D) Manual tests — human judgment</button>
+<button class="quiz-choice" data-value="A">A) A JSON-RPC bridge that brokers every privileged call a Live App needs to make, with permissions enforced at the bridge</button>
+<button class="quiz-choice" data-value="B">B) A REST API hosted by Ledger's backend</button>
+<button class="quiz-choice" data-value="C">C) A WebSocket used only for streaming market prices</button>
+<button class="quiz-choice" data-value="D">D) A shared library linked into the Live App</button>
 </div>
-<p class="quiz-explanation">Unit tests form the wide base of the pyramid. They are the fastest (~1ms each), cheapest to maintain, and should be the most numerous. E2E tests are the narrow tip — few, targeted at critical paths.</p>
+<p class="quiz-explanation">Wallet API is an in-process JSON-RPC bridge between the webview and the shell. The shell enforces manifest permissions at the bridge — a Live App cannot bypass them even if it tries.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> Why are manifests important from a QA perspective?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) They contain the Live App's source code</button>
+<button class="quiz-choice" data-value="B">B) They replace feature flags</button>
+<button class="quiz-choice" data-value="C">C) They are loaded only in production</button>
+<button class="quiz-choice" data-value="D">D) They control which URL the Wallet loads per environment and which Wallet-API permissions the app has — a misconfigured manifest can break an otherwise correct Live App</button>
+</div>
+<p class="quiz-explanation">If the manifest points at the wrong URL or denies a required permission, the Live App will fail even if its own code is flawless. When a Live App is broken in one environment only, always compare manifests first.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> A webview-based Live App is slower to load than a native screen. What does this mean for E2E test design?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Use <code>page.waitForTimeout(5000)</code> before every action</button>
+<button class="quiz-choice" data-value="B">B) Budget for webview boot time and Wallet-API handshake in fixture/setup, not inside assertions — and prefer deterministic waits on app-specific selectors over sleeps</button>
+<button class="quiz-choice" data-value="C">C) Never test Live Apps end-to-end</button>
+<button class="quiz-choice" data-value="D">D) Disable webviews in test mode</button>
+</div>
+<p class="quiz-explanation">Live Apps need deterministic waits on app-specific UI elements (e.g., the quotes list) because the boot adds latency the Wallet shell does not have. Fixed sleeps create flakiness; Playwright's auto-waiting on a real element is what you want.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -198,1410 +307,1114 @@ test.fixme("send flow times out on CI", async ({ app }) => {
 ---
 
 
-## Debugging Failures Like a Pro
+## Swap Live App -- Architecture & Components
 
 <div class="chapter-intro">
-When an E2E test fails, resist the urge to immediately re-run it. This chapter teaches a systematic debugging approach: read the error, check the artifacts, reproduce locally, and fix the root cause. You will learn the Playwright Inspector, Trace Viewer, Detox debugging tools, Speculos troubleshooting, and common failure patterns with their solutions.
+The Swap Live App is the most business-critical Live App in Ledger Wallet. It is also the most architecturally complex — several repos, several backends, several providers, and a regulated perimeter. This chapter is the map you need to debug a swap issue without guessing where the problem lives.
 </div>
 
-### 6.2.1 The Debugging Mindset
+### 6.2.1 What Swap Does
+
+From the user's point of view, Swap exchanges one crypto for another directly from Ledger Wallet without leaving the app and without giving custody to anyone. Under the hood, "directly from Ledger Wallet" hides a lot of moving parts:
+
+1. The user picks a source account and a destination currency
+2. The Swap Live App asks multiple providers for quotes in parallel
+3. The user picks a provider (or the best-rate pick is preselected)
+4. The Wallet shell builds a transaction on the source chain, the device signs it, the Wallet broadcasts it
+5. The provider receives the source asset, converts it, and sends the destination asset to the user's destination account
+6. Swap polls the provider for status until the trade reaches a terminal state (completed, failed, refunded)
+
+Ledger does not hold funds at any step. The provider takes custody briefly between inbound and outbound; Ledger's role is limited to quote aggregation, transaction orchestration, and status reporting. That boundary is a legal one — see 33.9 for why.
+
+### 6.2.2 The Swap Repo Landscape
+
+Swap lives in several repos. You will need to know each one by name.
+
+| Repo | What it is | Language / stack | QA interest |
+|---|---|---|---|
+| **`swap-live-app`** | The Swap Live App itself — the webview UI users see | Next.js 15 (App Router) + React 19 + TypeScript 5.9 + Tailwind 4; containerized and deployed to AWS EKS via ArgoCD | Most frontend bugs live here |
+| **`swap`** | The Swap backend: quote aggregator + completer (polls providers and updates status) | Scala (service) + Scala (completer), PostgreSQL, RabbitMQ | Quote discrepancies, status-polling issues, provider outages surface here |
+| **`swap-configuration`** | Configuration for supported pairs, limits, fees, provider enablement | Rust + CSV configuration files | "Why is this pair unavailable?" almost always starts here |
+| **`exchange-sdk`** | Shared TypeScript SDK used by Live Apps (Swap, PTX) and by the Wallet shell to drive exchange flows | TypeScript | Wallet-API exchange contract lives here |
+| **`wallet-api`** | The JSON-RPC bridge itself — `client`, `server`, `core`, `simulator`, `manifest-validator` packages | TypeScript monorepo | Manifest schema, RPC methods, error types are defined here |
+| **`ledger-live`** (this repo) | The Wallet shell, including E2E tests for swap | pnpm + Turborepo monorepo | E2E desktop (`send.swap.spec.ts`, `accounts.swap.spec.ts`) and mobile tests |
+| **`ledger-live-assets`** | Static assets: provider logos, provider configs, icons | Static CDN-served | Missing logo, wrong provider label → check here |
+
+A **swap bug does not always belong to Swap** — it might live in `ledger-live` (the shell), in `exchange-sdk` (the bridge contract), in `wallet-api` (the protocol itself), or in the provider. Triage by layer.
+
+### 6.2.3 Frontend: the `swap-live-app` Repo
+
+`swap-live-app` is a **Next.js 15 (App Router) + React 19 + TypeScript 5.9 + Tailwind 4** monorepo. It is **not** deployed on Vercel — the application is containerized by GitHub Actions (`build.yml`), pushed to a JFrog OCI registry (`jfrog.ledgerlabs.net/ptx-oci-prod-green/swap-live-app`), and deployed to **AWS EKS via ArgoCD** (GitOps). Chapter 6.3 covers the environments and URLs.
+
+**Repo layout** (from `apps/docs/architecture/index.md`):
 
 ```
-FAIL → Read the error → Check the screenshot/video → Reproduce locally → Fix
+swap-live-app/
+├── apps/
+│   ├── live-app/           # Main swap application (Next.js 15, App Router)
+│   └── docs/               # Documentation site (VitePress)
+├── packages/
+│   ├── ui-desktop/         # Design system components (Atomic Design)
+│   ├── formatter/          # Number/currency formatting with i18n
+│   ├── utils/              # Shared utilities (cn helper)
+│   ├── testing-tools/      # Testing utilities and MSW setup
+│   ├── window-transport-simulator/   # Wallet API transport simulator
+│   ├── eslint-config/      # Shared ESLint configurations
+│   ├── typescript-config/  # Shared TypeScript configurations
+│   └── tailwind-config/    # Shared Tailwind CSS configuration
+├── argocd/                 # ArgoCD deployment configs (stg, ppr, prd, prx)
+├── .github/workflows/      # CI/CD (build, e2e, release, rollback, code freeze)
+└── .rules/                 # Project-wide coding standards
 ```
 
-**Never:**
-- Re-run without reading the error
-- Add `waitForTimeout()` as a fix
-- Delete a test because it's "flaky"
-
-### 6.2.2 Common Error Patterns
+**Inside `apps/live-app/src/`:**
 
 ```
-# Timeout waiting for element
-TimeoutError: locator.getByTestId("send-button").click
-  Timeout 30000ms exceeded.
-
-# Assertion failure
-expect(received).toHaveText(expected)
-  Expected: "1.5 BTC"
-  Received: "1.50000000 BTC"
-
-# Speculos not responding
-Error: connect ECONNREFUSED 127.0.0.1:5000
-
-# Element detached from DOM
-Error: Element is not attached to the DOM
+src/
+├── app/             # Next.js App Router pages & layouts
+├── components/      # Feature and page-specific components
+├── context/         # React contexts (Wallet API, user state)
+├── hooks/           # Custom React hooks
+├── locales/         # i18n strings
+├── queries/         # React Query API calls to the swap backend
+├── remote-config/   # Firebase remote config (feature flags, partner config)
+├── schemas/         # Zod schemas for runtime validation
+├── state/           # Jotai atoms
+├── swap-api/        # Typed client for the `swap` backend
+├── wallet-api/      # Thin wrapper around @ledgerhq/wallet-api-client
+└── middleware.ts    # Next.js edge middleware
 ```
 
-### 6.2.3 Playwright Debugging Tools
+**Key stack traits to remember as QA:**
 
-**Playwright Inspector** (headed debug mode):
-```bash
-PWDEBUG=1 pnpm e2e:desktop test:playwright your-test.spec.ts
+- **Next.js App Router** (not Pages Router) — URL routing is filesystem-based under `src/app/`
+- **Styling** — Tailwind 4 + Ledger's Lumen design system (`@ledgerhq/lumen-design-core`, `@ledgerhq/lumen-ui-react`) + `@ledgerhq/react-ui`. Tailwind utilities come from a custom preset — QA should not be tempted to read arbitrary class values like `w-[107px]`; only design-token sizes are valid
+- **State** — Jotai atoms (not Redux/Zustand) for local state; React Query for backend calls
+- **Feature flags** — Firebase Remote Config (see chapter 34)
+- **UI component library** — `@workspace/ui-desktop` is the in-repo design system, organised Atomic-Design style (atoms / molecules / organisms / primitives), documented via Storybook
+- **Simulator** — `@workspace/window-transport-simulator` + `@ledgerhq/wallet-api-simulator` mock the Wallet-API bridge so the Live App can run standalone at `http://localhost:3000` during dev
+- **Analytics / monitoring** — Datadog RUM (`@datadog/browser-rum`), Segment (`@segment/analytics-next`), Mixpanel (`mixpanel-browser`) are all bundled into `apps/live-app`
+
+The Live App is **stateless across sessions** from the Wallet's perspective — if you reopen Swap, it reboots. This matters in tests: every `openSwap()` in an E2E spec is a full webview boot (plus Next.js hydration).
+
+### 6.2.4 Backend: the `swap` Service and Completer
+
+The `swap` backend is two processes sharing a PostgreSQL database and a RabbitMQ (Amazon MQ) queue:
+
 ```
-Opens a browser with an inspector panel — step through actions, inspect locators live, see resolved elements. See Part 3, Chapter 3.3.8 for a detailed walkthrough with screenshots.
-
-**Playwright Trace Viewer:**
-```bash
-npx playwright test --trace on
-npx playwright show-trace test-results/my-test/trace.zip
-```
-Shows every action with before/after screenshots, network requests, console logs, and DOM snapshots.
-
-**Playwright UI Mode:**
-```bash
-npx playwright test --ui
-```
-Interactive test runner with time-travel debugging.
-
-**Playwright Codegen** (for exploring the app):
-```bash
-npx playwright codegen http://localhost:3000
-```
-
-### 6.2.4 Detox Debugging Tools
-
-**Verbose logging:**
-```bash
-detox test --loglevel trace -c android.debug
-adb logcat | grep "ReactNative"
-```
-
-**Synchronization bypass** (for infinite animations):
-```typescript
-await device.disableSynchronization();
-await element(by.id("animated-component")).tap();
-await device.enableSynchronization();
-```
-
-### 6.2.5 Speculos Debugging
-
-```bash
-curl http://localhost:5000/events    # Health check
-docker ps | grep speculos            # Container running?
-docker logs <container_id>           # Container logs
+              HTTPS from Live App
+                     │
+                     ▼
+        ┌────────────────────────┐
+        │       swap service      │
+        │  (Scala, REST, quotes,  │
+        │   trade creation)       │
+        └────────┬───────────────┘
+                 │ enqueue
+                 ▼
+        ┌────────────────────────┐
+        │       RabbitMQ          │
+        │      (Amazon MQ)        │
+        └────────┬───────────────┘
+                 │ consume
+                 ▼
+        ┌────────────────────────┐
+        │       swap completer    │
+        │  (Scala, polls provider │
+        │   status, persists it)  │
+        └────────┬───────────────┘
+                 │
+                 ▼
+        ┌────────────────────────┐
+        │      PostgreSQL         │
+        │  (trades, statuses,     │
+        │   audit)                │
+        └────────────────────────┘
 ```
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `ECONNREFUSED :5000` | Container not started | Check Docker daemon |
-| `404 Not Found` on `/apdu` | Wrong Speculos version | Pull latest image |
-| App stuck on home screen | Wrong coin app `.elf` | Verify COINAPPS path |
-| Button press does nothing | Wrong interaction model | Check touch vs non-touch device |
-| `APDU error 6985` | User rejected on device | Test didn't press "Approve" |
+Responsibilities:
 
-### 6.2.6 Common Failure Patterns
+- **`swap` service** — receives quote and trade requests from the Live App, fans them out to providers, ranks quotes, returns the best, and creates the trade record
+- **`swap completer`** — background worker that polls providers for long-running trades and updates status in PostgreSQL; the Live App (and Wallet) read status from the service endpoint
+- **PostgreSQL** — system of record for every trade, status history, audit
+- **RabbitMQ** — decouples trade creation (synchronous, user-facing) from status polling (asynchronous, provider-dependent)
 
-| Pattern | Symptom | Root Cause | Solution |
-|---------|---------|-----------|----------|
-| Timing | `TimeoutError` on existing element | Element renders late | Wait for prerequisite first |
-| Stale data | Test sees old balance | Previous test pollution | Use fresh userdata |
-| Layout shift | Click lands wrong | Element moved during click | Wait for animation completion |
-| Locale | `"1,5 BTC"` vs `"1.5 BTC"` | System locale differs | Set locale in config |
-| Resolution | Element off-screen | Different CI viewport | Set viewport in config |
-| Docker | `OCI runtime create failed` | Out of disk space | `docker system prune` |
+The **completer is why a swap you started can "complete later"** even if you close Swap. Status is owned by the backend, not the Live App.
 
-### 6.2.7 LLD Debugging Tips (from the wiki)
+### 6.2.5 Configuration: the `swap-configuration` Repo
 
-For desktop app debugging beyond E2E tests:
+`swap-configuration` holds the declarative rules that the service and the Live App obey:
 
-- **Renderer process**: Chrome DevTools Performance tab → record and expand User section to see React re-renders
-- **Main process**: `ELECTRON_ARGS=--inspect-brk` then go to `chrome://inspect` (brk mode waits for you)
-- **Internal process**: `LEDGER_INTERNAL_ARGS=--inspect`, add port manually in `chrome://inspect`
+- Which swap pairs are supported, per provider
+- Per-pair min/max amounts
+- Per-provider fee tiers
+- Which providers are enabled globally and per environment
+- KYC requirements per provider
+- Geolocation / jurisdiction rules
 
-> **Tip from the wiki**: "Our goal should be to never drop a single frame in renderer thread in production mode."
+It is **Rust** tooling over **CSV** sources. QA almost never edits this repo, but you will read it constantly:
+
+- "Why can't I swap X to Y?" → grep the pair in `swap-configuration`
+- "Why is Changelly disabled on pre-prod?" → same
+- "Why does the min amount differ between stg and prod?" → same
+
+When you see a behavior that looks like a bug but might be a config intent, **check `swap-configuration` before opening a ticket**.
+
+### 6.2.6 Shared Contracts: `exchange-sdk`
+
+`exchange-sdk` is a TypeScript package that both the Wallet shell and the Swap Live App consume. It defines:
+
+- The Wallet-API exchange contract (types, method signatures, error codes)
+- The shape of swap quotes, trade requests, and status responses
+- Helpers for building the transaction the device will sign
+
+Bugs in `exchange-sdk` are particularly painful because they surface as mysterious errors at the Wallet-API bridge — the Live App thinks it sent a valid call, the shell thinks it received a malformed one, and the stack trace points at neither. When you see `INVALID_PARAMS` or similar bridge errors from Swap, check if `exchange-sdk` was recently bumped on either side.
+
+### 6.2.7 Static Assets: `ledger-live-assets`
+
+This repo serves static assets (images, provider configs) through a CDN. For Swap specifically:
+
+- Provider logos (Changelly, CIC, 1inch, Paraswap, MoonPay, Thorswap, Uniswap, ...)
+- Provider metadata (display name, URL, KYC flag)
+- Icons used in the Live App UI
+
+If a provider shows up with a broken or missing logo in prod, that is an assets repo issue, not a Swap issue.
+
+### 6.2.8 Providers
+
+Swap aggregates multiple providers. Each provider is either a CEX (custodial, KYC-prone) or a DEX (non-custodial, usually KYC-free). For QA, the CEX/DEX distinction drives the flow:
+
+| Provider | Type | KYC required? | Notes |
+|---|---|---|---|
+| **Changelly** | CEX | Conditional | Float rates, widely supported pairs |
+| **CIC** | CEX | Conditional | Partner-specific fiat off-ramp |
+| **1inch** | DEX | No | EVM DEX aggregator |
+| **Paraswap** | DEX | No | EVM DEX aggregator |
+| **MoonPay** | CEX (fiat-on-ramp, via Swap on some flows) | Yes | Different flow — often has its own Live App |
+| **Thorswap** | DEX | No | Cross-chain (BTC, ETH, LTC, ...) |
+| **Uniswap** | DEX | No | EVM, canonical DEX |
+
+Two things to remember in tests:
+
+- **KYC path diverges**: `selectExchangeWithoutKyc` picks a provider the test can actually go through without a human. Using `selectExchange` (including KYC-capable providers) may land on Changelly/CIC and block the test behind a KYC screen.
+- **DEX swaps need token approvals** before the actual swap — `app.swap.ensureTokenApproval(...)` handles this. If a test flakes on a token swap only, missing or stale approval is the first suspect.
+
+### 6.2.9 The Regulatory Boundary (MiCA / CASP)
+
+Since late 2024, swap in the EU falls under MiCA. Two consequences matter for QA:
+
+- Ledger operates Swap under an **RTO** (Reception and Transmission of Orders) model. Ledger does not custody funds and does not match orders — providers do.
+- Provider availability varies **by user jurisdiction**. A pair that works in stg from a French test IP may not work from a US-VPN test session.
+
+This is why QA environments have stg/ppr/prod split, and why the list of enabled providers differs across envs (see Chapter 6.3).
+
+### 6.2.10 Putting It All Together
+
+The end-to-end exchange flow involves four actors — the **Live App** (frontend), the **Exchange SDK** (shared contracts), the **Wallet API** (JSON-RPC bridge exposed by the Wallet shell), and the **Swap backend** (service + completer). The sequence below is the canonical happy path for a swap trade:
+
+![Swap Live App sequence diagram — Live App, Exchange SDK, Wallet API, and Swap Backend](images/Swap-live-app-schema.png)
+
+In words, step by step:
+
+1. The Wallet shell reads the manifest and opens the Live App URL
+2. The Live App boots, uses `exchange-sdk` types to request quotes from the `swap` service
+3. The service consults `swap-configuration` to know which providers and pairs are enabled
+4. The service hits each enabled provider in parallel
+5. The Live App shows quotes, the user picks one
+6. The Live App asks the Wallet API (via `exchange.start`) to initialize an exchange nonce on the device
+7. The Live App then calls `exchange.complete`; the Wallet shell builds the tx, the device signs, and the Wallet broadcasts
+8. The `swap` service writes the trade record; the **completer** polls the provider until the trade reaches a terminal state
+9. The Live App queries status until completion; logos and provider metadata come from `ledger-live-assets`
+
+**When you triage a swap bug, ask by layer, top to bottom:**
+
+- Live App UX / rendering → `swap-live-app`
+- Wallet-API bridge / shell device flow → `ledger-live` + `exchange-sdk`
+- Quote rejection, wrong pair availability, stale status → `swap` backend
+- Supported pair / min-max / provider enablement → `swap-configuration`
+- Missing logo / wrong provider label → `ledger-live-assets`
+- Provider-specific failure → the provider itself (escalate)
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><a href="https://playwright.dev/docs/debug">Playwright Debugging Guide</a></li>
-<li><a href="https://playwright.dev/docs/trace-viewer">Playwright Trace Viewer</a></li>
-<li><a href="https://wix.github.io/Detox/docs/troubleshooting/running-tests">Detox Troubleshooting</a></li>
-<li><a href="https://developer.chrome.com/docs/devtools/">Chrome DevTools documentation</a></li>
+<li><code>swap-live-app</code> repo — the Live App itself</li>
+<li><code>swap</code> repo — Scala backend (service + completer)</li>
+<li><code>swap-configuration</code> repo — pair/fees/provider configuration</li>
+<li><code>exchange-sdk</code> repo — Wallet-API exchange contract</li>
+<li><code>ledger-live-assets</code> repo — provider logos and metadata</li>
+<li><code>e2e/desktop/tests/specs/send.swap.spec.ts</code> in <code>ledger-live</code> — desktop swap E2E tests</li>
+<li><code>e2e/mobile/specs/swap/</code> in <code>ledger-live</code> — mobile swap E2E tests</li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Debugging is a skill, not a talent. Follow the systematic approach: error → artifacts → reproduce → fix. The tools are excellent (Playwright Inspector, Trace Viewer, Allure) — learn to use them fluently and you will spend less time debugging than most engineers.
+<strong>Key takeaway:</strong> Swap is an aggregator plus an orchestrator. The Live App is the UI; the <code>swap</code> service is the quote/trade API; the completer is the status worker; <code>swap-configuration</code> is the rulebook; <code>ledger-live-assets</code> supplies branding. A swap bug is almost always scoped to one of these layers — triaging by layer saves hours of blind debugging.
 </div>
 
-<!-- No quiz for Ch 6.2 — per Rodin evaluation, debugging is best learned by doing, not by QCM -->
+### 6.2.11 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz -- Swap Live App Architecture</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> Where does the Swap Live App's frontend source code live, and how is it deployed?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) In <code>ledger-live/apps/swap</code>, bundled with the Wallet shell</button>
+<button class="quiz-choice" data-value="B">B) In the separate <code>swap-live-app</code> repo — containerized by GitHub Actions, pushed to JFrog, and deployed to AWS EKS via ArgoCD</button>
+<button class="quiz-choice" data-value="C">C) In <code>exchange-sdk</code>, served from npm</button>
+<button class="quiz-choice" data-value="D">D) In <code>ledger-live-assets</code>, served from a CDN</button>
+</div>
+<p class="quiz-explanation">The Swap Live App lives in its own repo. Deployment is <strong>not</strong> Vercel — <code>build.yml</code> builds a Docker image, pushes it to JFrog (<code>jfrog.ledgerlabs.net/ptx-oci-prod-green/swap-live-app</code>), and ArgoCD syncs it to an EKS cluster (GitOps). The Wallet shell loads the Live App by URL, declared in a manifest.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> Which component is responsible for polling providers and updating the status of long-running trades?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The Swap Live App frontend</button>
+<button class="quiz-choice" data-value="B">B) The <code>swap</code> service (REST API)</button>
+<button class="quiz-choice" data-value="C">C) The <code>swap</code> completer — a background worker consuming from RabbitMQ and writing status to PostgreSQL</button>
+<button class="quiz-choice" data-value="D">D) The <code>exchange-sdk</code> package</button>
+</div>
+<p class="quiz-explanation">The completer is the status worker. It decouples "I just created a trade" (synchronous, user-facing) from "is the trade complete?" (asynchronous, provider-dependent). This is why a trade can complete even after the user closes Swap.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> A user reports that a specific swap pair is unavailable in production only. What repo should you check first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>swap-configuration</code> — the declarative rules about which pairs are enabled per provider and per environment</button>
+<button class="quiz-choice" data-value="B">B) <code>ledger-live</code></button>
+<button class="quiz-choice" data-value="C">C) <code>swap-live-app</code></button>
+<button class="quiz-choice" data-value="D">D) <code>ledger-live-assets</code></button>
+</div>
+<p class="quiz-explanation">Pair availability is driven by <code>swap-configuration</code>. Before you assume a code bug, check whether the pair is intentionally disabled or restricted for that environment.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> Why does the desktop E2E test call <code>selectExchangeWithoutKyc</code> instead of <code>selectExchange</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It is faster</button>
+<button class="quiz-choice" data-value="B">B) It is the only method that works on Speculos</button>
+<button class="quiz-choice" data-value="C">C) It is required by <code>exchange-sdk</code></button>
+<button class="quiz-choice" data-value="D">D) To deterministically pick a provider that will not trigger a KYC step mid-test — KYC screens cannot be automated</button>
+</div>
+<p class="quiz-explanation">KYC-capable providers (Changelly, CIC) can route the test into an identity-verification flow that no E2E test can complete. <code>selectExchangeWithoutKyc</code> restricts the provider pool to those that allow the swap to proceed without human verification.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> A token-pair swap test flakes only on DEX providers. What is the most likely root cause?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Speculos is misconfigured</button>
+<button class="quiz-choice" data-value="B">B) The ERC-20 token approval step has not been granted or is stale — DEX swaps require an approval before the swap itself</button>
+<button class="quiz-choice" data-value="C">C) The completer is down</button>
+<button class="quiz-choice" data-value="D">D) <code>ledger-live-assets</code> is serving stale logos</button>
+</div>
+<p class="quiz-explanation">DEX swaps on EVM chains require an ERC-20 <code>approve()</code> transaction before the actual swap. The test calls <code>app.swap.ensureTokenApproval(...)</code>; if that step is skipped or the approval is stale, the swap itself will fail on the first DEX provider.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
 
 ---
 
 
-## CI/CD & Test Sharding
+## Swap Live App -- Releases & Firebase Environments
 
 <div class="chapter-intro">
-A full Ledger Live E2E pass serialised on one machine would take the better part of an afternoon: roughly 45–60 minutes for mobile iOS alone, another 45–60 for Android, plus 30-odd for the desktop Playwright corpus against Speculos. Running that on every PR would strangle the review loop. GitHub Actions — with about 75 workflow files, a fleet of composite actions, and a greedy bin-packing scheduler — keeps that wall-clock compressed to 10–15 minutes. This chapter is the canonical reference for how CI is wired at Ledger Live: the workflow hierarchy, the <code>@Gate</code> contract that blocks your PR, the composite actions you never write but rely on every run, desktop Playwright sharding, and the full mobile <code>shard-tests.mjs</code> / <code>generate-shards-matrix</code> pipeline — ending with two ASCII sequence diagrams you can read top-to-bottom when a shard goes red.
+The Swap Live App has its own branching model, its own CI/CD, and its own Firebase — none of which is obvious from inside <code>ledger-live</code>. This chapter maps every environment to the URLs, feature flags, and monitoring you will actually use on your first week of QA work.
 </div>
 
-### 6.3.1 CI at Ledger Live — GitHub Actions Anatomy
+### 6.3.1 Release Model -- Trunk-Based on `develop`
 
-Ledger Live uses **GitHub Actions** as its sole CI/CD platform. The monorepo carries roughly **75 workflow YAMLs** under `.github/workflows/`, because it ships:
-
-- Multiple deployable artifacts (desktop Electron app, mobile app, dozens of npm libraries under `libs/`).
-- Across five OSes (Linux, macOS, Windows for desktop builds; iOS and Android for mobile).
-- Under four trigger families (pull-request, merge to `develop`, nightly schedule, `workflow_dispatch`).
-- With separation of concerns — linting, unit tests, E2E tests, native builds, and releases each live in their own file.
+The Swap Live App follows **trunk-based development**. There is **no `release/*` branch** and no Gitflow: `develop` is the single source of truth, feature branches are short-lived, and production is cut from `develop` by running a workflow.
 
 ```
-.github/
-├── workflows/                              # ~75 workflow YAMLs
-│   ├── test-ui-e2e-only-desktop.yml        # desktop Playwright (manual/scheduled)
-│   ├── test-mobile-e2e-reusable.yml        # mobile Detox core (the big one)
-│   ├── test-mobile-e2e-lint-reusable.yml
-│   ├── test-desktop-e2e-lint-reusable.yml
-│   ├── notify-e2e-required-reusable.yml    # @Gate-style aggregator
-│   ├── build-desktop-*.yml
-│   ├── build-mobile-*.yml
-│   ├── bot-*.yml                            # Ledger Live Bot (non-reg)
-│   ├── release-*.yml
-│   └── …
-tools/actions/composites/                    # reusable composite actions
-  ├── setup-caches/
-  ├── setup-e2e-test-desktop/
-  ├── setup-e2e-env/
-  ├── setup-speculos_image/
-  ├── generate-shards-matrix/                 # the mobile sharding brain
-  ├── aggregate-shard-results/
-  ├── run-e2e-playwright-tests/
-  ├── upload-allure-report/
-  ├── merge-e2e-detox-timings/
-  └── …
+develop (trunk — always deployable, auto-deploys to staging)
+  │
+  ├── feat/<name>    (short-lived, days)
+  ├── fix/<name>     (short-lived)
+  └── hotfix/<name>  (branched from the latest app@vX.Y.Z tag)
 ```
 
-**The hierarchy every workflow uses.** GitHub Actions has a strict three-level model; mastering it is 80% of reading any `.yml` in this repo.
+Key rules:
 
-```yaml
-name: "[Desktop] - E2E Only - Scheduled/Manual"   # workflow
+- `develop` is the trunk; feature and fix branches merge back quickly
+- Every merge to `develop` builds a Docker image tagged `develop` and auto-deploys to **staging** (ArgoCD sync)
+- A production release is triggered manually by running the **`release-production.yml`** GitHub Action — it consumes pending **Changesets** (`.changeset/*.md`), bumps versions, commits the bump, and creates an `app@vX.Y.Z` git tag
+- The tag push triggers `build.yml` which builds a Docker image tagged `app-vX.Y.Z` (hyphen, not `@`) and ArgoCD picks it up for production
+- **Hotfixes** branch from the latest `app@vX.Y.Z` tag, are tagged as a new patch release, and are merged back into `develop` (do **not** cherry-pick — always merge, to avoid divergence)
+- **Code freezes** are activated with the `code-freeze.yml` workflow; it flips the `CODE_FREEZE` repo variable and makes the "Code Freeze Check" fail on open PRs, blocking merges
 
-on:                                                # triggers
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Branch to test"
-      speculos_device:
-        type: choice
-        options: [nanoS, nanoSP, nanoX, stax, flex, nanoGen5]
-  schedule:
-    - cron: "0 3 * * 1-5"                          # Mon–Fri 03:00 UTC
-  workflow_call:                                   # callable from other workflows
+Versioning is **fully automated** by Changesets. Before a PR that introduces a user-facing change, you run `npx changeset`, select the bump type (major/minor/patch), write a summary, and commit the generated `.changeset/*.md` with your PR. The release workflow does the rest.
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true                         # newer push cancels older run
+> **Note:** Git tag format is `app@vX.Y.Z` (with `@`). The corresponding Docker image tag is `app-vX.Y.Z` (with a hyphen). The conversion happens automatically in the pipeline.
 
-jobs:
-  prepare-devices:                                 # job #1
-    runs-on: ubuntu-latest
-    outputs:
-      e2e_matrix: ${{ steps.parse.outputs.e2e_matrix }}
-    steps:                                         # steps
-      - name: Parse speculos device input
-        id: parse
-        run: echo "..."
+### 6.3.2 The Environments and Their URLs
 
-  e2e-tests:                                       # job #2 — fanned-out
-    needs: [prepare-devices]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.prepare-devices.outputs.e2e_matrix) }}
-    runs-on: [ledger-live-linux-e2e-speculos-32CPU-128RAM]
-    steps:
-      - uses: actions/checkout@v6.0.1
-      - uses: LedgerHQ/ledger-live/tools/actions/composites/setup-caches@develop
-      - name: Run Playwright
-        run: pnpm desktop e2e:speculos
+Swap has **four** environments: three long-lived (stg, ppr, prd) and one dynamic per-PR preview (prx). Each long-lived env has an internal AWS hostname (used by Ledger-internal tooling) and a public Cloudflare hostname (the one QA and end users actually hit). Memorize the shape:
+
+| Environment | Purpose | Frontend (Live App, public) | Internal AWS host | ArgoCD config |
+|---|---|---|---|---|
+| **Staging** (`stg`) | Auto-deploys on every merge to `develop`; internal dev and early QA | `swap-live-app-stg.ledger-test.com` | `swap-live-app.aws.stg.ldg-tech.com` | `argocd/stg/values.yaml` |
+| **Pre-prod** (`ppr`) | Final validation — prod-like; QA sign-off | `swap-live-app-ppr.ledger-test.com` | `swap-live-app.aws.ppr.ldg-tech.com` | `argocd/ppr/values.yaml` |
+| **Production** (`prd`) | End users | `swap-live-app.ledger.com` | `swap-live-app.aws.prd.ldg-tech.com` | `argocd/prd/values.yaml` |
+| **Preview** (`prx`) | Dynamic per-PR environment | — | `swap-live-app-pr<NNN>.aws.stg.ldg-tech.com` | `argocd/prx/values.yaml` |
+
+The backend (the `swap` service QA hits for quotes and trade creation) has its own URLs, versioned in the path:
+
+| Env | Backend URL |
+|---|---|
+| Staging | `swap-stg.ledger-test.com/v5` |
+| Pre-prod | `swap-ppr.ledger-test.com/v5` |
+| Production | `swap.ledger.com` |
+
+A few things to note:
+
+- The Live App frontend and the swap backend are **separate services on separate URLs** — the Live App calls the backend via HTTPS. When debugging a swap issue, always check both sides
+- `ledger-test.com` is Ledger's public test domain (behind Cloudflare) — do not expose these URLs to end users; they are for QA and dev only
+- `ldg-tech.com` is Ledger's internal AWS domain — typically only reachable from Ledger infrastructure
+- Provider enablement can differ between environments; a provider may be paused in stg to test fallback, or may be disabled in prod because of a region block
+- Each `argocd/{env}/values.yaml` has two fields that control which image runs: `imageTag` (default — `develop` for stg, `main` for prd) and `IMAGE_UPDATE_OVERRIDE_TAG` (empty = automatic updates; set to `app-vX.Y.Z` to pin a version, which is how rollbacks work)
+
+### 6.3.3 Firebase Projects
+
+Swap uses **two separate Firebase projects**. They serve different clients and the distinction catches new QA off guard.
+
+| Firebase project | Who reads it | What it contains |
+|---|---|---|
+| **`ledger-live-production`** | The Wallet shell (desktop + mobile) | Wallet-wide feature flags, Wallet 4.0 toggles, manifest overrides, the Wallet's own configuration (`shouldShowSwap`, entry-point toggles, KYC gates, etc.) |
+| **`swap-live-app`** | The Swap Live App itself | Swap-specific flags: provider enablement per env, A/B experiments inside the Live App, per-pair overrides, UI experiments |
+
+In practice:
+
+- A flag that controls **whether the Swap entry point appears in the Wallet** is in `ledger-live-production`
+- A flag that controls **the layout of the quotes list inside the Live App** is in `swap-live-app`
+- If QA says "I cannot see Swap in the Wallet", check `ledger-live-production` first
+- If QA says "A provider is missing in Swap", check the `swap-live-app` Firebase first, then `swap-configuration`
+
+Each Firebase project has its own staging / prod split (typically separated by project or by remote-config condition). Credentials to these projects are distributed per-role; do not share.
+
+### 6.3.4 Feature Flags -- Where to Look
+
+Swap-related feature flags live in three places at once. When tracing a flag, check all three:
+
+| Source | Examples |
+|---|---|
+| **Firebase `ledger-live-production`** | `ptxSwap`, `ptxEarn`, manifest overrides, Swap entry-point toggles |
+| **Firebase `swap-live-app`** | Provider enablement (e.g., `changelly_enabled`), UI experiments, best-rate algorithm toggles |
+| **`swap-configuration` repo** | Pair enablement, min/max amounts, per-provider pair whitelist |
+
+Configuration wins in this order (most specific first):
+
+1. `swap-configuration` — a disabled pair is disabled, full stop
+2. Firebase `swap-live-app` — if enabled in config, a provider may still be hidden by a Firebase flag for an A/B test
+3. Firebase `ledger-live-production` — if the Wallet hides the Swap entry altogether, none of the above matter
+
+### 6.3.5 The Release Workflow in Practice
+
+A typical swap release (no release branch, Changesets-driven):
+
+```
+Ongoing │  PRs merge to develop; each carries a .changeset/*.md if user-facing
+Ongoing │  On every merge to develop: build.yml builds app image tagged `develop`
+Ongoing │  ArgoCD syncs the new `develop` image to stg (swap-live-app-stg.ledger-test.com)
+Day 0   │  prepare-release.yml runs → GitHub issue with next version + changelog preview
+Day 0   │  Scope agreed; optionally code-freeze.yml activates CODE_FREEZE to block new merges
+Day 1   │  QA regresses on ppr (the same develop-tracking image is promoted to ppr for the gate)
+Day 2   │  release-production.yml triggered manually → Changesets consumed, versions bumped,
+        │  commit pushed to develop, app@vX.Y.Z git tag created
+Day 2   │  Tag push triggers build.yml → Docker image tagged `app-vX.Y.Z` pushed to JFrog
+Day 2   │  ArgoCD prd picks up the new image; swap-live-app.ledger.com now serves the new version
+Day 2   │  Monitor #ptx-swap-prod and Datadog/Sentry for regressions
 ```
 
-| Layer | What it represents | How you think about it |
-|-------|-------------------|--------------------------|
-| **Workflow** | One YAML file, one `name:` | A single "button" in the Actions UI |
-| **Job** | A node in the DAG, pinned to a runner | One virtual machine's worth of work |
-| **Step** | Imperative command or `uses:` call | A single line of a shell script |
-| **Composite action** | A reusable bundle of steps under `tools/actions/composites/` | A shell function you can call from any workflow |
-| **Reusable workflow** | A YAML with `on.workflow_call` | A whole sub-pipeline you can invoke and pass inputs to |
+QA's touchpoints on this timeline:
 
-**Concurrency.** `concurrency.cancel-in-progress: true` means when you push a new commit on the same branch, the older run is cancelled so runners are freed for the fresher commit. Reusable workflows that serve release gating (`test-mobile-e2e-reusable.yml`) deliberately set `cancel-in-progress: false` so two manual runs against the same branch serialise rather than destroy each other's data.
+- **Ongoing (stg)** — smoke + targeted regression as PRs merge; this is where most bugs are caught
+- **Day 1 (ppr)** — full regression against production-like data; this is the go/no-go gate
+- **Day 2 (prod)** — watchdog on Datadog, Sentry, Mixpanel dashboards for the first 2 hours after deploy
 
-**Matrix strategy.** `strategy.matrix` fans one job out into N parallel jobs. Each instance gets unique values (a device name, a shard index, a platform…). `fail-fast: false` is the almost-universal setting in this repo — it means if shard 3 fails, shards 4–N still run to completion so Allure gets a full picture. Losing half the shards to save a few runner-minutes is not a trade QA accepts.
+**Rollback:** to roll back production, run `rollback-production.yml` with the environment (`prd`) and the target version (e.g., `app@v1.8.0`). The workflow updates `IMAGE_UPDATE_OVERRIDE_TAG` in `argocd/prd/values.yaml` and commits it to `develop`; ArgoCD syncs within minutes. If the workflow is unavailable, edit `argocd/prd/values.yaml` directly, set `IMAGE_UPDATE_OVERRIDE_TAG: "app-v1.8.0"`, and merge to `develop` — same effect.
 
-### 6.3.2 The E2E Workflow Map
+### 6.3.6 Monitoring and Observability
 
-Most of CI you will meet is either a **wrapper** (lightweight YAML that fires on PR) or a **reusable core** (the YAML with `workflow_call` that does the heavy lifting). The split exists so the same core logic is invoked identically whether a human presses Run, a cron fires, or a release workflow chains in.
+When a swap bug is reported, the monitoring stack is where you start:
 
-**Desktop E2E — the concrete layout.**
+| Tool | What it shows |
+|---|---|
+| **Datadog** | Service health, error rates, latency, alerts for the `swap` backend and completer |
+| **Sentry** | Client-side errors in the Live App (desktop webview + mobile webview) |
+| **Mixpanel** | Funnel metrics — how many users start a quote, how many complete a trade, drop-off per step; there are separate Mixpanel projects for desktop and mobile |
+| **Tableau** | Aggregated business metrics; revenue per provider, volume per pair, KYC pass-through |
+| **Runscope** | Synthetic uptime checks against the `swap` service endpoints |
 
-| Workflow | Trigger | What it does |
-|----------|---------|--------------|
-| `test-ui-e2e-only-desktop.yml` | `workflow_dispatch`, `schedule`, `workflow_call` | The reusable core for desktop E2E. Runs Playwright against Speculos on a Linux self-hosted runner (`ledger-live-linux-e2e-speculos-32CPU-128RAM`). Matrix is **per device**, not per shard index — see 6.3.5 below. |
-| `test-desktop-e2e-lint-reusable.yml` | `workflow_call` from PR | Lints the E2E test TypeScript without running any browser. Fast. |
-| Build workflows (`build-desktop-*.yml`) | Various | Produce the Electron binaries cached by E2E jobs. |
+And Slack is where the humans are:
 
-**Mobile E2E — the concrete layout.**
+| Channel | Purpose |
+|---|---|
+| **`#ptx-swap-build`** | Swap team engineering chatter, release announcements |
+| **`#ptx-swap-prod`** | Production-only: deploys, rollbacks, first-hour watchdog |
+| **`#alerts-swap`** | Automated alerts from Datadog and Sentry |
+| **`#consumer-service-alerts`** | Broader consumer-backend alerts that sometimes affect Swap |
 
-| Workflow | Trigger | What it does |
-|----------|---------|--------------|
-| `test-mobile-e2e-reusable.yml` | `workflow_dispatch`, `schedule` (Mon–Fri 03:00 UTC), `workflow_call` | The reusable core for mobile E2E. Runs Detox against Speculos on iOS simulators and Android emulators, with true sharding (1–12 shards per platform) and greedy bin-packing. |
-| `test-mobile-e2e-lint-reusable.yml` | `workflow_call` from PR | Lints Detox test TypeScript. |
-| `notify-e2e-required-reusable.yml` | `workflow_call` on PR | Analyses diff paths and posts a PR comment listing which E2E pipelines are required for this PR. |
+### 6.3.7 What Changes Across Environments -- Cheat Sheet
 
-**Bot / non-regression workflows.**
+| Concern | Staging | Pre-prod | Production |
+|---|---|---|---|
+| Backend URL | `swap-stg.ledger-test.com/v5` | `swap-ppr.ledger-test.com/v5` | `swap.ledger.com` |
+| Frontend URL (public) | `swap-live-app-stg.ledger-test.com` | `swap-live-app-ppr.ledger-test.com` | `swap-live-app.ledger.com` |
+| Frontend URL (AWS internal) | `swap-live-app.aws.stg.ldg-tech.com` | `swap-live-app.aws.ppr.ldg-tech.com` | `swap-live-app.aws.prd.ldg-tech.com` |
+| Image tag | `develop` (auto) | pinned `app-vX.Y.Z` | pinned `app-vX.Y.Z` |
+| Real funds | No (test seeds) | No (test seeds) | Yes — user funds |
+| Provider list | May be a subset, may include test providers | Same set as prod | Full production set |
+| Firebase project audience | Internal | Internal | External users |
+| Monitoring severity | Low | Medium | Critical — paging |
+| Broadcast in E2E | Gated by `DISABLE_TRANSACTION_BROADCAST=1` | Same | Never run E2E that broadcasts |
 
-| Workflow | Trigger | What it does |
-|----------|---------|--------------|
-| `bot-nonreg-nitrogen.yml` | Daily | Non-regression with SEED7 on `develop`. |
-| `bot-nonreg-oxygen.yml` | Weekly | Costly non-regression with SEED5 on `develop`. |
-| `bot-nonreg-carbone.yml` | Weekdays | Non-regression on `main` with staging explorers. |
+The most common "works on stg, fails on ppr" pattern is a provider-enablement delta — always re-read `swap-configuration` and the `swap-live-app` Firebase flags side by side before assuming a code regression.
 
-**Release workflows.** `release-*.yml` chains into both `test-ui-e2e-only-desktop.yml` and `test-mobile-e2e-reusable.yml` via `workflow_call` with `production_firebase: true` (see 6.3.9).
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Swap ships via <strong>trunk-based development</strong> — <code>develop</code> is the source of truth, Changesets drives versioning, and <code>release-production.yml</code> creates an <code>app@vX.Y.Z</code> tag that ArgoCD then syncs to EKS. Four environments (<code>stg</code> / <code>ppr</code> / <code>prd</code> / <code>prx</code>) each have their own public Cloudflare URL (e.g., <code>swap-live-app.ledger.com</code>) and internal AWS URL. Two Firebase projects split the flag responsibility: <code>ledger-live-production</code> (Wallet-side) and <code>swap-live-app</code> (Live-App-side). When a swap bug depends on environment, the answer is almost always in the URL map, the Firebase flags, or <code>swap-configuration</code> — and often in all three at once.
+</div>
 
-**Mental model.** Every E2E run in the repo — whether started by a PR, a cron, a release gate, or `gh workflow run` — ultimately calls exactly one of the two reusable cores. The wrappers only differ in which inputs they pass.
+### 6.3.8 Quiz
 
-### 6.3.3 The `@Gate` Job
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz -- Swap Releases & Firebase</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-**What it is.** `@Gate` is a naming convention for the aggregator job that branch-protection rules treat as the single required check. It exists because a PR has dozens of independent jobs; requiring every one of them in the GitHub UI is unwieldy and fragile (the check list drifts as workflows are added and removed). Instead, branch protection pins **one** name — `@Gate` — and that job waits on everything else and emits a single pass/fail.
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> Which branching model does <code>swap-live-app</code> use?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Classic Gitflow with a <code>release/app@v1.3.xx</code> branch cut from <code>develop</code></button>
+<button class="quiz-choice" data-value="B">B) Trunk-based on <code>develop</code> — short-lived <code>feat/*</code> and <code>fix/*</code> branches merge back quickly; production is cut from <code>develop</code> by running <code>release-production.yml</code>, which consumes Changesets and creates an <code>app@vX.Y.Z</code> tag</button>
+<button class="quiz-choice" data-value="C">C) Semantic-release on every merge to <code>main</code></button>
+<button class="quiz-choice" data-value="D">D) One long-lived release branch per quarter</button>
+</div>
+<p class="quiz-explanation">The repo is <strong>trunk-based</strong>: <code>develop</code> is the single source of truth. There is no Gitflow, no <code>release/*</code> branch, and no separate <code>main</code>-as-trunk. Versions are managed by <strong>Changesets</strong> and the <code>release-production.yml</code> workflow; a production release is an <code>app@vX.Y.Z</code> tag cut directly from <code>develop</code>.</p>
+</div>
 
-The convention in this repo is encoded at the end of a reusable workflow:
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> You need to toggle a feature flag that controls whether the <strong>Swap tab appears in the Wallet at all</strong>. Which Firebase project owns that flag?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>swap-live-app</code></button>
+<button class="quiz-choice" data-value="B">B) <code>ledger-live-production</code> — flags that affect the Wallet shell (including whether a Live App entry point is shown) live in the Wallet's Firebase</button>
+<button class="quiz-choice" data-value="C">C) Neither — only <code>swap-configuration</code></button>
+<button class="quiz-choice" data-value="D">D) A shared third Firebase project</button>
+</div>
+<p class="quiz-explanation">Wallet-side flags (including entry-point visibility, Wallet 4.0 toggles, manifest overrides) live in <code>ledger-live-production</code>. Flags inside the Live App UI itself (provider enablement in the Live App, UI experiments) live in the <code>swap-live-app</code> Firebase.</p>
+</div>
 
-```yaml
-jobs:
-  # … all the real jobs: build, lint, unit, e2e, allure-report, …
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> What is the pre-prod backend URL for swap, and how is it different from the Live App frontend URL?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Backend: <code>swap-ppr.ledger-test.com/v5</code>; Frontend: <code>swap-live-app-ppr.ledger-test.com</code> (two separate services)</button>
+<button class="quiz-choice" data-value="B">B) Backend and Frontend are both <code>swap.ledger.com</code></button>
+<button class="quiz-choice" data-value="C">C) Backend: <code>swap-stg.ledger-test.com/v5</code>; Frontend: <code>swap-live-app-stg.ledger-test.com</code> (those are staging, not pre-prod)</button>
+<button class="quiz-choice" data-value="D">D) Backend: <code>swap-live-app.aws.ppr.ldg-tech.com</code>; Frontend: <code>swap-ppr.ledger-test.com/v5</code> (swapped roles)</button>
+</div>
+<p class="quiz-explanation">Pre-prod backend is <code>swap-ppr.ledger-test.com/v5</code>; pre-prod frontend Live App is <code>swap-live-app-ppr.ledger-test.com</code>. They are <strong>separate services on separate URLs</strong> — the Live App calls the backend over HTTPS. The <code>/v5</code> in the backend path is the backend API version, independent from the Live App version.</p>
+</div>
 
-  "@Gate":
-    name: "@Gate"
-    needs:
-      - detox-tests-ios
-      - detox-tests-android
-      - allure-report-ios
-      - allure-report-android
-      - lint-e2e
-    if: always()                    # run even if deps failed or were cancelled
-    runs-on: ubuntu-latest
-    steps:
-      - name: Aggregate required statuses
-        shell: bash
-        run: |
-          # fail fast if any REQUIRED dep failed
-          if [[ "${{ needs.detox-tests-ios.result }}"     != "success"
-             || "${{ needs.detox-tests-android.result }}" != "success"
-             || "${{ needs.lint-e2e.result }}"            != "success" ]]; then
-            echo "::error::A required job failed."
-            exit 1
-          fi
-          # non-required jobs (e.g. allure-report) can be skipped/failed and
-          # still not block the merge — they only affect Slack reporting.
-          echo "All required jobs passed."
-```
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> A pair that works on staging fails silently in pre-prod. Where do you look first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Restart Speculos</button>
+<button class="quiz-choice" data-value="B">B) Redeploy the Live App</button>
+<button class="quiz-choice" data-value="C">C) Check the user's seed phrase</button>
+<button class="quiz-choice" data-value="D">D) Compare <code>swap-configuration</code> values (pair enablement, min/max) and the <code>swap-live-app</code> Firebase flags between stg and ppr — environment deltas usually explain it</button>
+</div>
+<p class="quiz-explanation">"Works in stg, fails in ppr" is almost always a configuration delta, not a code regression. Check pair and provider enablement in <code>swap-configuration</code>, then Firebase flags. If both match, escalate to the swap team with the comparison.</p>
+</div>
 
-**Rules of engagement:**
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> Which Slack channel is the <strong>first</strong> place to watch for production swap regressions immediately after a deploy?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>#ptx-swap-build</code></button>
+<button class="quiz-choice" data-value="B">B) <code>#alerts-swap</code></button>
+<button class="quiz-choice" data-value="C">C) <code>#ptx-swap-prod</code> — production-focused channel for deploys, rollbacks, and first-hour watchdog</button>
+<button class="quiz-choice" data-value="D">D) <code>#consumer-service-alerts</code></button>
+</div>
+<p class="quiz-explanation"><code>#ptx-swap-prod</code> is the production watchdog channel. <code>#alerts-swap</code> carries automated alerts and is complementary. <code>#ptx-swap-build</code> is engineering chatter; <code>#consumer-service-alerts</code> is broader-than-swap.</p>
+</div>
 
-- If `@Gate` is green, the PR can merge.
-- If a non-required dependency fails but `@Gate` stays green, the merge is allowed and the failure is logged to Slack for QA triage.
-- Only `@Gate`'s result flows into the branch-protection contract. `required_status_checks` on `develop` / `main` names `@Gate` and nothing else.
+<div class="quiz-score"></div>
+</div>
 
-**Why aggregate rather than require each job?** Two reasons. First, workflow lists churn; hardcoding "detox-tests-ios shard 1 through 12" in branch protection breaks the moment the shard count changes — and with matrix-based sharding the **job name** of each shard includes the shard index, so every time the shard count shifts you would have to re-edit branch-protection. Second, not every job is strictly required — you might want the `upload-to-xray` step to run but not block on it, since Xray outages are common and unrelated to code quality. `@Gate` encodes that required-vs-advisory distinction in code instead of in the GitHub UI.
+---
 
-**A subtler consequence — `if: always()`.** Without `if: always()`, `@Gate` would itself be skipped when any dependency fails or is cancelled. A skipped `@Gate` neither passes nor fails the branch-protection check, which GitHub treats as "pending forever" — and the PR becomes unmergeable without manual override. `if: always()` ensures `@Gate` always runs and always emits a definitive verdict. The aggregation logic then decides: did the required set pass? Green. Did anything required fail? Red. Did only advisory jobs fail? Still green, with a Slack note.
 
-**Reading the branch-protection in practice.** Go to the repo's Settings → Branches → `develop` rule → "Require status checks to pass before merging". You will see exactly one name: `@Gate`. Adding more job names there is explicitly discouraged — they turn into drift as soon as the workflow graph is reshaped.
+## Real Ticket Walkthrough -- QAA-1136 (Swap Coverage Gap)
 
-### 6.3.4 Composite Actions
+<div class="chapter-intro">
+This is your Part 6 capstone chapter, following the exact same pattern as Part 3 Chapter 3.8 (QAA-1139) and Part 3 Chapter 3.9 (QAA-1141). The ticket is <strong>QAA-1136</strong>, a coverage-gap ticket in the same parent epic as QAA-1141 (<code>QAA-1145 — [LWD-LWM] — coverage gap</code>). It asks us to close missing E2E coverage for several swap pairs on desktop. We will deep-dive on <strong>one representative pair — USDT → ETH (B2CQA-2752)</strong> — and then show how to apply the same technique to the rest.
+</div>
 
-Instead of duplicating `actions/checkout`, `actions/setup-node`, cache restore, pnpm install, AWS credential assume-role, and so on across 75 workflow files, the repo centralises them as **composite actions** under `tools/actions/composites/`. Each composite is an `action.yml` plus optional scripts; any workflow references it with `uses: LedgerHQ/ledger-live/tools/actions/composites/<name>@develop`.
+### 6.4.1 Understanding the Ticket
 
-| Composite | Used by | What it does |
-|-----------|---------|--------------|
-| `setup-caches` | every E2E, build, lint workflow | Sets up pnpm, mise, Node, AWS credentials via OIDC, Nx remote cache, Turbo server token. Single source of truth for how the workspace bootstraps. |
-| `setup-e2e-test-desktop` | desktop E2E | Installs desktop package, builds LLD in `testing` or `production` mode, seeds Playwright browsers. |
-| `setup-e2e-env` | desktop E2E | Writes the `.env` file that configures API endpoints, broadcast flag, and per-build feature flags. |
-| `setup-speculos_image` | desktop E2E | Pulls the pinned Speculos Docker image, pre-loads coin-apps. |
-| `run-e2e-playwright-tests` | desktop E2E | Wraps the Playwright invocation with exit-code capture, test totals, and artifact naming. |
-| `setup-android-env` | mobile E2E | Installs Android SDK, emulator components, and cached AVD. |
-| `setup-android-avd` | mobile E2E | Boots one or more AVDs with kvm acceleration. |
-| `duplicate-avd` | mobile E2E | Clones the base AVD into N per-emulator copies so N shards can run on one runner without state collision. |
-| `generate-shards-matrix` | mobile E2E | The brain of mobile sharding — listing specs, sizing shards, computing timing-aware assignments (see 6.3.6). |
-| `aggregate-shard-results` | mobile E2E | Collects `status_1` … `status_N` outputs from the matrix into one Slack-friendly summary. |
-| `merge-e2e-detox-timings` | mobile E2E | Merges per-shard Jest timing JSONs into a single cache blob keyed by spec-dir hash. |
-| `upload-allure-report` | desktop + mobile E2E | Generates HTML, uploads to the internal Allure server (auth via `ALLURE_USERNAME` / `ALLURE_LEDGER_LIVE_PASSWORD`), returns a `report-url`. |
-| `get-allure-summary` | desktop + mobile E2E | Reads the Allure server's JSON summary after upload so Slack can render pass/fail counts. |
-| `ci-flake-notifier` | desktop + mobile E2E | Posts flaky-test digest to Slack. |
-| `setup-caches`, `nx-affected-packages`, `turbo-step`, `nx-step` | many | Nx/Turbo plumbing. |
+**Jira ticket:** QAA-1136 (child of QAA-1145 "[LWD-LWM] — coverage gap")
+**Representative Xray test case:** B2CQA-2752 — *Swap USDT (ERC-20) → ETH*
+**Scope:** Add desktop E2E coverage for swap pairs currently automated on mobile only
 
-Using composites: `- uses: LedgerHQ/ledger-live/tools/actions/composites/setup-caches@develop`. When the setup process changes (a new Node version, a cache-bucket migration), you update **one** `action.yml` and all 75 workflows get the new behaviour.
+**What the ticket asks:**
+1. Compare the desktop `send.swap.spec.ts` against the mobile swap specs and against the Xray coverage dashboard
+2. Identify which swap pairs have a `B2CQA-*` test case but no desktop automation
+3. Add a desktop test entry per missing pair, following the exact shape of the existing `swaps` array in `send.swap.spec.ts`
 
-**Anatomy of a composite.** A composite is itself a small YAML with inputs, outputs, and steps. Example from `generate-shards-matrix`:
+**The 9 candidate B2CQA test cases** under QAA-1136 correspond to pairs that are automated on mobile but missing from the desktop spec. The one we will implement end-to-end is:
 
-```yaml
-name: "Generate Shards Matrix"
-description: "Generates iOS and Android test file lists and sharding matrices …"
-inputs:
-  test_directory:  { default: "e2e/mobile" }
-  test_filter:     { default: "" }
-  event_name:      { required: true }
-  ref:             { required: true }
-  # … more inputs …
-outputs:
-  matrix_ios:      { value: ${{ steps.matrix.outputs.matrix_ios }} }
-  matrix_android:  { value: ${{ steps.matrix.outputs.matrix_android }} }
-runs:
-  using: "composite"
-  steps:
-    - name: Get test files
-      id: test-files
-      shell: bash
-      run: |
-        node apps/ledger-live-mobile/scripts/shard-tests.mjs \
-             "${{ inputs.test_filter }}" "${{ inputs.test_directory }}"
-    - …
-```
+| B2CQA | Pair | Mobile reference |
+|---|---|---|
+| **B2CQA-2752** | USDT (ERC-20) → ETH | `e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts` |
 
-Key differences from a reusable workflow: composites **inline** into the calling job (they do not consume a new runner), they have no `jobs:` block (only steps), and they inherit the caller's working directory and secrets. Reusable workflows, by contrast, spawn their own jobs and must be passed secrets explicitly via `secrets: inherit` or named secret inputs.
+The other pairs (ETH→SOL, BTC→SOL, USDT(ETH)→SOL, USDC→ETH, ETH→DOT, XRP→USDC, BTC→LTC, ...) follow the exact same pattern — 35.12 documents the reference block for each.
 
-**Pinning.** The `@develop` suffix pins the composite to the `develop` branch of the same repo. Release workflows sometimes pin `@v1.2.3` tags for reproducibility. Avoid `@main` on anything security-sensitive — composites can execute arbitrary code in your runner context.
+> **Note:** Ticket IDs and the list of 9 B2CQA children are live Jira data. Re-check the ticket via Atlassian MCP before implementing: issue IDs, titles, and the exact pair list can change as the epic evolves.
 
-### 6.3.5 Desktop Sharding
+### 6.4.2 Why This Matters
 
-Two very different notions of "sharding" coexist on the desktop side. Pick the right one for your situation.
+Coverage-gap tickets look small but carry real risk. Each missing pair is a swap flow that:
 
-**Device sharding (what CI actually does).** `test-ui-e2e-only-desktop.yml` runs its matrix over **devices**, not over shard indices:
+- Ships to end users with money at stake
+- Is covered on one platform only, leaving the other platform regression-blind
+- Counts as an automated test case in the Xray coverage dashboard for one platform but not the other — stakeholders see misleading green
 
-```yaml
-prepare-devices:
-  steps:
-    - id: parse
-      run: |
-        if [ "${{ inputs.speculos_device }}" = "nanoSP and stax" ]; then
-          echo 'e2e_matrix={"include":[
-            {"device":"nanoSP","is_primary":true, "artifact_suffix":""     },
-            {"device":"stax",  "is_primary":false,"artifact_suffix":"-stax"}
-          ]}' >> $GITHUB_OUTPUT
-        else
-          DEVICE="${{ inputs.speculos_device || 'nanoSP' }}"
-          printf 'e2e_matrix={"include":[{"device":"%s","is_primary":true,"artifact_suffix":""}]}\n' "$DEVICE" >> $GITHUB_OUTPUT
-        fi
+For Swap specifically, the risk compounds because:
 
-e2e-tests:
-  needs: [prepare-devices]
-  runs-on: [ledger-live-linux-e2e-speculos-32CPU-128RAM]
-  strategy:
-    fail-fast: false
-    matrix: ${{ fromJson(needs.prepare-devices.outputs.e2e_matrix) }}
-  timeout-minutes: 40
-  env:
-    SPECULOS_IMAGE_TAG: ghcr.io/ledgerhq/speculos:${{ matrix.device == 'nanoS' && '1be65b91a8e0691866f880fd437ac05fce78af9d' || 'latest' }}
-    SPECULOS_DEVICE: ${{ matrix.device }}
-```
+- Swap is MiCA-regulated — untested pairs can surface in compliance audits
+- Provider routing differs per pair (DEX vs CEX, token approvals vs native), so a gap is rarely "just another currency"
+- The desktop and mobile codepaths diverge (Electron + Playwright vs React Native + Detox) — a pair that works on one does not guarantee the other
 
-The runner tag is specific — 32 vCPU / 128 GB RAM, Linux, Speculos-capable — and every spec in the Playwright corpus runs on it against one Speculos-emulated device firmware. The matrix exists so QA can demand "run the suite on nanoSP **and** stax" in one button press; those fan out into two parallel jobs.
+Closing QAA-1136 means the Xray dashboard truthfully reports LLD coverage for these pairs.
 
-**Playwright test-level sharding (what you run locally or in ad-hoc workflows).** Playwright has a built-in `--shard=I/N` flag that splits spec files hash-deterministically:
+### 6.4.3 Analyzing Current Coverage
+
+Start by reading the desktop swap spec to see exactly what is already covered:
 
 ```bash
-# Terminal 1
-pnpm e2e:desktop test:playwright -- --shard=1/4
-# Terminal 2
-pnpm e2e:desktop test:playwright -- --shard=2/4
-# Terminal 3
-pnpm e2e:desktop test:playwright -- --shard=3/4
-# Terminal 4
-pnpm e2e:desktop test:playwright -- --shard=4/4
+cd /Users/jerome.portier/src/tries/2026-04-08-LedgerHQ-ledger-live
+less e2e/desktop/tests/specs/send.swap.spec.ts
 ```
 
-Each shard runs independently, spawns its own Speculos containers on random ports (see Part 3 Ch 3.1), and writes its own Allure JSONs. The results can then be merged with `allure generate --clean allure-results-*`. Ad-hoc shard-based workflows occasionally appear for one-off bulk reruns, but the standard PR path is the single-job-per-device model above.
-
-**Why the difference from mobile?** Desktop runners are beefy (32 vCPU), Playwright already parallelises at the worker level inside one job, and Speculos containers are cheap to spin up per-worker. So one runner churns through the whole corpus with internal parallelism. Mobile, in contrast, is constrained by `maxWorkers: 1` per emulator (see Part 6 Ch 6.2), making runner-level sharding the only scalable axis.
-
-Cross-reference Part 3 Ch 3.1.5 for the Playwright-sharding primer and Part 2 Ch 2.3 for the Speculos setup that runs inside both flows.
-
-### 6.3.6 Mobile Sharding Deep Dive
-
-Mobile needs genuine parallelism because Detox pins Jest to one worker per device. The answer is to parallelise at the **runner** level: split N test files across K GitHub runners, run them truly in parallel, merge Allure at the end. Wall-clock becomes `ceil(N/K) × per-test-time` instead of `N × per-test-time`.
-
-Two components cooperate to make it work:
-
-1. `tools/actions/composites/generate-shards-matrix/action.yml` — decides how many shards and emits the matrix JSON.
-2. `apps/ledger-live-mobile/scripts/shard-tests.mjs` — decides which specs go into which shard.
-
-#### The `generate-shards-matrix` composite — walkthrough
-
-```yaml
-name: "Generate Shards Matrix"
-description: "Generates iOS and Android test file lists and sharding matrices …"
-inputs:
-  test_directory:        { default: "e2e/mobile" }
-  test_filter:           { default: "" }
-  event_name:            { required: true }
-  max_shards:            { default: "0" }
-  ref:                   { required: true }
-  ios_timing_cache_key:  { default: "" }
-  android_timing_cache_key: { default: "" }
-  aws_access_key_id: {} ; aws_secret_access_key: {} ; aws_session_token: {}
-  cache_bucket: {} ; aws_region: {}
-
-runs:
-  using: "composite"
-  steps:
-    - name: Get test files
-      id: test-files
-      shell: bash
-      run: |
-        TEST_FILES=$(node apps/ledger-live-mobile/scripts/shard-tests.mjs \
-          "${{ inputs.test_filter }}" "${{ inputs.test_directory }}")
-        echo "test_files_for_sharding<<EOF" >> $GITHUB_OUTPUT
-        echo "$TEST_FILES"                  >> $GITHUB_OUTPUT
-        echo "EOF"                          >> $GITHUB_OUTPUT
-
-    - name: Calculate shard counts
-      id: shard-counts
-      shell: bash
-      run: |
-        TEST_COUNT=$(echo "${{ steps.test-files.outputs.test_files_for_sharding }}" | wc -w)
-
-        # Target one shard per group of 3 tests — matches 3 emulators/simulators
-        # per runner. Keeps all devices busy without provisioning extras.
-        EMULATORS_PER_RUNNER=3
-        BASE_SHARD=$(( TEST_COUNT > 0
-                       ? (TEST_COUNT + EMULATORS_PER_RUNNER - 1) / EMULATORS_PER_RUNNER
-                       : 1 ))
-
-        if [ "${{ inputs.event_name }}" = "schedule" ]; then
-          SHARD_COUNT_IOS=$(( BASE_SHARD < 12 ? BASE_SHARD : 12 ))
-          SHARD_COUNT_ANDROID=$(( BASE_SHARD < 12 ? BASE_SHARD : 12 ))
-        elif [[ "${{ inputs.ref }}" == *"release"* || "${{ inputs.ref }}" == *"hotfix"* ]]; then
-          SHARD_COUNT_IOS=$(( BASE_SHARD < 12 ? BASE_SHARD : 12 ))
-          SHARD_COUNT_ANDROID=$(( BASE_SHARD < 12 ? BASE_SHARD : 12 ))
-        else
-          SHARD_COUNT_IOS=$(( BASE_SHARD < 3 ? BASE_SHARD : 3 ))
-          SHARD_COUNT_ANDROID=$(( BASE_SHARD < 12 ? BASE_SHARD : 12 ))
-        fi
-
-        echo "shard_count_ios=$SHARD_COUNT_IOS"         >> $GITHUB_OUTPUT
-        echo "shard_count_android=$SHARD_COUNT_ANDROID" >> $GITHUB_OUTPUT
-
-    # Subsequent steps (abbreviated): restore timing data from S3 with AWS creds,
-    # call shard-tests.mjs once per shard to emit the file assignment, and build
-    # matrix_ios / matrix_android JSON arrays for consumption by the two test jobs.
-```
-
-**Reading the math.** `BASE_SHARD = ceil(TEST_COUNT / 3)`. The `3` is the number of simulators or emulators each runner boots in parallel. Three devices per runner means one shard's workload is roughly three specs' worth, so when the worker-per-emulator restriction eventually lifts, the infrastructure is already sized.
-
-**The two-tier caps.**
-
-| Event | iOS cap | Android cap | Rationale |
-|-------|---------|-------------|-----------|
-| `schedule` | 12 | 12 | Nightly full pass; wall-clock matters most. |
-| Manual on `release/*` or `hotfix/*` | 12 | 12 | Release gating; PR-review urgency. |
-| Manual on any other ref | 3 | 12 | macOS runners are scarce and expensive; Linux runners are abundant. |
-
-**Timing-data restore.** Before sharding, the composite restores per-spec duration data from an S3 bucket keyed by the spec-directory hash. Keys come in via `ios_timing_cache_key` / `android_timing_cache_key` inputs. Missing data is not fatal — the bin-packer handles a zero-history run gracefully, as described below.
-
-#### The `shard-tests.mjs` algorithm — greedy bin-packing
-
-The file is ~200 lines at `apps/ledger-live-mobile/scripts/shard-tests.mjs`. Core loop:
-
-```js
-// 1. Enumerate spec files under the test directory, excluding *.skip.spec.ts
-//    and applying the user-supplied filter (a regex over file path + contents).
-
-// 2. Join each file with its historical duration (from merged timing JSON);
-//    0 if no history.
-
-const filesWithTiming = collected.map(file => ({
-  file,
-  duration: history[file] ?? 0,
-}));
-
-// 3. Sort DESCENDING by duration; tie-break alphabetically for determinism.
-filesWithTiming.sort((a, b) => {
-  if (b.duration !== a.duration) return b.duration - a.duration;
-  return compareStrings(a.file, b.file);
-});
-
-const testsWithTiming     = filesWithTiming.filter(f => f.duration >  0);
-const testsWithZeroTiming = filesWithTiming.filter(f => f.duration === 0);
-
-// 4. Empty shards; greedy-assign each timed test to the currently-lightest one.
-const shards = Array.from({ length: shardTotal },
-                         () => ({ files: [], totalDuration: 0 }));
-
-for (const { file, duration } of testsWithTiming) {
-  let minIdx = 0, minTotal = Infinity;
-  for (let i = 0; i < shardTotal; i++) {
-    if (shards[i].totalDuration < minTotal) {
-      minTotal = shards[i].totalDuration;
-      minIdx   = i;
-    }
-  }
-  shards[minIdx].files.push(file);
-  shards[minIdx].totalDuration += duration;
-}
-
-// 5. Round-robin the zero-timing tests. They're new specs — no history yet,
-//    so we spread them uniformly and let next run measure them.
-testsWithZeroTiming.forEach((t, i) => {
-  shards[i % shardTotal].files.push(t.file);
-});
-
-return shards[shardIndex - 1]?.files ?? [];
-```
-
-**Why greedy, longest-first is near-optimal.** The goal is to minimise **the slowest shard's duration**, because that is the critical-path wall time. A classic result in bin-packing: sorting items longest-first and placing each on the currently-lightest bin (Longest-Processing-Time, LPT) is guaranteed to be within 4/3 of optimal, and in practice much closer. The alternative — naive round-robin (`file_i → shard_{i mod K}`) — can be catastrophically unbalanced if durations are skewed.
-
-**A concrete worked example.** 27 specs, scheduled run, 9 shards. Assume:
-
-- 3 specs × 8 minutes each (the long ones),
-- 6 specs × 4 minutes,
-- 18 specs × 2 minutes.
-
-LPT walk:
-
-| Step | What happens | Shard totals (min) |
-|------|--------------|--------------------|
-| Sort DESC | 8,8,8,4,4,4,4,4,4,2×18 | — |
-| Place 8,8,8 | Each goes to a fresh empty shard | `[8,8,8,0,0,0,0,0,0]` |
-| Place 4,4,4,4,4,4 | Each picks the lightest (i.e. the zeros) | `[8,8,8,4,4,4,4,4,4]` |
-| Place eighteen 2-min specs | First six go to shards 4–9 (lightest at 4) → `[8,8,8,6,6,6,6,6,6]`. Next six again → `[8,8,8,8,8,8,8,8,8]`. Next three go to shards 1–3 → `[10,10,10,8,8,8,8,8,8]`. Final three go to shards 4–9 (tie-break on index). | `[10,10,10,10,10,10,8,8,8]` finally `[10,10,10,10,10,10,10,10,10]` |
-| Result | All nine shards equal at 10 minutes | — |
-
-Critical-path wall time: **10 minutes**. A naive round-robin over 27 specs into 9 shards would give each shard 3 random specs; in the worst case one shard gets all three 8-minute specs = **24 minutes**, and another gets three 2-min specs = **6 minutes**. LPT beats that by more than 2×.
-
-**Determinism.** Same spec set + same timing data → same assignments, because ties break on file path. That is essential for artifact names (`ios-test-artifacts-3`) to be stable across reruns, which in turn lets the timing cache update work correctly.
-
-**The first-run problem.** When you add a new spec, it has zero timing history. Round-robin over the zero-timing bucket distributes new specs evenly across shards. On the next run, the new specs' durations are in the cache and LPT treats them as first-class citizens.
-
-### 6.3.7 Environment Variable Flow
-
-Every interesting variable that flows from `workflow_dispatch` inputs down to the Detox child process:
-
-| Variable | Source | Consumed by | Effect |
-|----------|--------|-------------|--------|
-| `SEED` | Repo secret `SEED_QAA_B2C` | App (via bridge) | The 24-word mnemonic the emulated Speculos uses. Determines every derived address. |
-| `MOCK` | Set on the test step (desktop) | App runtime | Enables mock mode — no real network calls. Desktop concept; mobile uses `selectMockDevice` in specs. |
-| `PRODUCTION` | Input `production_firebase` | `e2e-ci.mjs` | When `true`, orchestrator flips target from `release` to `prerelease`. |
-| `SHARD_INDEX` | `matrix.shard` | Detox / Jest | 1-based index of the current shard — used for artifact names and, when enabled, Jest's `--shard N/M`. |
-| `SHARD_TOTAL` | `matrix.total` | Detox / Jest | Total number of shards in the matrix. |
-| `SHARD_TEST_FILES` | `matrix.files` written to `$GITHUB_ENV` | Detox `--e2e` argument | Space-separated list of specs for this shard. |
-| `SPECULOS_DEVICE` | Input `speculos_device` | Speculos container | Which device firmware image Speculos loads. |
-| `SPECULOS_API_PORT` | Computed per-shard | Speculos container + bridge | Default `52619`; per-shard variants avoid collisions across three simulators on one runner. |
-| `SPECULOS_IMAGE_TAG` | Computed from `speculos_device` | `docker pull` | `latest` for most devices; pinned legacy SHA (`1be65b91…`) for Nano S. |
-| `E2E_ENABLE_WALLET40` | Input `enable_wallet40` | App feature-flag loader | `"1"` enables Wallet 4.0 UI; `"0"` keeps the legacy flow. |
-| `E2E_ENABLE_BROADCAST` | Derived from `enable_broadcast` (inverse of `DISABLE_TRANSACTION_BROADCAST`) | App transaction layer | When disabled, `sendTransaction` no-ops rather than broadcasting. |
-| `ENVFILE` | Computed in Gradle/Xcode build from `production_firebase` | Native build | Picks `.env.mock` vs `.env.mock.prerelease`. |
-| `ANDROID_APK_PATH` | Computed from `production_firebase` | Detox | Points at `app-x86_64-detoxPreRelease.apk` when production, otherwise `app-x86_64-detox.apk`. |
-| `INPUTS_TEST_FILTER` | `steps.test-filter.outputs.filter` | Spec runner | The resolved filter after optional `@smoke` prefix. |
-| `SWAP_API_BASE` | Repo env | App runtime | Points the swap feature at a stubbed backend. |
-| `DEVICE_INFO` | Computed per-platform | Allure metadata | Human-readable device string (e.g. `iPhone 15 (iOS 17.4)`), attached as an Allure parameter. |
-| `E2E_FEATURE_FLAGS_JSON` | Input `feature_flags_json` (desktop) | App runtime | Extra feature-flag overrides for the run. |
-
-**The chain — inputs become process.env.** GitHub Actions does not auto-expose workflow inputs as environment variables. Each layer is explicit:
-
-```
-workflow_dispatch / workflow_call inputs
-        │
-        ▼
-env: block at workflow level     (uses ${{ inputs.* }})
-        │
-        ▼
-env: block at job level          (uses ${{ inputs.* }} and top-level env)
-        │
-        ▼
-env: block at step level         (uses ${{ matrix.* }}, secrets.*, above env)
-        │
-        ▼
-$GITHUB_ENV writes for values that must cross multiple steps in the same job
-        │
-        ▼
-child process inherits environment
-        │
-        ▼
-pnpm mobile e2e:ci  /  pnpm desktop e2e:speculos
-        │
-        ▼
-detox test  /  playwright test
-        │
-        ▼
-Jest  /  Playwright worker
-        │
-        ▼
-process.env.<VAR> accessed in setup.ts, bridge, and specs
-```
-
-Each `${{ … }}` interpolation is evaluated when the runner parses the step. A subtle trap: `env:` blocks at the step level **override** job-level ones, so late-stage customisation is safe.
-
-### 6.3.8 Artifact Flow
-
-Artifacts fan out from shards, get merged, then get published.
-
-**Per-shard outputs (mobile).**
-
-- `ios-test-artifacts-N` — a zip of `e2e/mobile/artifacts/` containing Allure JSON, screenshots, videos (on failure), and the Detox log bundle.
-- A timing JSON uploaded separately as `<ios_timing_cache_key>-N` — consumed by the next run's sharding step via the `merge-e2e-detox-timings` composite.
-- A status output `status_<N>` exposed from the job via `outputs:`, collected later by `aggregate-shard-results`.
-
-**Per-device outputs (desktop).**
-
-- `allure-results${{ matrix.artifact_suffix }}` — one per device in the matrix. Suffix is empty for the primary device and `-stax` (etc.) for secondary devices.
-
-**Merge step.** Both desktop and mobile use the same pattern in their report jobs:
-
-```yaml
-- name: Download all shard artifacts
-  uses: actions/download-artifact@...
-  with:
-    path: ios-test-artifacts
-    pattern: ios-test-artifacts*
-    merge-multiple: true                        # <── the glue
-
-- name: Upload Allure report
-  uses: LedgerHQ/ledger-live/tools/actions/composites/upload-allure-report@develop
-  with:
-    platform: ios-e2e
-    path: ios-test-artifacts
-```
-
-`merge-multiple: true` extracts all 12 per-shard zips into the same directory, effectively concatenating their Allure result JSONs. The `upload-allure-report` composite then:
-
-1. Generates the HTML report with `allure generate`.
-2. Uploads to the internal Allure server (auth via `ALLURE_USERNAME` / `ALLURE_LEDGER_LIVE_PASSWORD`).
-3. Emits `report-url` — posted to Slack by the downstream `report-on-slack` job.
-
-**Xray sync (optional).** If `export_to_xray: true`, the `upload-to-xray` job reformats the same Allure JSONs with `e2e/mobile/xray.formater.sh`, authenticates against Xray Cloud, and POSTs to `/api/v2/import/execution`. The resulting test-execution key is written to the job summary. Cross-reference Part 2 Ch 2.5 for the full Allure collection pipeline and how `CODE scopes` propagate from specs to the final report.
-
-**Timing-cache update.** After the test step, each shard uploads its `e2e-test-results-<platform>-shard-N.json` (Jest `--json --outputFile`). A dedicated job merges those N files, S3-caches the union under the spec-dir-hash key, and the next run's `generate-shards-matrix` step restores it. Closes the feedback loop on the greedy bin-packer.
-
-### 6.3.9 Smoke vs Full, Production vs Staging Firebase
-
-**Smoke runs.** PRs run `smoke_tests: true` by default. The reusable workflow prepends `@smoke` to the filter:
-
-```yaml
-- name: Prepare test filter
-  id: test-filter
-  run: |
-    BASE_FILTER="${{ inputs.test_filter }}"
-    if [ -n "$BASE_FILTER" ]; then
-      BASE_FILTER="${BASE_FILTER//,/|}"            # commas → pipes (regex alternation)
-    fi
-    if [ "${{ inputs.smoke_tests }}" = "true" ]; then
-      if [ -n "$BASE_FILTER" ]; then
-        echo "filter=@smoke $BASE_FILTER" >> $GITHUB_OUTPUT
-      else
-        echo "filter=@smoke" >> $GITHUB_OUTPUT
-      fi
-    else
-      echo "filter=$BASE_FILTER" >> $GITHUB_OUTPUT
-    fi
-```
-
-Any `it()` title containing `@smoke` matches; everything else is skipped. The tag is maintained in source:
+Focus on the `swaps` array near the top of the file. It looks like this (abridged):
 
 ```typescript
-it(
-  `@smoke @B2CQA-604 • Send BTC - valid address, broadcast disabled`,
-  async () => { /* … */ },
+const swaps = [
+  {
+    fromAccount: Account.ETH_1,
+    toAccount: Account.BTC_NATIVE_SEGWIT_1,
+    xrayTicket: "B2CQA-2750, B2CQA-3135, B2CQA-620, B2CQA-3450",
+    tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+          "@ethereum", "@family-evm", "@bitcoin", "@family-bitcoin"],
+  },
+  {
+    fromAccount: Account.BTC_NATIVE_SEGWIT_1,
+    toAccount: Account.ETH_1,
+    xrayTicket: "B2CQA-2744, B2CQA-2432, B2CQA-3450",
+    tag: [/* ... */],
+  },
+  {
+    fromAccount: Account.ETH_1,
+    toAccount: TokenAccount.ETH_USDT_1,        // ETH → USDT exists
+    xrayTicket: "B2CQA-2749, B2CQA-3450",
+    tag: [/* ... */],
+  },
+  // ... more entries ...
+];
+```
+
+Now grep for our target ticket:
+
+```bash
+grep -rn "B2CQA-2752" e2e/
+```
+
+Expected result: **matches in the mobile spec only** — `e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts` — and nothing in `e2e/desktop/tests/specs/`. That confirms the gap.
+
+Also grep for the pair direction:
+
+```bash
+grep -n "TokenAccount.ETH_USDT_1" e2e/desktop/tests/specs/send.swap.spec.ts
+```
+
+Expected result: matches where `TokenAccount.ETH_USDT_1` is the **source** of a swap (e.g., USDT → BTC with B2CQA-2753) and where it is the **destination** (e.g., ETH → USDT with B2CQA-2749). Neither of these is the USDT → ETH direction we need.
+
+**Conclusion:** USDT → ETH is a real gap. The fix is to add an entry to the `swaps` array.
+
+### 6.4.4 Picking the Representative Case
+
+We deep-dive on **USDT → ETH (B2CQA-2752)** for three reasons:
+
+1. **The mobile reference exists**: `e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts` is the canonical implementation. We mirror it on desktop.
+2. **The pair is non-trivial**: USDT (ERC-20) → ETH is a token-to-native swap on the EVM, which exercises ERC-20 approval + swap — a codepath the simpler ETH → ETH or BTC → BTC pairs would not.
+3. **The shape transfers**: once this one works, adding the 8 others (35.12) is mechanical.
+
+The mobile reference (for orientation):
+
+```typescript
+// e2e/mobile/specs/swap/swapETH_USDT_ETH.spec.ts
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { runSwapTest } from "./swap";
+
+const swap = new Swap(TokenAccount.ETH_USDT_1, Account.ETH_1, "40", undefined, Fee.MEDIUM);
+
+runSwapTest(
+  swap,
+  ["B2CQA-2752", "B2CQA-2048"],
+  ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5", "@ethereum", "@family-evm"]
 );
 ```
 
-Smoke corpora are ~10–15% of the full suite, chosen for **breadth** (one test per coin family, one per major feature) rather than depth. Wall time drops from ~45 min/platform to ~10 min/platform. Scheduled runs always set `smoke_tests: false`.
+Key points carried over to the desktop entry:
 
-**`describe.skip` vs tags.** A few legacy files still use `describe.skip(…)` to disable an entire block. Prefer tags in new work — they compose (`@smoke @bitcoin`) while `describe.skip` is binary.
+- `fromAccount = TokenAccount.ETH_USDT_1`
+- `toAccount = Account.ETH_1`
+- Xray ticket anchor: `B2CQA-2752`
+- Tags: all supported devices, `@ethereum`, `@family-evm`
+- No need for `@bitcoin` / `@family-bitcoin` tags — BTC is not involved
 
-**Production vs staging Firebase.** `production_firebase: true` flips four things in lockstep:
+> **Note:** The desktop spec computes the minimum amount dynamically (`app.swap.getMinimumAmount(fromAccount, toAccount)`), so we do **not** hardcode `"40"` like mobile does. The framework handles that for us.
 
-1. **Build config:** `ENVFILE=.env.mock.prerelease` → production Firebase keys baked into the binary.
-2. **Binary path:** Gradle outputs `app-x86_64-detoxPreRelease.apk` instead of `app-x86_64-detox.apk`; the workflow env uses a ternary to pick the right one.
-3. **Cache-key suffix:** `prod-2` vs `3` — separate native-build caches so production and staging don't overwrite each other.
-4. **Orchestrator:** `--production` flag to `e2e-ci.mjs` → Detox uses the `*.prerelease` config.
+### 6.4.5 Create a Branch
 
-**When you need it.**
-
-- **Release / hotfix gating.** Remote Config flag values differ between projects; staging-green is insufficient for release sign-off.
-- **Production-only feature validation.** Features gated by production Remote Config rollouts only light up here.
-- **Incident reproduction.** When a user report cannot be reproduced against staging, switch to production to see if it's Remote-Config-driven.
-
-**When you do not need it.**
-
-- **Every PR.** The CI cost is 2× (separate native build, separate cache line), and staging is representative for 95% of changes.
-- **Pure UI work.** If the change doesn't touch anything Firebase-driven, staging is enough.
-
-### 6.3.10 Kicking Off a Custom Run with `gh workflow run`
-
-**`test-mobile-e2e-reusable.yml` — canonical inputs.** (Verify against `.github/workflows/test-mobile-e2e-reusable.yml`; the list below is current as of the `e2e/mobile/` migration.)
-
-| Input | Type | Purpose |
-|-------|------|---------|
-| `ref` | string | Branch/sha to test |
-| `test_filter` | string | Filter by test name / path / tag (comma or pipe separated) |
-| `tests_type` | choice | `Android Only` \| `iOS Only` \| `iOS & Android` |
-| `speculos_device` | choice | `nanoS` \| `nanoSP` \| `nanoX` \| `stax` \| `flex` \| `nanoGen5` |
-| `production_firebase` | boolean | Switch to prerelease Firebase + `.env.mock.prerelease` |
-| `enable_broadcast` | boolean | Actually broadcast signed transactions on-chain |
-| `export_to_xray` | boolean | **(NEW)** Reformat Allure JSONs and POST to Xray Cloud (`upload-to-xray` job) |
-| `test_execution_android` | string | **(NEW)** Optional pre-existing Xray Test Execution key for Android results |
-| `test_execution_ios` | string | **(NEW)** Optional pre-existing Xray Test Execution key for iOS results |
-| `smoke_tests` | boolean | Prepend `@smoke` to the filter for a fast subset |
-| `enable_wallet40` | boolean | Default `true`; toggles the Wallet 4.0 UI (`E2E_ENABLE_WALLET40`) |
-| `generate_ai_artifacts` | boolean | **(NEW)** Produce AI-triage artifacts alongside Allure |
-
-Three paths of increasing speed.
-
-**1. GitHub Actions UI.** Browse to Actions → "[Mobile] - E2E Only - Scheduled/Manual" → "Run workflow". Pick inputs from the dropdowns. Obvious but slow — form-filling adds minutes.
-
-**2. The `gh` CLI.** Fastest for repeat runs:
+Following the branch naming convention from Chapter 6 and the `support/` prefix for test-coverage work:
 
 ```bash
-gh workflow run test-mobile-e2e-reusable.yml \
-  -f ref=feat/qaa-702-add-cosmos-staking \
-  -f tests_type="iOS & Android" \
-  -f test_filter='@bitcoin Cosmos' \
-  -f speculos_device=nanoX \
-  -f smoke_tests=false
+cd /Users/jerome.portier/src/tries/2026-04-08-LedgerHQ-ledger-live
+git checkout develop
+git pull
+pnpm i
+# if install failure:
+pnpm clean
+pnpm i
+
+git checkout -b support/qaa-1136-swap-usdt-eth
 ```
 
-Follow along live in your terminal:
+We use `support/` because the work is test-coverage improvement (refactor / tests / improvements — see Chapter 6). `test/qaa-1136` is also valid per the Conventional-Commits rules the repo uses and matches chapters 29/30 — pick the convention the Swap team currently uses by checking recent merged PRs in the same area.
+
+### 6.4.6 Run the Existing Swap Suite in Isolation to Confirm the Baseline
+
+Before touching any code, reproduce the current green state.
+
+**Prerequisites** (one-time):
 
 ```bash
-gh run watch
+docker info                                  # Speculos needs Docker
+
+export MOCK=0
+export COINAPPS="/path/to/coin-apps"          # your local coin-apps clone
+export SEED="your 24-word test seed"
+export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:master"
+export SPECULOS_DEVICE="nanoSP"
+
+pnpm i
+pnpm build:lld:deps
+pnpm build:cli
+pnpm desktop build:testing
+pnpm e2e:desktop test:playwright:setup
 ```
 
-**3. Common recipes.**
-
-Run only one ticket's tests on iOS against a PR branch:
+**Run the existing desktop swap spec in isolation** (ETH → USDT, which is the closest neighbor and uses the same DEX path):
 
 ```bash
-gh workflow run test-mobile-e2e-reusable.yml \
-  -f ref=feat/qaa-702 \
-  -f tests_type="iOS Only" \
-  -f test_filter='-t "B2CQA-604"'
+cd e2e/desktop
+pnpm test:playwright send.swap.spec.ts --grep "Swap Ethereum to Tether USD"
 ```
 
-> Note: `test_filter` is passed verbatim to `shard-tests.mjs`, which treats it as a regex over both file path and file content. Jest-specific flags like `-t` survive because the script greps file contents for the pattern as well.
-
-Validate a release candidate against production Firebase:
+Or, to isolate the whole swap file and go faster with one worker:
 
 ```bash
-gh workflow run test-mobile-e2e-reusable.yml \
-  -f ref=release/3.50.0 \
-  -f tests_type="iOS & Android" \
-  -f production_firebase=true \
-  -f enable_broadcast=false
+pnpm test:playwright send.swap.spec.ts -- --workers=1
 ```
 
-Smoke-only run after a dependency bump:
+Expected: the existing neighbors pass. If they fail, stop and fix the environment first — your own changes should never be judged against a broken baseline.
+
+> **Tip:** Use Playwright's debug mode to step through the flow visually before adding your own entry:
+> ```bash
+> PWDEBUG=1 pnpm test:playwright send.swap.spec.ts --grep "Swap Ethereum to Tether USD"
+> ```
+
+### 6.4.7 Implement the Change
+
+Open `e2e/desktop/tests/specs/send.swap.spec.ts` and **add one entry to the `swaps` array** for USDT → ETH. Do not touch imports, helpers, or the `for` loop — they all already handle this shape.
+
+```typescript
+// e2e/desktop/tests/specs/send.swap.spec.ts
+
+const swaps = [
+  // ... existing entries unchanged ...
+
+  {
+    fromAccount: TokenAccount.ETH_USDT_1,
+    toAccount: Account.ETH_1,
+    xrayTicket: "B2CQA-2752, B2CQA-3450",
+    tag: [
+      "@NanoSP",
+      "@LNS",
+      "@NanoX",
+      "@Stax",
+      "@Flex",
+      "@NanoGen5",
+      "@swapSmoke",
+      "@ethereum",
+      "@family-evm",
+    ],
+  },
+
+  // ... other existing entries unchanged ...
+];
+```
+
+**What this does, walk-through:**
+
+1. The outer `for (const { fromAccount, toAccount, xrayTicket, tag } of swaps)` loop iterates over every entry, including ours.
+2. `setupEnv(true)` installs Speculos setup with transaction-broadcast disabled.
+3. `setExchangeDependencies` is called in `beforeEach` with the source and destination Speculos apps — for our entry, that means Ethereum (for USDT ERC-20) and Ethereum (for ETH).
+4. `test.use({ speculosApp: exchangeApp, teamOwner: Team.SWAP, ... })` wires the fixture: the Exchange app is primary, accounts are pre-populated via `cliCommandsOnApp` using `liveDataWithAddressCommand`.
+5. Inside the test: `getMinimumAmount(fromAccount, toAccount)` asks the swap backend for the min, a `Swap` instance is built, and `performSwapUntilQuoteSelectionStep` drives the UI up to the quotes list.
+6. `selectExchangeWithoutKyc(electronApp, swap)` picks a no-KYC provider (typically a DEX like 1inch or Paraswap for USDT → ETH on EVM).
+7. `ensureTokenApproval(fromAccount, provider, minAmount)` handles the ERC-20 approval — **this is why USDT → ETH is the interesting case**, because native-to-native pairs skip this step entirely.
+8. Depending on whether the provider is in-app (`provider.app === exchangeApp`) or not, the right device-signing dance is triggered, Speculos accepts, and the test asserts on the final toaster (or the exchange-completed drawer text).
+
+That single entry is the entire code change.
+
+> **Why `B2CQA-3450` alongside `B2CQA-2752`?** `B2CQA-3450` is the umbrella "swap generic flow" Xray test case that most entries in this spec carry. Attach both so the Xray coverage updates correctly for both the generic flow and the specific pair.
+
+### 6.4.8 Rerun Just That Test
+
+Use Playwright's test-name filter to run only our new entry:
 
 ```bash
-gh workflow run test-mobile-e2e-reusable.yml \
-  -f ref=chore/bump-dmk \
-  -f tests_type="iOS & Android" \
-  -f smoke_tests=true
+cd e2e/desktop
+pnpm test:playwright send.swap.spec.ts --grep "Swap Tether USD \(ERC-20\) to Ethereum"
 ```
 
-Desktop equivalent:
+> **Note:** The test name comes from `` `Swap ${fromAccount.currency.name} to ${toAccount.currency.name}` `` in the `for` loop. The exact string depends on how `TokenAccount.ETH_USDT_1.currency.name` is set in `live-common`. Run the test once to see Playwright's exact output, then copy-paste the name into `--grep` for targeted reruns.
+
+**Run three times for stability** — chapter 28 rule:
 
 ```bash
-gh workflow run test-ui-e2e-only-desktop.yml \
-  -f ref=feat/qaa-812-swap-history-erc20-export \
-  -f speculos_device=nanoSP \
-  -f test_filter='@swap' \
-  -f smoke_tests=false \
-  -f enable_broadcast=false \
-  -f build_type=testing
+pnpm test:playwright send.swap.spec.ts --grep "Swap Tether USD" --repeat-each=3
 ```
 
-Cross-reference the daily loops in Part 3 Ch 3.8 (desktop) and Part 4 Ch 4.9 (mobile) for when and why you fire these from your laptop vs wait for the PR check.
+All three runs should pass. If they do not, the most common failures on a DEX token swap are:
 
-**Watching smartly.** `gh run watch` refreshes every few seconds and surfaces the full job tree. Useful additions:
+- Speculos did not switch apps between Exchange and Ethereum → check `setExchangeDependencies` and `speculos.relaunch`
+- Token approval was not granted → `ensureTokenApproval` failed silently; add a wait and re-run
+- Provider returned `INSUFFICIENT_LIQUIDITY` → try a different minimum or wait for provider liquidity to recover (backend concern, not a test bug)
+
+### 6.4.9 Verify with Allure
+
+Generate and open the Allure report:
 
 ```bash
-# Pick a specific run to watch (if multiple are in flight)
-gh run list --workflow=test-mobile-e2e-reusable.yml --limit 5
-gh run watch <run-id>
-
-# Tail logs of a specific job once the run is underway
-gh run view <run-id> --log --job=<job-id>
-
-# Only download a single shard's artifact for triage
-gh run download <run-id> --name ios-test-artifacts-4
+allure serve allure-results
 ```
 
-**Skipping the UI altogether.** Once you know the canonical inputs for your flow, save them as a shell function in your dotfiles:
+Navigate to **Suites** → **Swap - Accepted (without tx broadcast)** → **Swap Tether USD (ERC-20) to Ethereum** and confirm:
+
+- **Links** section shows `B2CQA-2752` and `B2CQA-3450` as TMS links, each clickable and pointing to Jira
+- **Steps** show the full sequence: build swap, perform up to quote selection, select provider, ensure token approval, sign on Speculos, final assertion
+- **Screenshots** captured at key steps (start, quote list, device signing, completion)
+- **Team ownership** is `Team.SWAP` (consistent with the rest of the file)
+- Tags match what you set: `@NanoSP`, `@LNS`, ..., `@ethereum`, `@family-evm`, `@swapSmoke`
+
+Press `Ctrl+C` to stop the Allure server.
+
+### 6.4.10 Commit the Change
+
+Follow the Conventional Commits style — test scope, concise description:
 
 ```bash
-# ~/.zshrc
-ll-e2e-mobile-smoke() {
-  gh workflow run test-mobile-e2e-reusable.yml \
-     -f ref="$(git rev-parse --abbrev-ref HEAD)" \
-     -f tests_type="iOS & Android" \
-     -f smoke_tests=true
-  gh run watch
-}
+git add e2e/desktop/tests/specs/send.swap.spec.ts
+git commit -m "test(desktop): add swap USDT (ERC-20) to ETH coverage (QAA-1136)"
 ```
 
-Then one shell invocation triggers the run and watches it for you. This is how the experienced QA engineers at Ledger spend zero seconds in the Actions UI.
+Why this shape:
 
-### 6.3.11 Reading a Failed Run
+- `test` — commit type for tests (not `feat`, not `fix`)
+- `(desktop)` — scope is the desktop E2E suite
+- Description is imperative and lowercase
+- The Jira ticket (`QAA-1136`) is referenced in the subject to make the history searchable
 
-The recipe for triaging a red E2E CI:
-
-1. **Click the failing run.** In the PR's Checks tab, open the red workflow. Find the red shard — mobile looks like "iOS E2E Tests (4, 12)"; desktop looks like "Desktop E2E (stax)".
-2. **Scroll to the failing step.** On mobile, it will be `Run iOS Detox shard 4/12`; on desktop, `Run Playwright`. The exit code separates test failures (`1`) from setup errors (`127`, `137`, etc.). Note the `DEVICE_INFO` line so you know which simulator/emulator you're reproducing.
-3. **Look for the Allure URL.** The `allure-report-<platform>` job posts the URL to the GitHub job summary on success. If it's there, click through — you skip the local-replay dance entirely.
-4. **In Allure, find the failed `it()`.** Navigate to "Failed" and open the test. The Attachments panel usually contains:
-   - `app.log` — the JS console from the app.
-   - `bridge.log` — the Speculos bridge traffic.
-   - `device.log` — Detox or Playwright device output.
-   - Failure screenshot.
-   - Video or screen recording.
-5. **If Allure did not render** (the shard timed out entirely, or the report upload step was skipped), fall back to raw artifacts: run summary → Artifacts → download `ios-test-artifacts-4.zip` (or `allure-results-stax.zip` for desktop) and unzip locally. You get the same Allure inputs plus raw Detox/Playwright artifacts.
-6. **Reproduce locally.** For mobile:
+If you want, add the `B2CQA-2752` ticket in the body:
 
 ```bash
-cd e2e/mobile
-pnpm build:ios                              # nx run live-mobile:e2e:build -- --configuration ios.sim.release
-pnpm test:ios -- -t "<exact it() name from Allure>" --loglevel trace
+git commit -m "test(desktop): add swap USDT (ERC-20) to ETH coverage (QAA-1136)" \
+           -m "Closes coverage gap for B2CQA-2752. Mirrors mobile spec swapETH_USDT_ETH.spec.ts."
 ```
 
-For desktop:
+### 6.4.11 Open the PR with `/create-pr`, Mark Ready, and Link Xray
 
-```bash
-cd apps/ledger-live-desktop
-SPECULOS_DEVICE=stax pnpm playwright test tests/specs/swap/history.spec.ts \
-     --grep "<exact it() name>" --headed
-```
-
-7. **If it passes locally but fails in the shard**, suspect state bleed from an earlier spec in the same shard. Look at the shard's step log — the file order is printed at the start of the Detox/Playwright run — and re-run the preceding specs locally in the same order. This is the most common "green locally, red in shard N" root cause.
-
-**Common CI error patterns.**
-
-| Error | Most likely cause |
-|-------|-------------------|
-| `TimeoutError: locator.click` | Element never appeared; feature flag mismatch, navigation change, or sync race. |
-| `expect(received).toHaveText(expected)` | Assertion mismatch — real difference or i18n drift. |
-| `ECONNREFUSED :5000` / `ECONNREFUSED :52619` | Speculos container failed to start or died mid-run. Check the `Pull Speculos docker image` step for image-pull issues. |
-| `OCI runtime create failed` | Docker out of disk on the runner; transient, re-run usually fixes it. |
-| `Exit code 137` | OOM kill — `NODE_OPTIONS=--max-old-space-size=14336` is already set on desktop; on mobile, usually means an emulator crashed. |
-| `detox test failed with exit code null` | Bridge disconnected unexpectedly. Almost always an app crash — check `app.log`. |
-
-**Node Action Cache error (legacy).** An older pattern: intermittent cache failures from GitHub's `actions/cache`. The team migrated to an S3 cache, but if you see it on an older branch, the tactical fix is to comment out the `cache` and `cache-dependency-path` lines in the `node-setup` composite. Better to rebase onto fresh `develop`.
-
-**Flake vs. real failure.** A single shard red across a run of 12 is not automatically a flake — the greedy bin-packer is deterministic, and so are your specs. Before re-running, check:
-
-1. **Does the same `it()` fail on the second run?** If yes, treat as a real failure.
-2. **Does the app log show a crash?** `app.log` → search for `FATAL` or stack traces. A crash is a code bug, not a test bug.
-3. **Does the `bridge.log` show the device hanging?** Speculos occasionally freezes on the second-to-last transaction — the CI-flake-notifier composite tracks these.
-4. **Is the failed test tagged with `@flaky` in source?** Some specs are explicitly marked; they should fail softly and be triaged weekly, not re-run blindly.
-
-If none of the above apply, a plain re-run burns runner time you could spend on the root-cause investigation. When in doubt, reproduce locally (step 6 above) before hitting "Re-run failed jobs".
-
-### 6.3.12 ASCII Sequence Diagrams
-
-#### Mobile sharding pipeline
+Use the Claude Code command (see Chapter 3.8.9):
 
 ```
-  DEVELOPER            GITHUB ACTIONS                          DETOX                ALLURE / XRAY
-  ─────────            ──────────────                          ─────                ─────────────
-     │                         │                                  │                       │
-     │  gh workflow run -f …   │                                  │                       │
-     ├────────────────────────►│                                  │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴───────────┐                      │                       │
-     │                 │ determine-builds  │                      │                       │
-     │                 │ (ledger-live-med) │                      │                       │
-     │                 │                   │                      │                       │
-     │                 │  checkout ref     │                      │                       │
-     │                 │  compute filter   │                      │                       │
-     │                 │  shard-tests.mjs  │──► read test dir     │                       │
-     │                 │                   │◄── N spec files      │                       │
-     │                 │  restore timing   │──► S3 cache          │                       │
-     │                 │  cache (AWS)      │◄── per-spec durations│                       │
-     │                 │  greedy bin-pack  │                      │                       │
-     │                 │  emit matrix_ios  │                      │                       │
-     │                 │  emit matrix_and  │                      │                       │
-     │                 └───────┬───────────┘                      │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴──────────────┐                   │                       │
-     │                 │ build-ios (macOS)    │                   │                       │
-     │                 │ build-android (linux)│                   │                       │
-     │                 │                      │                   │                       │
-     │                 │  compile + bundle    │                   │                       │
-     │                 │  upload to S3 cache  │                   │                       │
-     │                 └───────┬──────────────┘                   │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴──────────────────────┐           │                       │
-     │                 │ detox-tests-ios matrix       │           │                       │
-     │                 │ [shard 1/9][shard 2/9] … [9] │           │                       │
-     │                 │ fail-fast: false             │           │                       │
-     │                 │ (9 parallel macOS runners)   │           │                       │
-     │                 │                              │           │                       │
-     │                 │  per shard:                  │           │                       │
-     │                 │   ├─ checkout + install      │           │                       │
-     │                 │   ├─ download binary from S3 │           │                       │
-     │                 │   ├─ boot 3 simulators       │           │                       │
-     │                 │   ├─ pull speculos image     │           │                       │
-     │                 │   ├─ run e2e-ci.mjs          │──────────►│ detox test            │
-     │                 │   │                          │           │  run subset           │
-     │                 │   │                          │           │  capture artifacts    │
-     │                 │   │                          │◄──────────│ exit code N           │
-     │                 │   ├─ upload ios-test-arts-K  │           │                       │
-     │                 │   ├─ upload timing JSON      │           │                       │
-     │                 │   ├─ set status_<K> output   │           │                       │
-     │                 │   └─ delete simulators       │           │                       │
-     │                 └───────┬──────────────────────┘           │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴────────────────┐                 │                       │
-     │                 │ allure-report-ios      │                 │                       │
-     │                 │ allure-report-android  │                 │                       │
-     │                 │                        │                 │                       │
-     │                 │  download all shard    │                 │                       │
-     │                 │  artifacts, merge      │                 │                       │
-     │                 │  generate HTML         │                 │                       │
-     │                 │  upload to server      │────────────────────────────────────────►│ Allure web UI
-     │                 │  aggregate status_1…N  │                 │                       │
-     │                 └───────┬────────────────┘                 │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴────────────────┐                 │                       │
-     │                 │ upload-to-xray         │                 │                       │
-     │                 │ (if export_to_xray)    │                 │                       │
-     │                 │                        │                 │                       │
-     │                 │  format allure→xray    │                 │                       │
-     │                 │  POST /import/execution│────────────────────────────────────────►│ Xray test exec
-     │                 └───────┬────────────────┘                 │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴────────────────┐                 │                       │
-     │                 │ @Gate                  │                 │                       │
-     │                 │  aggregate required    │                 │                       │
-     │                 │  emit single pass/fail │                 │                       │
-     │                 └───────┬────────────────┘                 │                       │
-     │                         │                                  │                       │
-     │                 ┌───────┴────────────────┐                 │                       │
-     │                 │ report-on-slack        │                 │                       │
-     │                 │  post summary + URLs   │                 │                       │
-     │                 └───────┬────────────────┘                 │                       │
-     │                         │                                  │                       │
-     │ ◄───────────────────────┤  notification in #qa-results     │                       │
-     │                         │                                  │                       │
+/create-pr
 ```
 
-Follow the arrows top-to-bottom: trigger → determine matrix → build → sharded test → merge → report → gate. The critical insight: **all shards run truly in parallel** — wall time of the `detox-tests-ios` job is the wall time of the slowest shard, not the sum. Hence the greedy bin-packer's job: minimise the maximum.
+Answer the prompts:
 
-#### Desktop device-matrix pipeline
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-1136`
+2. **Ticket description** — "Add desktop E2E coverage for swap USDT (ERC-20) → ETH, mirroring mobile coverage"
+3. **Change type** — `test`
+4. **Change scope** — `e2e/desktop`
+5. **Test coverage** — `yes`
+6. **QA focus areas** — "Swap USDT → ETH on DEX path, ERC-20 token approval, Speculos Ethereum app switching"
+7. **UI changes** — `no`
 
+After the draft PR is created and CI passes:
+
+1. In GitHub, click **"Ready for review"** to publish the PR
+2. Once approved, **"Merge pull request"** into `develop`
+3. **Update Xray:**
+   - Open `B2CQA-2752` in Jira
+   - Set **Status** to **Automated**
+   - In **Automated In**, **add** LLD next to the existing LLM entry (do not replace — see chapter 30.9)
+4. Move `QAA-1136` to **Done** (or the team's equivalent status once **all** 9 B2CQA children are landed) and link the PR
+5. The next CI run uploads Allure → Xray updates automatically
+
+### 6.4.12 Reference -- Applying the Same Fix to the Other Missing Pairs
+
+The 8 other missing pairs under QAA-1136 all take the same shape. Each one is a single new object in the `swaps` array. Pair → ticket → entry:
+
+```typescript
+// USDT (ERC-20) → ETH — implemented in 35.7
+{
+  fromAccount: TokenAccount.ETH_USDT_1,
+  toAccount: Account.ETH_1,
+  xrayTicket: "B2CQA-2752, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@swapSmoke", "@ethereum", "@family-evm"],
+},
+
+// ETH → SOL — cross-family, EVM → Solana
+{
+  fromAccount: Account.ETH_1,
+  toAccount: Account.SOL_1,
+  xrayTicket: "B2CQA-<ETH_SOL>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@ethereum", "@family-evm", "@solana", "@family-solana"],
+},
+
+// BTC → SOL — cross-family, BTC → Solana
+{
+  fromAccount: Account.BTC_NATIVE_SEGWIT_1,
+  toAccount: Account.SOL_1,
+  xrayTicket: "B2CQA-<BTC_SOL>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@bitcoin", "@family-bitcoin", "@solana", "@family-solana"],
+},
+
+// USDT (ERC-20) → SOL — token on EVM → Solana
+{
+  fromAccount: TokenAccount.ETH_USDT_1,
+  toAccount: Account.SOL_1,
+  xrayTicket: "B2CQA-<USDT_SOL>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@swapSmoke", "@ethereum", "@family-evm", "@solana", "@family-solana"],
+},
+
+// USDC (ERC-20) → ETH
+{
+  fromAccount: TokenAccount.ETH_USDC_1,
+  toAccount: Account.ETH_1,
+  xrayTicket: "B2CQA-<USDC_ETH>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@swapSmoke", "@ethereum", "@family-evm"],
+},
+
+// ETH → DOT
+{
+  fromAccount: Account.ETH_1,
+  toAccount: Account.DOT_1,
+  xrayTicket: "B2CQA-<ETH_DOT>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@ethereum", "@family-evm", "@polkadot", "@family-polkadot"],
+},
+
+// XRP → USDC (ERC-20)
+{
+  fromAccount: Account.XRP_1,
+  toAccount: TokenAccount.ETH_USDC_1,
+  xrayTicket: "B2CQA-<XRP_USDC>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@xrp", "@family-xrp", "@ethereum", "@family-evm"],
+},
+
+// BTC → LTC
+{
+  fromAccount: Account.BTC_NATIVE_SEGWIT_1,
+  toAccount: Account.LTC_1,
+  xrayTicket: "B2CQA-<BTC_LTC>, B2CQA-3450",
+  tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+        "@bitcoin", "@family-bitcoin", "@litecoin", "@family-litecoin"],
+},
 ```
-  DEVELOPER            GITHUB ACTIONS                          PLAYWRIGHT           ALLURE
-  ─────────            ──────────────                          ──────────           ──────
-     │                         │                                  │                    │
-     │  gh workflow run -f …   │                                  │                    │
-     ├────────────────────────►│                                  │                    │
-     │                         │                                  │                    │
-     │                 ┌───────┴───────────┐                      │                    │
-     │                 │ prepare-devices   │                      │                    │
-     │                 │                   │                      │                    │
-     │                 │  parse input      │                      │                    │
-     │                 │  emit e2e_matrix  │                      │                    │
-     │                 │   {include:[nanoSP│                      │                    │
-     │                 │            ,stax]}│                      │                    │
-     │                 └───────┬───────────┘                      │                    │
-     │                         │                                  │                    │
-     │                 ┌───────┴──────────────────────┐           │                    │
-     │                 │ e2e-tests matrix             │           │                    │
-     │                 │ [device=nanoSP][device=stax] │           │                    │
-     │                 │ fail-fast: false             │           │                    │
-     │                 │ runs-on: self-hosted linux   │           │                    │
-     │                 │   32CPU / 128GB RAM          │           │                    │
-     │                 │                              │           │                    │
-     │                 │  per device:                 │           │                    │
-     │                 │   ├─ checkout + coin-apps    │           │                    │
-     │                 │   ├─ setup-caches            │           │                    │
-     │                 │   ├─ pull speculos image     │           │                    │
-     │                 │   ├─ build LLD (testing)     │           │                    │
-     │                 │   ├─ setup-e2e-env           │           │                    │
-     │                 │   ├─ compute filter (@smoke) │           │                    │
-     │                 │   ├─ run-e2e-playwright-tests│──────────►│ playwright test    │
-     │                 │   │                          │           │  workers × N       │
-     │                 │   │                          │           │  spawn Speculos    │
-     │                 │   │                          │           │  on random ports   │
-     │                 │   │                          │◄──────────│ exit code N        │
-     │                 │   ├─ upload allure-results   │           │                    │
-     │                 │   │   {suffix}               │           │                    │
-     │                 │   └─ pass/fail outputs       │           │                    │
-     │                 └───────┬──────────────────────┘           │                    │
-     │                         │                                  │                    │
-     │                 ┌───────┴────────────────┐                 │                    │
-     │                 │ allure-report (merge)  │                 │                    │
-     │                 │  download all device   │                 │                    │
-     │                 │  artifacts             │                 │                    │
-     │                 │  merge-multiple:true   │                 │                    │
-     │                 │  generate HTML         │                 │                    │
-     │                 │  upload to server      │──────────────────────────────────────►│ Allure web UI
-     │                 └───────┬────────────────┘                 │                    │
-     │                         │                                  │                    │
-     │                 ┌───────┴────────────────┐                 │                    │
-     │                 │ @Gate + Slack notify   │                 │                    │
-     │                 └───────┬────────────────┘                 │                    │
-     │                         │                                  │                    │
-     │ ◄───────────────────────┤  notification in #qa-results     │                    │
-     │                         │                                  │                    │
+
+**Process per pair:**
+
+1. Confirm the Xray ID on the Jira ticket (`QAA-1136` has the full list under its children)
+2. Confirm the `Account` / `TokenAccount` enum name exists in `libs/live-common/src/e2e/enum/Account.ts` — if a currency enum is missing, adding it is a separate PR on `live-common` first
+3. Confirm the device tags match what the pair actually supports (not every pair runs on every device — some are Nano-S-Plus-only, some exclude LNS)
+4. Add the entry, rerun `send.swap.spec.ts` with `--grep "Swap <From> to <To>"`, verify Allure
+5. Commit per pair or batch by family — the Swap team usually prefers one PR per 2-3 pairs to keep reviews small
+
+> **Guardrail:** Do **not** copy-paste all 9 entries in one PR without running each. Each pair exercises different provider routes, and a single unrelated failure (e.g., a DEX liquidity problem for DOT) will block the entire batch. Land them in small PRs.
+
+### 6.4.13 Reference -- Writing a Swap Test from Scratch
+
+You will rarely write a swap test from scratch — almost every new pair goes through the `swaps` array pattern above. But for the case where you need a custom flow (a swap with a specific provider override, a KYC variant, a swap-to-swap edge case), here is the canonical template:
+
+```typescript
+import test from "tests/fixtures/common";
+import { Team } from "@ledgerhq/live-common/e2e/enum/Team";
+import { Account, TokenAccount } from "@ledgerhq/live-common/e2e/enum/Account";
+import { AppInfos } from "@ledgerhq/live-common/e2e/enum/AppInfos";
+import { setExchangeDependencies } from "@ledgerhq/live-common/e2e/speculos";
+import { Swap } from "@ledgerhq/live-common/e2e/models/Swap";
+import { addTmsLink } from "tests/utils/allureUtils";
+import { getDescription } from "tests/utils/customJsonReporter";
+import { setupEnv, performSwapUntilQuoteSelectionStep } from "tests/utils/swapUtils";
+import { liveDataWithAddressCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";
+
+const exchangeApp: AppInfos = AppInfos.EXCHANGE;
+
+test.describe("Swap -- USDT (ERC-20) to ETH (custom flow)", () => {
+  setupEnv(true);
+
+  const fromAccount = TokenAccount.ETH_USDT_1;
+  const toAccount = Account.ETH_1;
+
+  const accPair: string[] = [fromAccount, toAccount].map(acc =>
+    acc.currency.speculosApp.name.replace(/ /g, "_"),
+  );
+
+  test.beforeEach(async () => {
+    setExchangeDependencies(accPair.map(appName => ({ name: appName })));
+  });
+
+  test.use({
+    teamOwner: Team.SWAP,
+    userdata: "skip-onboarding-with-last-seen-device",
+    speculosApp: exchangeApp,
+    cliCommandsOnApp: [
+      [
+        { app: fromAccount.currency.speculosApp, cmd: liveDataWithAddressCommand(fromAccount) },
+        { app: toAccount.currency.speculosApp, cmd: liveDataWithAddressCommand(toAccount) },
+      ],
+      { scope: "test" },
+    ],
+  });
+
+  test(
+    "Swap Tether USD (ERC-20) to Ethereum",
+    {
+      tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+            "@swapSmoke", "@ethereum", "@family-evm"],
+      annotation: { type: "TMS", description: "B2CQA-2752, B2CQA-3450" },
+    },
+    async ({ app, electronApp, speculos }) => {
+      await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+      const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
+      const swap = new Swap(fromAccount, toAccount, minAmount);
+
+      await performSwapUntilQuoteSelectionStep(app, electronApp, swap, minAmount);
+      const provider = await app.swap.selectExchangeWithoutKyc(electronApp, swap);
+      swap.setProvider(provider);
+      await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
+
+      if (provider.app) {
+        if (provider.app !== exchangeApp) {
+          await speculos.relaunch(provider.app.name);
+        }
+        await app.swap.clickExchangeButton(electronApp);
+        await app.swap.clickExecuteSwapButton(electronApp);
+        await app.swap.clickContinueButton();
+        await app.speculos.verifyAmountsAndAcceptSwap(swap, minAmount);
+        await app.swap.expectTransactionSentToasterToBeVisible();
+      } else {
+        await app.swap.clickExchangeButton(electronApp);
+        await app.speculos.verifyAmountsAndAcceptSwap(swap, minAmount);
+        await app.swapDrawer.verifyExchangeCompletedTextContent(
+          swap.accountToCredit.currency.name,
+        );
+      }
+    },
+  );
+});
 ```
 
-Note the shape difference: desktop fans out over **devices** (usually one, occasionally two for nanoSP + stax), each device does its own internal Playwright-worker parallelism. Mobile fans out over **shards** (up to 12), each shard does sequential specs. Same tools, inverted strategies, because the cost model of the underlying device is inverted.
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://docs.github.com/en/actions">GitHub Actions documentation</a></li>
-<li><a href="https://docs.github.com/en/actions/using-workflows/reusing-workflows">Reusable workflows</a></li>
-<li><a href="https://docs.github.com/en/actions/sharing-automations/creating-actions/creating-a-composite-action">Creating composite actions</a></li>
-<li><a href="https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/using-a-matrix-for-your-jobs">Matrix strategy</a></li>
-<li><a href="https://playwright.dev/docs/test-sharding">Playwright sharding</a></li>
-<li><a href="https://en.wikipedia.org/wiki/Longest-processing-time-first_scheduling">Longest-Processing-Time scheduling (LPT)</a></li>
-<li><a href="https://crontab.guru/">Crontab Guru</a> — interactive cron editor</li>
-</ul>
-</div>
+Compared to the `swaps`-array approach this is verbose, but it is the right escape hatch when a pair needs a variation the loop cannot express.
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> You will rarely write workflow YAML from scratch — the composites and the reusable cores are mature. Most of your CI interaction is reading runs, downloading artifacts, understanding <em>why</em> a shard failed, and kicking off a <code>gh workflow run</code> to validate a fix. Know the <code>@Gate</code> contract, know that mobile's shard count is driven by <code>ceil(N/3)</code> capped at 3/12 or 12/12, know that desktop's matrix is per-device not per-shard, and know that <code>shard-tests.mjs</code> is a greedy bin-packer that minimises the slowest shard. The rest is mechanics.
+<strong>Key takeaway:</strong> QAA-1136 is a coverage-gap ticket in the same epic as QAA-1141. Closing it is not about writing new tests from scratch — it is about <strong>adding one object to an existing <code>swaps</code> array per missing pair</strong>. The workflow is identical to chapters 29/30: understand the ticket → analyze existing coverage → create branch (<code>support/</code>) → baseline run → add entry → rerun 3x → verify Allure → commit (Conventional Commits) → <code>/create-pr</code> → mark ready → update Xray <strong>Automated In</strong> per pair. Always ship per pair or in small batches — never a 9-entry mega-PR.
 </div>
 
-### 6.3.13 Chapter 6.3 Quiz
-
-<!-- ── Chapter 6.3 Quiz ── -->
+### 6.4.14 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — CI/CD &amp; Test Sharding</h3>
-<p class="quiz-subtitle">8 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> Why does the Ledger Live repo have ~75 workflow files instead of a single CI pipeline?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because GitHub Actions limits each file to 10 jobs</button>
-<button class="quiz-choice" data-value="B">B) Because the monorepo produces multiple artifacts on multiple platforms, under multiple triggers, and separates concerns (lint / unit / E2E / build / release)</button>
-<button class="quiz-choice" data-value="C">C) Because each team member owns their own workflow file</button>
-<button class="quiz-choice" data-value="D">D) Because GitHub requires one workflow per programming language</button>
-</div>
-<p class="quiz-explanation">Multiple deployable artifacts (desktop + mobile + dozens of libs), multiple OSes (Linux/macOS/Windows/iOS/Android), multiple triggers (PR / merge / schedule / dispatch / release), and clean separation of concerns — each dimension multiplies workflow count.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> <code>fail-fast: false</code> is set on nearly every E2E matrix in this repo. Why?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It makes the matrix run faster</button>
-<button class="quiz-choice" data-value="B">B) GitHub requires it for reusable workflows</button>
-<button class="quiz-choice" data-value="C">C) Shards are independent; letting all shards complete produces the full Allure report, which is more valuable than saving runner time</button>
-<button class="quiz-choice" data-value="D">D) <code>fail-fast</code> is incompatible with <code>matrix.include</code></button>
-</div>
-<p class="quiz-explanation">Without <code>fail-fast: false</code>, a shard-3 failure cancels shards 4–12 mid-run and QA loses visibility into what else was broken. Full reports across the whole corpus are worth the extra runner minutes.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> The repo has 27 mobile specs. A user fires a manual run on <code>feat/qaa-702</code> (not a release/hotfix branch). How many iOS shards and Android shards does the matrix contain?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) iOS 27, Android 27 — one shard per spec</button>
-<button class="quiz-choice" data-value="B">B) iOS 3, Android 9 — iOS is capped at 3 for non-release manual runs; Android uses BASE_SHARD = ceil(27/3) = 9 under the 12 cap</button>
-<button class="quiz-choice" data-value="C">C) iOS 9, Android 9 — BASE_SHARD applies equally to both</button>
-<button class="quiz-choice" data-value="D">D) iOS 12, Android 12 — the upper cap is always used</button>
-</div>
-<p class="quiz-explanation">BASE_SHARD = ceil(27/3) = 9. On manual runs on non-release branches, iOS is capped at 3 (scarce macOS runners), Android at 12. So iOS = min(9, 3) = 3, Android = min(9, 12) = 9.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> Why does <code>shard-tests.mjs</code> sort specs by duration descending before placing them into shards?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Longest-Processing-Time greedy bin-packing minimises the maximum shard duration, which is the wall-clock critical path</button>
-<button class="quiz-choice" data-value="B">B) Jest requires specs to be provided in descending duration order</button>
-<button class="quiz-choice" data-value="C">C) It optimises cache locality on the runner</button>
-<button class="quiz-choice" data-value="D">D) For alphabetical stability in CI logs</button>
-</div>
-<p class="quiz-explanation">Classic LPT scheduling: place the largest items first and let smaller items fill the gaps. This is provably within 4/3 of optimal and dramatically beats round-robin when durations are skewed.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> How does a value from a <code>workflow_dispatch</code> input end up inside the Detox child process as <code>process.env</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) GitHub Actions injects inputs as env vars automatically</button>
-<button class="quiz-choice" data-value="B">B) Through an explicit chain: <code>inputs.*</code> → workflow-level <code>env:</code> → job-level <code>env:</code> → step-level <code>env:</code> (plus <code>$GITHUB_ENV</code> for cross-step values) → child-process inheritance</button>
-<button class="quiz-choice" data-value="C">C) Only via repo secrets that Detox reads at runtime</button>
-<button class="quiz-choice" data-value="D">D) Via the <code>with:</code> block on <code>actions/checkout</code></button>
-</div>
-<p class="quiz-explanation">Nothing is automatic. Each layer is explicit and uses <code>${{ inputs.* }}</code> or prior env to propagate values. <code>$GITHUB_ENV</code> is needed only when a value must survive across steps in the same job.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q6.</strong> Which combination validates a release candidate against production Firebase, full suite, both platforms?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>ref=release/3.50.0, tests_type="iOS Only", smoke_tests=true</code></button>
-<button class="quiz-choice" data-value="B">B) <code>ref=develop, production_firebase=true</code></button>
-<button class="quiz-choice" data-value="C">C) <code>ref=release/3.50.0, tests_type="iOS &amp; Android"</code> with no other changes</button>
-<button class="quiz-choice" data-value="D">D) <code>ref=release/3.50.0, tests_type="iOS &amp; Android", production_firebase=true, smoke_tests=false</code></button>
-</div>
-<p class="quiz-explanation">Release gating needs the full suite (no smoke), both platforms, and production Firebase. Because the ref contains <code>release</code>, both platforms also get the 12-shard cap automatically.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q7.</strong> A test passes locally but fails consistently in CI shard 7. What is the most likely cause, and what is the first thing to check?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) GitHub runners are slower; bump the test timeout and retry</button>
-<button class="quiz-choice" data-value="B">B) Allure is dropping events; re-run the workflow</button>
-<button class="quiz-choice" data-value="C">C) Another spec earlier in shard 7 leaves state that breaks your test; look at the shard's step log to see which specs ran before yours, then reproduce them locally in the same order</button>
-<button class="quiz-choice" data-value="D">D) The Speculos firmware differs on CI; you cannot reproduce locally</button>
-</div>
-<p class="quiz-explanation">Shard membership is determined by LPT-greedy packing of durations — which specs share a shard with yours is data-dependent and non-alphabetical. State bleed (Redux residue, undelivered async actions, device state) is the #1 cause of "green locally, red in shard N". Replay the shard's spec order locally.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q8.</strong> What role does the <code>@Gate</code> job play in the PR-merge contract?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It throttles CI to one run per PR at a time</button>
-<button class="quiz-choice" data-value="B">B) It is the single aggregator check named in branch-protection; required deps must all pass for it to go green, but non-required deps can fail without blocking merge (they only affect Slack reporting)</button>
-<button class="quiz-choice" data-value="C">C) It is GitHub's built-in merge queue for this repo</button>
-<button class="quiz-choice" data-value="D">D) It replaces the unit-test job on release branches</button>
-</div>
-<p class="quiz-explanation">Branch-protection pins exactly one required check (<code>@Gate</code>), and the aggregation logic — which deps are required vs advisory — lives in code inside the job. This keeps branch-protection stable as the workflow graph evolves and separates hard-fail checks from flaky-but-informational ones.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-## AI Agents & Automation Rules
-
-<div class="chapter-intro">
-The Ledger Live repository uses two AI-assisted development tools: <strong>Claude Code</strong> (Anthropic's CLI) and <strong>Cursor</strong> (AI-powered IDE). Both are configured with project-specific rules, agents, commands, and skills that enforce the team's coding standards and accelerate development. As a QA engineer, understanding these configurations helps you use AI tools effectively and understand the guardrails they enforce.
-</div>
-
-### 6.4.1 Claude Code in the Ledger Live Repository
-
-**What is Claude Code?**
-
-Claude Code is Anthropic's CLI tool for Claude. It operates directly in your terminal, reads and writes files, runs commands, and assists with software engineering tasks. In Ledger Live, it is configured with specific rules to enforce coding standards, testing practices, and architectural decisions.
-
-**Configuration structure:**
-
-```
-CLAUDE.md                        # Root-level project instructions
-.claude/
-├── rules/                       # Granular rules loaded by context
-│   ├── react-mvvm.md           # MVVM architecture enforcement
-│   ├── testing.md              # Test conventions (Jest, MSW, etc.)
-│   ├── coin-families-contract.md  # Coin family abstraction rules
-│   ├── git-workflow.md         # Branch naming, commit format
-│   ├── jest-mocks.md           # Mock patterns to avoid
-│   ├── redux-slice.md          # RTK slice conventions
-│   └── ...
-└── settings.json               # Claude Code settings
-```
-
-### 6.4.2 Key Claude Rules for QA
-
-| Rule File | What It Enforces |
-|-----------|-----------------|
-| `testing.md` | Test structure, naming, MSW usage, query priority |
-| `jest-mocks.md` | No duplicate mocks, no `restoreAllMocks`, proper lifecycle |
-| `react-mvvm.md` | MVVM folder structure, integration test requirements |
-| `coin-families-contract.md` | No `if (family === "evm")` in generic code |
-| `git-workflow.md` | Conventional commits, branch prefixes |
-
-**Critical rule: `jest-mocks.md`** — `jest.restoreAllMocks()` restores ALL mocks including global ones from `jest-setup.js`. This breaks unrelated tests. Use `jest.clearAllMocks()` (clears call history only) or `mySpy.mockRestore()` (specific spy only).
-
-### 6.4.3 The Socratic Decision Rule (Rodin)
-
-The Ledger Live Claude Code configuration includes a mandatory reasoning framework called "Rodin" that prevents echo-chamber planning:
-
-- Never validates a proposal just because the user proposed it
-- Presents the strongest opposing position before agreeing
-- Classifies assumptions: `✓ Justified`, `~ Contestable`, `⚡ Simplification`, `◐ Blind spot`, `✗ Unjustified`
-
-**Why this matters for QA**: When using Claude Code to plan test strategy, it will challenge whether a test is necessary, whether the scope is right, and whether the effort is justified. This prevents feature creep in test suites.
-
-### 6.4.4 Cursor IDE in the Ledger Live Repository
-
-**What is Cursor?**
-
-Cursor is an AI-powered IDE (fork of VS Code) that integrates AI assistance directly into the coding experience. The Ledger Live repository has a comprehensive `.cursor/` configuration directory.
-
-**Configuration structure:**
-
-```
-.cursor/
-├── agents/                      # 5 specialized AI agents
-│   ├── ci-watcher.mdc          # Monitors CI pipelines
-│   ├── code-architect.mdc      # Designs feature architectures
-│   ├── code-explorer.mdc       # Explores and understands codebase
-│   ├── code-reviewer.mdc       # Reviews code changes
-│   └── test-runner.mdc         # Runs and debugs tests
-│
-├── commands/                    # 7 automation commands
-│   ├── cleanup.mdc             # Code cleanup
-│   ├── create-pr.mdc           # PR creation workflow
-│   ├── e2e-desktop-onboard.mdc # 6-phase desktop E2E onboarding
-│   ├── e2e-mobile-onboard.mdc  # Mobile E2E onboarding
-│   ├── feature-dev.mdc         # 7-phase feature development
-│   ├── pre-review.mdc          # 4 parallel review checks
-│   └── test-coverage.mdc       # Coverage analysis
-│
-├── rules/                       # 25 context-specific rules
-│   ├── client-ids.md
-│   ├── coin-families-contract.md
-│   ├── cursor-rules.md
-│   ├── dialogs-slice.md
-│   ├── git-workflow.md
-│   ├── jest-mocks.md
-│   ├── react-mvvm.md
-│   ├── testing.md
-│   ├── typescript.md
-│   ├── zod-schemas.md
-│   └── ... (15 more)
-│
-└── skills/                      # 8 reusable skills
-    ├── create-changeset.mdc    # Changeset creation
-    ├── e2e-swap.mdc            # Swap E2E testing
-    ├── e2e.mdc                 # Adding new coins to E2E (8 steps)
-    ├── fix-ci.mdc              # CI failure diagnosis
-    ├── get-pr-comments.mdc     # PR comment retrieval
-    ├── run-tests.mdc           # Test execution
-    ├── slack-pr-message.mdc    # PR notification to Slack
-    └── testing.mdc             # General testing skill
-```
-
-### 6.4.5 Cursor Agents for QA
-
-The most relevant Cursor agents for QA work:
-
-**`test-runner`**: Runs and debugs tests. Knows how to execute Jest unit tests, Playwright desktop E2E, and Detox mobile E2E. Understands MSW mocking patterns and can fix test failures.
-
-**`ci-watcher`**: Monitors GitHub CI for the current branch. Reports pass/fail with relevant failure logs. Use after pushing to track CI status.
-
-**`code-reviewer`**: Reviews code changes for compliance with MVVM patterns, testing requirements, and project conventions. Use before submitting a PR.
-
-### 6.4.6 Cursor Commands for QA
-
-**`e2e-desktop-onboard`**: A 6-phase guided workflow for onboarding to desktop E2E testing:
-1. Explore the E2E architecture
-2. Understand fixtures and page objects
-3. Read existing tests
-4. Write your first test
-5. Run with Speculos
-6. Debug and iterate
-
-**`e2e-mobile-onboard`**: Similar guided workflow for mobile E2E testing.
-
-**`pre-review`**: Runs 4 parallel review checks before you submit your PR: MVVM compliance, test coverage, code quality, and security.
-
-### 6.4.7 Cursor Skills for QA
-
-**`e2e`** — The skill for adding new coin support to E2E tests. An 8-step process:
-1. Identify the coin family
-2. Add the coin to the Account enum
-3. Create the Speculos app mapping
-4. Write the send test
-5. Write the receive test
-6. Add to CI sharding
-7. Tag appropriately
-8. Create the changeset
-
-**`e2e-swap`** — Specific skill for swap E2E testing.
-
-**`fix-ci`** — Diagnoses CI failures by reading workflow logs, identifying the root cause, and suggesting fixes.
-
-### 6.4.8 Using AI Tools for QA Tasks
-
-**Common tasks and which tool to use:**
-
-| Task | Tool | Why |
-|------|------|-----|
-| Write a new E2E test | Claude Code (terminal) or Cursor | Both have project rules; Claude Code starts in plan mode |
-| Debug a CI failure | Cursor `ci-watcher` agent or `fix-ci` skill | Integrated log reading |
-| Onboard to E2E testing | Cursor `e2e-desktop-onboard` command | Guided 6-phase workflow |
-| Review your code before PR | Cursor `pre-review` command | 4 parallel checks |
-| Add a new coin to E2E | Cursor `e2e` skill | 8-step guided process |
-| Batch create tests | Claude Code Orchestrator mode | Parallel sub-task dispatch |
-
-**Tips for effective AI-assisted QA work:**
-- Always review the AI's plan before letting it implement
-- Verify generated tests run locally before pushing
-- Check that the AI follows existing patterns (page objects, fixtures, decorators)
-- Do not blindly trust AI-generated selectors — verify they match the actual DOM
-- Use AI for repetitive tasks (generating similar tests for multiple currencies)
-
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://docs.anthropic.com/en/docs/claude-code">Claude Code documentation</a></li>
-<li><a href="https://docs.cursor.com/">Cursor IDE documentation</a></li>
-<li><a href="https://docs.cursor.com/context/rules-for-ai">Cursor Rules for AI</a></li>
-<li><a href="https://docs.cursor.com/chat/agents">Cursor Agents</a></li>
-</ul>
-</div>
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> AI tools are configured with project-specific rules that enforce Ledger Live's standards. They are powerful accelerators for repetitive QA tasks (writing similar tests, debugging failures, adding coin support). Use them — but always verify the output. The <code>.claude/rules/</code> and <code>.cursor/rules/</code> directories are the source of truth for how the AI should behave.
-</div>
-
-### 6.4.9 Quiz
-
-<!-- ── Chapter 6.4 Quiz ── -->
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
+<h3>Quiz -- QAA-1136 Walkthrough</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> What is the purpose of <code>.claude/rules/</code> and <code>.cursor/rules/</code> files?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> For QAA-1136, what is the minimal correct implementation of the USDT → ETH coverage?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) They are documentation files for new developers</button>
-<button class="quiz-choice" data-value="B">B) They are configuration rules that shape how AI agents behave and enforce project-specific coding standards</button>
-<button class="quiz-choice" data-value="C">C) They are test configuration files for CI</button>
-<button class="quiz-choice" data-value="D">D) They are Git hooks that run on commit</button>
+<button class="quiz-choice" data-value="A">A) A new spec file <code>swap.usdt.eth.spec.ts</code> with a full custom <code>test.describe</code> block</button>
+<button class="quiz-choice" data-value="B">B) A patch to <code>performSwapUntilQuoteSelectionStep</code> to handle ERC-20</button>
+<button class="quiz-choice" data-value="C">C) One new object appended to the <code>swaps</code> array in <code>send.swap.spec.ts</code>, reusing every existing helper</button>
+<button class="quiz-choice" data-value="D">D) A Firebase feature flag flip in <code>swap-live-app</code></button>
 </div>
-<p class="quiz-explanation">These rule files instruct AI tools on project-specific conventions, patterns, and constraints. When the AI assists with development, it follows these rules to produce code that matches the team's standards.</p>
+<p class="quiz-explanation">The <code>swaps</code> array + <code>for</code> loop pattern in <code>send.swap.spec.ts</code> already handles the entire flow (fixtures, Speculos setup, token approval, provider selection, assertion). Adding a pair is a single new object. Writing a new spec or patching helpers would duplicate existing code.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> What does the Socratic Decision Rule (Rodin) prevent?</p>
+<p><strong>Q2.</strong> Why is USDT → ETH a more interesting test case than BTC → BTC would be?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It prevents the AI from writing code</button>
-<button class="quiz-choice" data-value="B">B) It prevents echo-chamber planning by requiring independent reasoning, counterarguments, and assumption classification</button>
-<button class="quiz-choice" data-value="C">C) It prevents the AI from reading files</button>
-<button class="quiz-choice" data-value="D">D) It prevents the AI from using Git</button>
+<button class="quiz-choice" data-value="A">A) It uses a different provider</button>
+<button class="quiz-choice" data-value="B">B) It exercises the ERC-20 <strong>token approval</strong> codepath via <code>ensureTokenApproval</code>, which native-to-native swaps skip entirely</button>
+<button class="quiz-choice" data-value="C">C) It does not need a device</button>
+<button class="quiz-choice" data-value="D">D) It bypasses Speculos</button>
 </div>
-<p class="quiz-explanation">Rodin ensures the AI provides independent reasoning, presents the strongest opposing position, and classifies assumptions rather than blindly agreeing with proposals.</p>
+<p class="quiz-explanation">Token swaps on DEXs require an ERC-20 <code>approve()</code> before the swap can happen. <code>ensureTokenApproval</code> handles that step. Native-to-native pairs (BTC → BTC, ETH → ETH) do not exercise this codepath, so they are not good representatives for token-swap coverage.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> Which Cursor skill would you use to add a new cryptocurrency to the E2E test suite?</p>
+<p><strong>Q3.</strong> What is the correct way to update Xray after merging the PR for B2CQA-2752?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>fix-ci</code></button>
-<button class="quiz-choice" data-value="B">B) <code>create-changeset</code></button>
-<button class="quiz-choice" data-value="C">C) <code>e2e-swap</code></button>
-<button class="quiz-choice" data-value="D">D) <code>e2e</code> — an 8-step guided process for adding new coin support</button>
+<button class="quiz-choice" data-value="A">A) Replace LLM with LLD in <strong>Automated In</strong></button>
+<button class="quiz-choice" data-value="B">B) Remove LLM since desktop now covers it</button>
+<button class="quiz-choice" data-value="C">C) Leave Automated In unchanged</button>
+<button class="quiz-choice" data-value="D">D) Add LLD alongside the existing LLM in <strong>Automated In</strong> — both platforms now automate this test case</button>
 </div>
-<p class="quiz-explanation">The <code>e2e</code> skill guides you through 8 steps: identify coin family, add to Account enum, create Speculos mapping, write send/receive tests, add to CI sharding, tag, and create changeset.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> Why is <code>jest.restoreAllMocks()</code> dangerous according to the <code>jest-mocks.md</code> rule?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is deprecated in recent Jest versions</button>
-<button class="quiz-choice" data-value="B">B) It only works with TypeScript, not JavaScript</button>
-<button class="quiz-choice" data-value="C">C) It restores ALL mocks including global ones from <code>jest-setup.js</code>, breaking unrelated tests that depend on those mocks</button>
-<button class="quiz-choice" data-value="D">D) It increases test execution time significantly</button>
-</div>
-<p class="quiz-explanation"><code>restoreAllMocks()</code> removes all mocks including global setup for navigation, i18n, and native modules. Other tests that depend on these global mocks will break. Use <code>clearAllMocks()</code> or restore only your specific spies.</p>
+<p class="quiz-explanation">Desktop coverage does not invalidate mobile coverage. Both platforms now automate <code>B2CQA-2752</code>, so <strong>Automated In</strong> should reflect both — same rule as chapter 30.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> You want to use AI to write E2E tests for 10 different currencies. Which approach is most efficient?</p>
+<p><strong>Q4.</strong> A teammate proposes to land all 9 missing pairs in a single PR. What is the right pushback?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Claude Code Orchestrator mode — breaks work into sub-tasks (one per currency) and dispatches them in parallel</button>
-<button class="quiz-choice" data-value="B">B) Write each test manually and use AI only for review</button>
-<button class="quiz-choice" data-value="C">C) Use Cursor's <code>fix-ci</code> skill</button>
-<button class="quiz-choice" data-value="D">D) Copy-paste one test 10 times and change the currency name</button>
+<button class="quiz-choice" data-value="A">A) Ship per pair or in small batches (2-3 entries per PR) — each pair exercises different provider routes and one unrelated DEX failure would block the entire batch</button>
+<button class="quiz-choice" data-value="B">B) It is fine — land everything at once</button>
+<button class="quiz-choice" data-value="C">C) Only Senior QAs can merge swap changes</button>
+<button class="quiz-choice" data-value="D">D) Do it in a single commit on <code>main</code></button>
 </div>
-<p class="quiz-explanation">The Orchestrator mode can break the work into parallel sub-tasks, using existing page objects and the parameterized test pattern. This is much more efficient than writing 10 tests sequentially.</p>
+<p class="quiz-explanation">Each pair can fail independently (provider liquidity, token approval, Speculos app switching). Small PRs isolate failures and keep reviews fast. This is consistent with the Git workflow rules: small, isolated, meaningful commits.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> You run the new USDT → ETH test and it fails with <code>INSUFFICIENT_LIQUIDITY</code>. What is the correct first action?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Open a bug in <code>ledger-live</code></button>
+<button class="quiz-choice" data-value="B">B) Check the provider status (this is a provider-side issue, not a test regression) — investigate on Datadog or the swap backend before changing test code</button>
+<button class="quiz-choice" data-value="C">C) Delete the test entry</button>
+<button class="quiz-choice" data-value="D">D) Switch to a different currency</button>
+</div>
+<p class="quiz-explanation"><code>INSUFFICIENT_LIQUIDITY</code> is a provider-side response, not a test bug. Check provider health (Datadog, the <code>swap</code> backend, Slack) before changing code. If it is transient, wait and retry. If it is persistent, escalate to the Swap team with the observed behavior.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -1612,128 +1425,142 @@ The most relevant Cursor agents for QA work:
 
 ## Part 6 Final Assessment
 
-You have reached the end of the guide. Part 6 covered the disciplines that separate a competent E2E contributor from a senior one. Chapter 6.1 taught test strategy — the pyramid, page object discipline, data-driven patterns, and flaky test management. Chapter 6.2 walked you through debugging failures across desktop (Playwright Inspector, Trace Viewer, Allure) and mobile (Detox verbose logs, `adb logcat`, synchronization bypass), plus Speculos troubleshooting. Chapter 6.3 unpacked CI/CD anatomy, the `@Gate` job, composite actions, and the shard matrix algorithm. Chapter 6.4 introduced the AI tooling around the repo — Claude Code, Cursor agents, and the Socratic Decision Rule (Rodin) that keeps planning honest.
-
-The ten questions below cross-cut all four chapters. Treat this assessment as a self-audit: if you can answer every question with confidence, you are ready to own E2E work end-to-end — from ticket intake, through local Speculos reproduction, through shard-aware CI, to a green `@Gate` ready to merge. Passing threshold is 80%.
-
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 6 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions · 80% to pass · Covers Ch 6.1 through 6.4</p>
+<p class="quiz-subtitle">12 questions · 80% to pass · Covers all Part 6 chapters</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="A">
-<p><strong>Q1.</strong> In the Ledger testing pyramid, which layer should contain the fewest tests and why?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> A Live App is loaded into the Wallet via...</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) E2E with Speculos — highest confidence but slowest (~30s-5min per test) and most expensive to maintain, so reserved for critical user journeys</button>
-<button class="quiz-choice" data-value="B">B) Unit tests — they are too isolated to catch real bugs</button>
-<button class="quiz-choice" data-value="C">C) Integration tests — they duplicate unit coverage</button>
-<button class="quiz-choice" data-value="D">D) All layers should have the same number of tests to guarantee uniform coverage</button>
+<button class="quiz-choice" data-value="A">A) A native module compiled into the installer</button>
+<button class="quiz-choice" data-value="B">B) A sandboxed webview pointing at a remote URL declared in the manifest</button>
+<button class="quiz-choice" data-value="C">C) A command-line plugin</button>
+<button class="quiz-choice" data-value="D">D) An Electron IPC channel</button>
 </div>
-<p class="quiz-explanation">E2E sits at the narrow tip of the pyramid. Each test takes 30s-5min, involves Speculos and a full Electron or React Native stack, and is the most expensive to debug when flaky. Unit tests (~1ms) form the wide base, integration tests (~100ms) sit in the middle. E2E should cover only critical paths that lower layers cannot validate — onboarding, send, receive, portfolio aggregation.</p>
+<p class="quiz-explanation">A Live App is a remote web app loaded into a sandboxed webview. The URL, permissions, and icon come from the manifest declared in <code>ledger-live</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> A reviewer flags this line in your new page object: <code>await portfolioPage.assertBalanceIs("1.5 BTC")</code>. Why is this a page object discipline violation?</p>
+<p><strong>Q2.</strong> Which Wallet-API invariant protects users against a misbehaving Live App?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The method name does not start with a verb</button>
-<button class="quiz-choice" data-value="B">B) It should have used <code>data-testid</code> instead of role locators</button>
-<button class="quiz-choice" data-value="C">C) Assertions belong in tests, not page objects — a PO that owns an assertion cannot be reused by a test expecting a different balance</button>
-<button class="quiz-choice" data-value="D">D) <code>assertBalanceIs</code> is missing the <code>@step</code> decorator</button>
+<button class="quiz-choice" data-value="A">A) The Live App cannot access the internet</button>
+<button class="quiz-choice" data-value="B">B) The Live App cannot render UI</button>
+<button class="quiz-choice" data-value="C">C) Every privileged action (accounts, signing, network) is brokered by the Wallet shell and checked against the manifest's declared permissions</button>
+<button class="quiz-choice" data-value="D">D) The Live App is rebuilt locally before launch</button>
 </div>
-<p class="quiz-explanation">Page objects provide actions and data (e.g. <code>getBalance()</code>); tests decide what to assert. An assertion baked into the PO ties it to one expected value and destroys reuse. The rule is: PO returns, test asserts. Soft visibility checks like <code>isVisible()</code> inside a PO are acceptable; hard equality assertions are not.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> You need to cover send flows for Bitcoin, Ethereum, and Solana. What is the idiomatic way to express this in the Ledger E2E suite?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Copy one test three times and change the currency name in each file</button>
-<button class="quiz-choice" data-value="B">B) Define a parameterized array of <code>{ name, ticker, amount, address }</code> and loop <code>for (const currency of currencies) { test(\`can send ${currency.name}\`, ...) }</code></button>
-<button class="quiz-choice" data-value="C">C) Write one monolithic test that sends all three currencies sequentially</button>
-<button class="quiz-choice" data-value="D">D) Use a manual test plan — data-driven E2E is not supported by Playwright</button>
-</div>
-<p class="quiz-explanation">Data-driven testing keeps one test body and iterates over a parameter array, generating a distinct test per currency with a unique name. It avoids copy-paste drift, makes the coverage matrix visible in one place, and lets each generated test fail or shard independently. Playwright registers each loop iteration as a separate test case.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> A CI test fails with <code>Error: connect ECONNREFUSED 127.0.0.1:5000</code>. Which diagnosis and fix path is correct?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The test assertion is wrong — update the expected value</button>
-<button class="quiz-choice" data-value="B">B) Playwright locator is stale — switch to <code>getByTestId</code></button>
-<button class="quiz-choice" data-value="C">C) The Allure reporter crashed — rerun the workflow</button>
-<button class="quiz-choice" data-value="D">D) The Speculos container is not reachable on port 5000 — check the Docker daemon, verify <code>docker ps</code> shows the container, and curl <code>/events</code> for the health check</button>
-</div>
-<p class="quiz-explanation"><code>ECONNREFUSED :5000</code> is a Speculos connectivity issue, not a test logic issue. Verify the container is running (<code>docker ps | grep speculos</code>), inspect logs (<code>docker logs &lt;id&gt;</code>), and confirm the health endpoint responds (<code>curl http://localhost:5000/events</code>) before touching test code. A 404 on <code>/apdu</code> usually means wrong Speculos version; a stuck home screen means wrong coin app <code>.elf</code>.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> You are debugging a Detox test on Android that fails because a loading spinner animates forever. Which tool or technique is the right first move?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Increase the global Jest timeout to 5 minutes</button>
-<button class="quiz-choice" data-value="B">B) Wrap the interaction in <code>device.disableSynchronization()</code> / <code>enableSynchronization()</code> so Detox stops waiting for idle, then use <code>--loglevel trace</code> and <code>adb logcat | grep ReactNative</code> to confirm behavior</button>
-<button class="quiz-choice" data-value="C">C) Use the Playwright Trace Viewer to inspect the animation</button>
-<button class="quiz-choice" data-value="D">D) Delete the test — infinite animations cannot be tested</button>
-</div>
-<p class="quiz-explanation">Detox synchronizes on the app's idle state; an infinite animation blocks that forever. The documented escape hatch is <code>disableSynchronization()</code> around the offending interaction. Trace logging plus <code>adb logcat</code> confirms what the native layer is doing. Playwright's Trace Viewer is desktop-only and does not apply to the Detox / React Native runtime.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q6.</strong> In GitHub Actions terminology, which relationship is correct?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) A step contains jobs, and jobs contain workflows</button>
-<button class="quiz-choice" data-value="B">B) A workflow is a single step with multiple jobs inside</button>
-<button class="quiz-choice" data-value="C">C) A workflow contains one or more jobs; each job runs on a runner and executes an ordered list of steps</button>
-<button class="quiz-choice" data-value="D">D) Workflows, jobs, and steps are synonyms for the same YAML block</button>
-</div>
-<p class="quiz-explanation">The hierarchy is workflow → jobs → steps. A workflow is the top-level YAML file triggered by events (<code>pull_request</code>, <code>schedule</code>, <code>workflow_dispatch</code>). It defines one or more jobs, which each run on a runner (e.g. <code>ubuntu-latest</code>). Each job executes steps in order. A matrix strategy fans a single job definition out into multiple parallel copies.</p>
+<p class="quiz-explanation">The Wallet-API bridge enforces permissions at the shell. A Live App cannot escalate beyond what its manifest declares.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q7.</strong> Your PR shows 23 CI checks. One non-required job is red, but <code>@Gate</code> is green. What is the correct interpretation?</p>
+<p><strong>Q3.</strong> The Swap backend is composed of two processes. Which pair?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The PR is mergeable because <code>@Gate</code> is the single aggregation point tracked by branch protection; the failing non-required job should still be reported on Slack for follow-up</button>
-<button class="quiz-choice" data-value="B">B) The PR is blocked until every single check is green</button>
-<button class="quiz-choice" data-value="C">C) <code>@Gate</code> is irrelevant — only individual job statuses matter</button>
-<button class="quiz-choice" data-value="D">D) The PR must be closed and reopened to re-trigger CI</button>
+<button class="quiz-choice" data-value="A">A) The <code>swap</code> service (REST, quotes, trade creation) and the <code>swap</code> completer (status poller) — with PostgreSQL and RabbitMQ between them</button>
+<button class="quiz-choice" data-value="B">B) <code>swap-live-app</code> and <code>exchange-sdk</code></button>
+<button class="quiz-choice" data-value="C">C) Firebase and Vercel</button>
+<button class="quiz-choice" data-value="D">D) Speculos and the Ledger device</button>
 </div>
-<p class="quiz-explanation">Only <code>@Gate</code> is tracked by branch protection rules. A green <code>@Gate</code> means all required jobs passed and the PR can merge. Non-required failures do not block merging but must be surfaced so the team can investigate. That design keeps the merge signal simple while preserving visibility into secondary checks.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q8.</strong> A matrix with <code>shardIndex: [1, 2, 3, 4, 5]</code>, <code>shardTotal: [5]</code>, and <code>fail-fast: false</code> is used for E2E. Which statement describes its behavior most accurately?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It runs the full suite five times in sequence on one runner</button>
-<button class="quiz-choice" data-value="B">B) It fans out into 5 parallel runners, each executing ~20% of tests via <code>--shard=i/5</code>; if one shard fails the others still complete, and a downstream merge job combines Allure results</button>
-<button class="quiz-choice" data-value="C">C) It runs 5 shards and stops all of them the moment one fails</button>
-<button class="quiz-choice" data-value="D">D) It creates 25 runners (5 × 5) due to the two matrix axes</button>
-</div>
-<p class="quiz-explanation">Playwright's <code>--shard=i/n</code> flag deterministically partitions the test list into <code>n</code> slices; each runner executes slice <code>i</code>. The matrix expands to 5 parallel jobs (one per <code>shardIndex</code>, with <code>shardTotal</code> fixed at 5). <code>fail-fast: false</code> ensures all shards finish so you get a complete merged Allure report — critical when diagnosing broad regressions that affect multiple shards.</p>
+<p class="quiz-explanation">The <code>swap</code> service handles synchronous quote/trade requests; the completer polls providers asynchronously for long-running trade statuses. RabbitMQ decouples them; PostgreSQL is the system of record.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q9.</strong> You want to understand a legacy E2E fixture, study its patterns, and get exercises that let you rebuild it yourself. Which agent mode is the best fit, and why?</p>
+<p><strong>Q4.</strong> Which repo holds the declarative rules about which swap pairs are enabled per provider and per environment?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>/pair-programmer</code> — it is the only agent that can read files</button>
-<button class="quiz-choice" data-value="B">B) <code>/docker</code> — fixtures run inside containers</button>
-<button class="quiz-choice" data-value="C">C) No agent — always work directly on <code>dev</code></button>
-<button class="quiz-choice" data-value="D">D) <code>/pedagogy</code> — it is the teaching-focused mode that explains decisions, walks through concepts, and proposes exercises; <code>/pair-programmer</code> is for TDD Red-Green-Refactor delivery, not learning</button>
+<button class="quiz-choice" data-value="A">A) <code>swap-live-app</code></button>
+<button class="quiz-choice" data-value="B">B) <code>ledger-live</code></button>
+<button class="quiz-choice" data-value="C">C) <code>ledger-live-assets</code></button>
+<button class="quiz-choice" data-value="D">D) <code>swap-configuration</code> — Rust tooling over CSV configuration files</button>
 </div>
-<p class="quiz-explanation">The two modes have distinct purposes. <code>/pedagogy</code> is for understanding and learning: explanations, trade-offs, exercises you complete yourself. <code>/pair-programmer</code> is for building features under strict TDD discipline (Red → Green → Refactor). Picking the wrong one gives you tests when you wanted a lesson, or a lecture when you wanted a feature. Small single-file changes need no agent at all — work directly on <code>dev</code>.</p>
+<p class="quiz-explanation"><code>swap-configuration</code> is the declarative ruleset. Pair availability, min/max, fee tiers, provider enablement — all live there. Check it before assuming a code bug.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q5.</strong> Swap follows which branching model?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Trunk-based on <code>develop</code> — short-lived <code>feat/*</code> and <code>fix/*</code> branches, Changesets-driven versioning, <code>release-production.yml</code> creates an <code>app@vX.Y.Z</code> tag from <code>develop</code></button>
+<button class="quiz-choice" data-value="B">B) Gitflow with a dedicated <code>release/app@v1.3.xx</code> branch cut from <code>develop</code>, merged to both <code>main</code> and <code>develop</code> when tagged</button>
+<button class="quiz-choice" data-value="C">C) Continuous deployment from <code>main</code> with no tags</button>
+<button class="quiz-choice" data-value="D">D) None — Swap releases are manual</button>
+</div>
+<p class="quiz-explanation">Swap is <strong>trunk-based</strong>. <code>develop</code> is the single source of truth; there is no release branch and no Gitflow. Production tags (<code>app@vX.Y.Z</code>) are created by the <code>release-production.yml</code> workflow, which consumes pending Changesets. Hotfixes branch from the latest tag and are merged back into <code>develop</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> Swap has <strong>two</strong> Firebase projects. What is the responsibility split?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) One for Android, one for iOS</button>
+<button class="quiz-choice" data-value="B">B) One for pre-prod, one for production</button>
+<button class="quiz-choice" data-value="C">C) <code>ledger-live-production</code> holds Wallet-side flags (including whether the Swap entry appears in the Wallet); <code>swap-live-app</code> holds Live-App-side flags (provider enablement inside the app, UI experiments)</button>
+<button class="quiz-choice" data-value="D">D) One is public, one is private</button>
+</div>
+<p class="quiz-explanation">The split is Wallet-side vs. Live-App-side. Remembering this split is essential when tracing why a swap feature is (in)visible for a given user — the flag may be in one project or the other.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q7.</strong> The Swap production backend URL is...</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>swap.ledger.com</code></button>
+<button class="quiz-choice" data-value="B">B) <code>swap-prod.ledger-test.com/v5</code></button>
+<button class="quiz-choice" data-value="C">C) <code>swap-live-app.ledger.com</code></button>
+<button class="quiz-choice" data-value="D">D) <code>swap-live-app.aws.prd.ldg-tech.com</code></button>
+</div>
+<p class="quiz-explanation">Production backend (the <code>swap</code> service) is <code>swap.ledger.com</code>. Production frontend (the Live App) is <code>swap-live-app.ledger.com</code> (public Cloudflare) or <code>swap-live-app.aws.prd.ldg-tech.com</code> (internal AWS). <code>ledger-test.com</code> is the public test domain used for stg/ppr only.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q8.</strong> On QAA-1136, what is the correct analysis step before writing code?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Rewrite <code>send.swap.spec.ts</code> from scratch</button>
+<button class="quiz-choice" data-value="B">B) Open a Jira sub-task per missing pair</button>
+<button class="quiz-choice" data-value="C">C) Upgrade <code>exchange-sdk</code></button>
+<button class="quiz-choice" data-value="D">D) <code>grep</code> each B2CQA ID under QAA-1136 in <code>e2e/desktop/tests/specs/</code> to confirm the gap — then cross-check against the mobile specs to get the canonical reference</button>
+</div>
+<p class="quiz-explanation">Never add tests without confirming the gap first. <code>grep</code> the ID in the desktop specs (no match = real gap) and confirm the mobile reference exists — that gives you the canonical flow to mirror.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q9.</strong> Which helper handles the ERC-20 approval step required before a DEX token swap?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>app.swap.ensureTokenApproval(fromAccount, provider, minAmount)</code></button>
+<button class="quiz-choice" data-value="B">B) <code>app.swap.getMinimumAmount(fromAccount, toAccount)</code></button>
+<button class="quiz-choice" data-value="C">C) <code>performSwapUntilQuoteSelectionStep()</code></button>
+<button class="quiz-choice" data-value="D">D) <code>setExchangeDependencies()</code></button>
+</div>
+<p class="quiz-explanation"><code>ensureTokenApproval</code> performs the ERC-20 approval before the swap. Without it, DEX token swaps will fail. Native-to-native pairs do not need this step.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q10.</strong> Under the Socratic Decision Rule (Rodin), you propose adding a new flaky-test retry mechanism. The agent agrees three times in a row without pushing back. What should happen next?</p>
+<p><strong>Q10.</strong> The <code>completer</code> lets the Swap backend do something the Live App alone could not. What?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Nothing — three agreements confirm the plan is correct</button>
-<button class="quiz-choice" data-value="B">B) The agent must stop and run a contradiction pass: steelman the strongest opposing position (e.g. "fix the root cause instead of adding retries"), classify assumptions with tags like <code>~ Contestable</code> or <code>◐ Blind spot</code>, and keep only <code>✓ Justified</code> items in the plan</button>
-<button class="quiz-choice" data-value="C">C) The user must rephrase the proposal until the agent disagrees</button>
-<button class="quiz-choice" data-value="D">D) Rodin only applies to code review, not to planning</button>
+<button class="quiz-choice" data-value="A">A) Broadcast transactions</button>
+<button class="quiz-choice" data-value="B">B) Track the status of a trade asynchronously until it reaches a terminal state, even if the user closes the Live App</button>
+<button class="quiz-choice" data-value="C">C) Sign transactions</button>
+<button class="quiz-choice" data-value="D">D) Add new providers</button>
 </div>
-<p class="quiz-explanation">Rodin is explicit: three validations in a row triggers a mandatory contradiction pass. The agent must steelman the counter-position, classify each assumption with the Rodin tags (<code>✓ Justified</code>, <code>~ Contestable</code>, <code>⚡ Simplification</code>, <code>◐ Blind spot</code>, <code>✗ Unjustified</code>), and default to implementing only <code>✓ Justified</code> items. This prevents echo-chamber planning and protects the suite from feature creep — exactly the risk when adding retries instead of fixing the flaky root cause.</p>
+<p class="quiz-explanation">The completer decouples user-facing trade creation (fast, synchronous) from provider status tracking (slow, asynchronous). It is why a trade can reach its terminal state even after the user closes Swap.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q11.</strong> You see a swap failing in pre-prod but not in staging. What is the most likely cause?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A Speculos version mismatch</button>
+<button class="quiz-choice" data-value="B">B) A Node version mismatch in CI</button>
+<button class="quiz-choice" data-value="C">C) A configuration delta — <code>swap-configuration</code> rules, or a Firebase flag in <code>swap-live-app</code>, differing between stg and ppr</button>
+<button class="quiz-choice" data-value="D">D) A Chrome auto-update</button>
+</div>
+<p class="quiz-explanation">"Works in stg, fails in ppr" is almost always a configuration delta. Start with <code>swap-configuration</code> (pair/provider enablement) and the <code>swap-live-app</code> Firebase flags side by side.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q12.</strong> After merging the PR for B2CQA-2752 on QAA-1136, what is the correct Jira/Xray hygiene?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Close QAA-1136 immediately</button>
+<button class="quiz-choice" data-value="B">B) Delete the original mobile test</button>
+<button class="quiz-choice" data-value="C">C) Nothing — CI handles everything</button>
+<button class="quiz-choice" data-value="D">D) Set B2CQA-2752 Status=Automated, add LLD to Automated In (keeping LLM); only move QAA-1136 to Done when <strong>all</strong> its B2CQA children are landed</button>
+</div>
+<p class="quiz-explanation">Per child: mark Automated in Xray and add LLD to Automated In without removing LLM. The parent QAA-1136 stays in progress until every child is landed; otherwise the coverage dashboard will lie.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
-
-Congratulations — you have completed the QA Onboarding Guide. You now understand the full path from a Xray ticket to a green `@Gate`: where a test belongs in the pyramid, how to keep page objects disciplined, how to parameterize coverage, how to read desktop and mobile failures systematically, how CI workflows fan out across shards, and how to work with AI agents under the Socratic Decision Rule without ceding judgment to them.
-
-For day-to-day reference, keep the [Appendix](appendix.md) close: it collects the command cheat sheets, locator patterns, Speculos recipes, fixture anatomy, and CI artifact recovery steps you will reach for most often. From here, pick up a ticket, branch from `dev` with a `feat/`, `bugfix/`, or `support/` prefix, write the test, reproduce the failure locally before pushing, and let `@Gate` be your final check. Welcome to the team.
