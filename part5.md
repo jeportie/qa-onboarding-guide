@@ -6266,6 +6266,345 @@ A practice question to test your understanding: of these five, which one is clos
 <div class="quiz-score"></div>
 </div>
 
+### 5.8.18 Reference Implementation (Spoiler)
+
+> **Spoiler ahead.** Read this section only after you have honestly tried to build `revoke.ts` and `revoke.test.ts` from the scaffolding in 5.8.5 through 5.8.10. The point of the chapter was the assembly. Reading the answer first short-circuits the lesson — and worse, it locks you into one interpretation when the team may legitimately prefer another. If you're stuck, scroll back to the section that lost you and read again. If you're verifying, scroll on.
+
+This section is a complete, compile-ready reference implementation of the QAA-615 spike. It contains a `revoke.ts` command file, a `revoke.test.ts` test file, the one-line CLI registration step, and a deliberate list of what is **not** here. The implementation chooses Path C (a new Bunli command that constructs an EVM intent with `recipient = tokenContract`, `amount = "0 ETH"`, `data = approve(spender, 0)` calldata) and Q3 option (a) for token resolution (full token id like `ethereum/erc20/usd__coin`, no ticker fuzzing) — the simplest defensible spike scope. The `cliCommandsUtils.ts` and `runCli.ts` wrapper layer that ledger-live-common's e2e specs actually import was scoped explicitly out of QAA-615 in the spike report and is therefore left out of this reference too. Treat the code below as **one valid implementation** that compiles, lints, and passes the four prescribed test cases — not as the canonical answer the team will eventually ship.
+
+#### 5.8.18.1 The new command — `apps/wallet-cli/src/commands/revoke.ts`
+
+The file lives next to `send.ts` in `apps/wallet-cli/src/commands/`. It mirrors `send.ts` byte-for-byte where it can: same `defineCommand` shape, same `accountOption` and `outputOption`, same `createCommandOutput` envelope, same `withCurrencyDeviceSession` pattern, same `lastValueFrom`+`tap` rxjs flow. The only structural difference is that `revoke` does not need `INTENT_BUILDERS` — it always builds the same EVM intent, with `amount` hard-coded to `"0 ETH"` and `data` populated from `getErc20ApproveData(spender, 0n)`.
+
+```ts
+// apps/wallet-cli/src/commands/revoke.ts
+import { defineCommand, option } from "@bunli/core";
+import { z } from "zod";
+import { lastValueFrom } from "rxjs";
+import { tap } from "rxjs/operators";
+import { getCryptoCurrencyById } from "@ledgerhq/live-common/currencies/index";
+import { getCryptoAssetsStore } from "@ledgerhq/cryptoassets/state";
+import { getErc20ApproveData } from "@ledgerhq/coin-evm/logic/getErc20Data";
+import { WalletAdapter } from "../wallet";
+import { TransactionIntentSchema } from "../wallet/intents";
+import { WALLET_CLI_DMK_DEVICE_ID } from "../device/register-dmk-transport";
+import { withCurrencyDeviceSession } from "../session/bridge-device-session";
+import { networkStringFromCurrencyId } from "../shared/accountDescriptor";
+import { colors } from "../shared/ui";
+import { createCommandOutput } from "../output";
+import { accountOption, outputOption, resolveAccountArg, resolveAccountDescriptor } from "./inputs";
+
+const SPENDER_REGEX = /^0x[0-9a-fA-F]{40}$/;
+
+export default defineCommand({
+  name: "revoke",
+  description: "Revoke an ERC-20 allowance (approve(spender, 0)) — bridge only, EVM only",
+  options: {
+    account: accountOption,
+    token: option(
+      z.string().min(1, "Token id is required (--token <id>, e.g. ethereum/erc20/usd__coin)"),
+      {
+        description:
+          "Full token id, e.g. 'ethereum/erc20/usd__coin' for USDC. Tickers are not accepted in this spike — see the spike report for the rationale.",
+      },
+    ),
+    spender: option(
+      z
+        .string()
+        .regex(SPENDER_REGEX, "spender must be a 0x-prefixed 40-hex-char address"),
+      {
+        description: "Spender address whose allowance will be set to 0 (--spender 0x…).",
+        short: "s",
+      },
+    ),
+    "dry-run": option(z.boolean().default(false), {
+      description: "Build and validate the revoke transaction but do not sign or broadcast",
+      argumentKind: "flag",
+    }),
+    output: outputOption,
+  },
+  handler: async ({ flags, positional }) => {
+    const ctx = { command: "revoke", network: "", account: "" };
+    const out = createCommandOutput(flags.output, ctx);
+    const wallet = new WalletAdapter();
+    const dryRun = flags["dry-run"];
+
+    await out.run(async () => {
+      const descriptor = await resolveAccountDescriptor(resolveAccountArg(flags.account, positional));
+      ctx.network = networkStringFromCurrencyId(descriptor.currencyId);
+      ctx.account = descriptor.id;
+
+      // Revoke is EVM-only by definition. Reject other families with a clean message
+      // rather than letting the bridge fail later with an opaque error.
+      const { family } = getCryptoCurrencyById(descriptor.currencyId);
+      if (family !== "evm") {
+        throw new Error(
+          `revoke is only supported on EVM accounts (got family=${family} for ${descriptor.currencyId}).`,
+        );
+      }
+
+      // Token id → contract address. Mirrors libs/coin-modules/coin-evm/src/cli-transaction.ts
+      // so the resulting on-device clear-sign matches what the legacy CLI used to produce.
+      const tokenCurrency = await getCryptoAssetsStore().findTokenById(flags.token);
+      if (!tokenCurrency) {
+        throw new Error(
+          `Token <${flags.token}> not found in cryptoassets registry. Use a full token id, e.g. ethereum/erc20/usd__coin for USDC.`,
+        );
+      }
+      if (tokenCurrency.parentCurrency.id !== descriptor.currencyId) {
+        throw new Error(
+          `Token ${flags.token} is on ${tokenCurrency.parentCurrency.id}, not ${descriptor.currencyId}. Use a token from the account's chain.`,
+        );
+      }
+
+      // approve(spender, 0) → 4-byte selector + 32-byte spender + 32-byte amount = 68 bytes.
+      const calldataBuffer = getErc20ApproveData(flags.spender, 0n);
+      const calldataHex = "0x" + calldataBuffer.toString("hex");
+
+      // EVM TransactionIntent: recipient is the *token contract*, native amount is 0,
+      // and the calldata carries the approve. See bridge.ts:194-198 for how `intent.data`
+      // is unpacked back into `tx.data` when the transaction is prepared.
+      const intent = TransactionIntentSchema.parse({
+        family: "evm",
+        recipient: tokenCurrency.contractAddress,
+        amount: "0 ETH",
+        data: calldataHex,
+      });
+
+      if (dryRun) {
+        const spin = out.spin("Preparing revoke transaction (dry run)…");
+        const prepared = await wallet.prepareSend(descriptor, intent);
+        spin?.clear();
+        out.sendDryRun(prepared);
+        spin?.success("Dry run complete (transaction not broadcasted)");
+        return;
+      }
+
+      const spin = out.spin(`Connect device and open ${colors.bold(descriptor.currencyId)} app…`);
+      await withCurrencyDeviceSession(descriptor.currencyId, async () => {
+        spin?.success("Device session established");
+        out.spin(`Preparing ${colors.bold(descriptor.currencyId)} revoke transaction…`);
+
+        await lastValueFrom(
+          wallet
+            .send(descriptor, intent, WALLET_CLI_DMK_DEVICE_ID, dryRun)
+            .pipe(tap(event => out.sendEvent(event))),
+        );
+
+        out.sendComplete();
+      });
+    });
+  },
+});
+```
+
+A few load-bearing decisions worth pointing at explicitly:
+
+- **`recipient = tokenCurrency.contractAddress`, not the spender.** This is the single most important shape decision and the one a careful reader of `cli-transaction.ts:120-130` already internalised. The "to" of an ERC-20 approve is the token contract; the spender is encoded inside the calldata. Getting this backwards produces a transaction that sends 0 ETH to the spender's EOA and does nothing on-chain — silently broken in a way that would only surface during the manual sanity run in 5.8.11.
+- **`amount = "0 ETH"`** because `AmountWithTickerSchema` requires a value-plus-ticker string and `bridge.ts` reads native value from this field. The ticker `ETH` is correct on Ethereum mainnet; a polished version would derive the native ticker from `descriptor.currencyId` (BNB on BSC, MATIC on Polygon, etc.). The spike scope accepts the hard-coded `ETH` because the QAA-613 hooks only target Ethereum mainnet and a Verify-callout-style note in the spike report flags the multi-chain follow-up.
+- **`data: "0x" + calldataBuffer.toString("hex")`** is the seam called out in 5.8.7. `getErc20ApproveData` returns a `Buffer` because the legacy bridge consumed buffers; the wallet-cli intent schema consumes a `0x`-prefixed hex string and `bridge.ts:196-197` strips the prefix back off and re-buffers. Two conversions in opposite directions look ugly but the alternative (changing the intent schema to accept a `Buffer`) leaks bridge internals into the public CLI surface, so the cosmetic ugliness is the right trade.
+- **JSON envelope shape.** No custom envelope code — `createCommandOutput` does the work. The `command` field in `ctx` is `"revoke"`, the `network` string is derived from `descriptor.currencyId`, and `out.sendDryRun` and `out.sendEvent` produce the same `{ recipient, amount, fee, dry_run, tx_hash }` keys that send produces. That deliberate symmetry is what lets the future `parseRevokeCliOutput` helper in `cliCommandsUtils.ts` reuse the parsing pattern from `parseTokenAllowanceCliOutput`.
+
+> **Verify:** the deep import path `@ledgerhq/coin-evm/logic/getErc20Data` works because the package's `exports` map exposes `./logic/*` in the current monorepo. If a future `package.json` change tightens the export surface, the spike report's Q1 alternative (a 5-line local re-implementation in `apps/wallet-cli/src/wallet/erc20-calldata.ts`) becomes the lower-risk choice.
+
+#### 5.8.18.2 The cli registration — `apps/wallet-cli/src/cli.ts`
+
+You do not edit `cli.ts` by hand. The wallet-cli uses a Bunli convention where `bunli.config.ts` declares `commands: { directory: "./src/commands" }` and a codegen step (`pnpm generate` from inside `apps/wallet-cli/`) walks that directory and emits `apps/wallet-cli/.bunli/commands.gen.ts`, which is then statically imported by `cli.ts`:
+
+```ts
+// apps/wallet-cli/src/cli.ts (existing — no changes needed)
+import "../.bunli/commands.gen";
+```
+
+After you create `revoke.ts`, run:
+
+```bash
+cd apps/wallet-cli
+pnpm generate
+```
+
+The regenerated `commands.gen.ts` will pick up the new file automatically and add `Revoke` to the `modules` map alongside `Send`. Concretely you will see a new `import Revoke from '../src/commands/revoke.js'` and a `'revoke'` entry in the `metadata` record. Commit `commands.gen.ts` with the rest of the spike — it is checked in despite the "do not edit" banner because the standalone-binary build path needs it present at compile time (see the comment in `cli.ts` lines 5-9).
+
+#### 5.8.18.3 The test file — `apps/wallet-cli/src/test/commands/revoke.test.ts`
+
+This file mirrors `send.test.ts` exactly — same `MockServer` + route fixtures, same `runCli` helper, same `WALLET_CLI_MOCK_DMK` + `WALLET_CLI_MOCK_APP_RESULTS` env wiring. The four cases listed in 5.8.10 are all dry-run-anchored, which matches what `send.test.ts` actually does in the current tree. The "signed flow with broadcast" case extends past what `send.test.ts` currently exercises and is flagged as such below.
+
+```ts
+// apps/wallet-cli/src/test/commands/revoke.test.ts
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import { MockServer } from "../helpers/mock-server";
+import { runCli } from "../helpers/cli-runner";
+import { ETH_SYNC_ROUTES } from "../helpers/eth-sync-routes";
+import { MOCK_ETH_DESCRIPTOR, MOCK_ETH_ADDRESS, MOCK_ETH_PUBKEY } from "../helpers/constants";
+
+// USDC on Ethereum mainnet.
+const USDC_TOKEN_ID = "ethereum/erc20/usd__coin";
+const USDC_CONTRACT = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
+const SPENDER = "0x58df81bababd293aaca0a3a76d70d3b69b25c1cf";
+const FAKE_TX_HASH = "0x" + "a".repeat(64);
+
+// Routes mirror send.test.ts's SEND_ROUTES — the revoke flow makes the same calls
+// (sync, balance, nonce, gas estimation, gas barometer). Override the default
+// zero-balance route so the bridge does not raise NotEnoughBalance for fees.
+const REVOKE_ROUTES = [
+  {
+    method: "GET",
+    match: /\/address\/[^/]+\/balance$/,
+    response: { balance: "1000000000000000000" }, // 1 ETH for gas
+  },
+  ...ETH_SYNC_ROUTES,
+  {
+    method: "GET",
+    match: /\/address\/[^/]+\/nonce$/,
+    response: { address: MOCK_ETH_ADDRESS, nonce: 0 },
+  },
+  {
+    method: "POST",
+    match: /\/tx\/estimate-gas-limit/,
+    response: { estimated_gas_limit: "60000" }, // approve gas, higher than a bare transfer
+  },
+  {
+    method: "GET",
+    match: /\/gastracker\/barometer/,
+    response: { low: "1", medium: "2", high: "3", next_base: "1" },
+  },
+];
+
+const baseEnv = (port: number) => ({
+  WALLET_CLI_MOCK_PORT: String(port),
+  WALLET_CLI_MOCK_DMK: "1",
+  WALLET_CLI_MOCK_APP_RESULTS: JSON.stringify({
+    Ethereum: { publicKey: MOCK_ETH_PUBKEY, address: MOCK_ETH_ADDRESS },
+  }),
+});
+
+describe("revoke command", () => {
+  const server = new MockServer(REVOKE_ROUTES);
+
+  beforeAll(() => server.start());
+  afterAll(() => server.stop());
+
+  it("dry-run: builds approve(spender, 0) calldata and emits a JSON envelope", async () => {
+    const { stdout, exitCode, stderr } = await runCli(
+      [
+        "revoke",
+        "--account", MOCK_ETH_DESCRIPTOR,
+        "--token", USDC_TOKEN_ID,
+        "--spender", SPENDER,
+        "--dry-run",
+        "--output", "json",
+      ],
+      baseEnv(server.port),
+    );
+    expect(exitCode, `stderr: ${stderr}`).toBe(0);
+
+    const data = JSON.parse(stdout);
+    expect(data.command).toBe("revoke");
+    expect(data.network).toBe("ethereum:main");
+    expect(data.dry_run).toBe(true);
+    // The recipient is the token contract — not the spender. This is the load-bearing assertion.
+    expect(data.recipient.toLowerCase()).toBe(USDC_CONTRACT.toLowerCase());
+    expect(data.amount).toMatch(/^0(\.0+)?\s*ETH$/);
+    expect(typeof data.fee).toBe("string");
+  });
+
+  it("rejects an unknown token id with a clean error envelope", async () => {
+    const { stdout, exitCode } = await runCli(
+      [
+        "revoke",
+        "--account", MOCK_ETH_DESCRIPTOR,
+        "--token", "ethereum/erc20/definitely_not_a_token",
+        "--spender", SPENDER,
+        "--dry-run",
+        "--output", "json",
+      ],
+      baseEnv(server.port),
+    );
+    expect(exitCode).not.toBe(0);
+    const err = JSON.parse(stdout);
+    expect(err.ok).toBe(false);
+    expect(err.error.command).toBe("revoke");
+    expect(err.error.message).toMatch(/not found/i);
+  });
+
+  it("rejects a malformed spender address before any network call", async () => {
+    const { stdout, stderr, exitCode } = await runCli(
+      [
+        "revoke",
+        "--account", MOCK_ETH_DESCRIPTOR,
+        "--token", USDC_TOKEN_ID,
+        "--spender", "not-an-address",
+        "--dry-run",
+        "--output", "json",
+      ],
+      baseEnv(server.port),
+    );
+    expect(exitCode).not.toBe(0);
+    // Bunli surfaces zod validation errors before the handler runs, so the message
+    // can land on either stdout (json error envelope) or stderr (bunli's own usage line)
+    // depending on where the validation throws — assert on the union.
+    const combined = stdout + "\n" + stderr;
+    expect(combined).toMatch(/spender|0x|address|hex/i);
+  });
+
+  it("signed flow: emits a broadcasted txHash in the JSON envelope", async () => {
+    // Mirrors the dry-run case but without --dry-run. Mock-DMK signs through the
+    // Ethereum app result fixture; the broadcast endpoint is intercepted to return
+    // FAKE_TX_HASH. NB: this case extends past what send.test.ts currently covers
+    // — see the Verify note below if it fails on your tree.
+    const broadcastServer = new MockServer([
+      ...REVOKE_ROUTES,
+      { method: "POST", match: /\/tx\/send/, response: { result: FAKE_TX_HASH } },
+    ]);
+    await broadcastServer.start();
+    try {
+      const { stdout, exitCode, stderr } = await runCli(
+        [
+          "revoke",
+          "--account", MOCK_ETH_DESCRIPTOR,
+          "--token", USDC_TOKEN_ID,
+          "--spender", SPENDER,
+          "--output", "json",
+        ],
+        baseEnv(broadcastServer.port),
+      );
+      expect(exitCode, `stderr: ${stderr}`).toBe(0);
+      const data = JSON.parse(stdout);
+      expect(data.command).toBe("revoke");
+      expect(data.tx_hash).toBe(FAKE_TX_HASH);
+    } finally {
+      await broadcastServer.stop();
+    }
+  });
+});
+```
+
+A few notes on the test choices:
+
+- **Mock-DMK fixture is identical to send's.** The signing path doesn't care whether the calldata is `transfer(...)` or `approve(...)` — both are EIP-1559 transactions and both go through the same `Ethereum` app result. So `WALLET_CLI_MOCK_APP_RESULTS` reuses send's fixture verbatim.
+- **The recipient assertion is case-insensitive.** `tokenCurrency.contractAddress` is stored in EIP-55 mixed case in the cryptoassets registry, but bridge transformations sometimes lowercase it. The lowercase comparison decouples the test from that incidental detail.
+- **The broadcast route pattern (`/\/tx\/send/`) is a reasonable guess** — the EVM bridge exposes `broadcast` over `coin-evm/src/api`, and the route shape on the mock server mirrors what other EVM bridge tests register. If your tree uses a different path (some chains use `/transactions` or `/send_tx`), update the regex; the assertion on `data.tx_hash === FAKE_TX_HASH` is what matters.
+
+> **Verify:** `send.test.ts` in the current tree only exercises the dry-run case. The signed-flow test above is a deliberate extension past what's currently practiced — if the broadcast intercept proves flaky in CI, downgrade case 4 to a `withSpenderEvent`-style observable assertion or drop it entirely and document the gap in the spike report. The spike's primary deliverable is the report, not 100% test coverage.
+
+#### 5.8.18.4 The bunli generate output
+
+After saving `revoke.ts`, run `pnpm generate` from inside `apps/wallet-cli/`. The bunli codegen rewrites `apps/wallet-cli/.bunli/commands.gen.ts` and adds a `Revoke` import + a `'revoke'` entry in the `modules` and `metadata` records. You do not edit that file manually — the banner at the top is enforced by the codegen. Commit the regenerated file as part of the spike PR; the standalone-binary build (`bun build --compile`) needs it present statically because Bun's bundler cannot follow the dynamic `import()` that Bunli would otherwise use.
+
+#### 5.8.18.5 What's still left as exercise
+
+This reference deliberately stops short of:
+
+- The `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` and `runCli.ts` wrapper layer that desktop/mobile e2e specs actually import (`liveDataCommand`, `parseTokenAllowanceCliOutput`, etc.). The spike report explicitly scoped this out of QAA-615 and into a follow-up — the wallet-cli surface area is the deliverable; the typed wrapper that consumes it is a separate, downstream ticket.
+- The companion `wallet-cli allowance` read command sketched in 5.8.9. Implementing it shadows the work you just did and adds a new external dependency on `getEvmTokenAllowance`.
+- The symmetric `wallet-cli approve --amount N` command floated as 5.8.16 follow-up #2. The legacy CLI's `cli-transaction.ts` already covers it; the spike is "revoke" specifically.
+- The manual sanity run on a real device (5.8.11). Mocked tests prove the wiring; only Speculos or a physical Nano confirms the clear-sign content. The spike report should state explicitly which scenarios were exercised on real hardware and which were not.
+- The spike report itself (5.8.12). The whole point of QAA-615 is the written report — the code is evidence.
+
+#### 5.8.18.6 If your version differs from this one
+
+This is one valid implementation. If your `revoke.ts` compiles, lints under the repo's eslint/biome config, passes the four test cases above with equivalent assertions, and produces an EVM transaction whose `to` is the token contract, `value` is 0, and `data` is `0x095ea7b3` followed by the spender and `0x00…00` — then your version is correct, even if it differs in import order, option naming, error wording, or the exact location of the family check. A common defensible alternative: resolving the token via `findTokenByAddressInCurrency` (Q3 option c) instead of `findTokenById`, which trades the cleaner UX of a token id for the ability to handle tokens not yet in the cryptoassets registry. Apply the Ch 0.4 Rodin classification to your own version honestly: a different choice may be `✓ Justified` in a way this reference's choice is only `~ Contestable`. The spike report is where you record that reasoning — for your reviewer, for the next QA who reads QAA-615, and for the version of you who will look at this code six months from now.
+
 <div class="chapter-outro">
 <strong>Key takeaway.</strong> QAA-615 is small in code (~225 LOC including tests) but large in <em>understanding</em>. The work that earns its keep is the diligence: reading the legacy <code>cli-transaction.ts</code> to internalise the <code>tx.to = tokenContract / tx.value = 0 / tx.data = approveCalldata</code> shape, mapping out the three implementation paths instead of jumping straight at one, choosing Path C with explicit reasoning, writing the spike report, and shipping the PR with the right reviewers. The TypeScript itself follows from those decisions almost mechanically — which is why this chapter handed you scaffolding instead of a finished file. If you wrote the code yourself by working through the Phase TODOs, you now know the wallet-cli stack the way you know the desktop and mobile stacks: from the inside. Chapter 5.9 — Exercises — picks up from here with three companion drills (an <code>allowance</code> read command, a <code>--skip-if-zero</code> idempotency flag, and a <code>--router</code> dynamic-spender lookup) to push the same code further.
 </div>
