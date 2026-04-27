@@ -857,7 +857,7 @@ The **element inspector** is the RN equivalent of the web's DOM inspector: tap a
 ## Mobile Toolchain & Environment Setup
 
 <div class="chapter-intro">
-Unlike desktop E2E — where <code>pnpm i</code> is roughly enough — mobile E2E requires you to install a small operating system's worth of native tooling: Xcode, Android Studio, CocoaPods, Ruby, Bundler, Java, Gradle, adb, simctl, applesimutils, a handful of emulators, and at least one simulator. This chapter is the definitive checklist. If anything breaks during the rest of Part 6, come back here.
+Unlike desktop E2E — where <code>pnpm i</code> is roughly enough — mobile E2E requires you to install a small operating system's worth of native tooling: Xcode, Android Studio, CocoaPods, Ruby, Bundler, Java, Gradle, adb, simctl, applesimutils, a handful of emulators, and at least one simulator. This chapter is the definitive checklist. If anything breaks during the rest of Part 4, come back here.
 </div>
 
 ### 4.4.1 The Toolchain at a Glance
@@ -5081,7 +5081,7 @@ Allure report + Xray execution update
 "Is B2CQA-604 passing on main?"  ◄── single source of truth
 ```
 
-If you skip the Xray link (`$TmsLink("B2CQA-604")`), your test runs but Xray sees nothing. It is **invisible coverage** — a cardinal sin of the onboarding guide's Part 5 and still a cardinal sin here. The B2CQA ID must appear in the spec.
+If you skip the Xray link (`$TmsLink("B2CQA-604")`), your test runs but Xray sees nothing. It is **invisible coverage** — a cardinal sin of the onboarding guide's Part 2 (Allure & Xray) and still a cardinal sin here. The B2CQA ID must appear in the spec.
 
 ### 4.9.2 Picking Up a Ticket
 
@@ -6389,5 +6389,5 @@ You have walked the full mobile E2E stack: React Native primitives, the iOS/Andr
 </div>
 
 <div class="chapter-outro">
-<strong>Part 4 complete.</strong> You own the mobile E2E stack end to end: React Native primitives (<code>View</code>, <code>testID</code>, <code>Platform</code>, <code>Linking</code>), the <code>mise</code>/CocoaPods/<code>adb</code>/<code>ENVFILE</code> toolchain, the Detox matcher-action-expectation DSL, the WebSocket bridge with its ACK protocol, <code>device.reverseTcpPort</code> as the Android glue, the POM hub and <code>@Step</code> decorators, the sharding algorithm with its asymmetric iOS/Android caps, the daily workflow, and one ticket shipped (QAA-702) with a bridge-delivered CSV assertion. <strong>Next: Part 5</strong> steps out of the apps and into the shared runtime — the <strong>Ledger Wallet Components</strong> library and the <strong>Swap Live App</strong> — the two pieces of code that power the swap flow you just tested. Same ticket lifecycle, same Xray traceability, same PR etiquette. The terrain changes; the professionalism does not.
+<strong>Part 4 complete.</strong> You own the mobile E2E stack end to end: React Native primitives (<code>View</code>, <code>testID</code>, <code>Platform</code>, <code>Linking</code>), the <code>mise</code>/CocoaPods/<code>adb</code>/<code>ENVFILE</code> toolchain, the Detox matcher-action-expectation DSL, the WebSocket bridge with its ACK protocol, <code>device.reverseTcpPort</code> as the Android glue, the POM hub and <code>@Step</code> decorators, the sharding algorithm with its asymmetric iOS/Android caps, the daily workflow, and one ticket shipped (QAA-702) with a bridge-delivered CSV assertion. <strong>Next: Part 5</strong> steps off the GUI altogether and onto the command line — the <strong>wallet-cli</strong> workspace that powers test-data hooks like the QAA-615 token-approval revoke we'll need before QAA-613's nightly tests can stay deterministic. Same Bun runtime, same DMK transport, same Bunli command shape — but no UI to drive. Then Part 6 picks up the Swap Live App that exercises everything you've just learned.
 </div>
