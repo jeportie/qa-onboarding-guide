@@ -27,11 +27,7 @@ Without step 1, step 2 fails with `ERC20: insufficient allowance`. Step 1 is **p
 
 That makes the test non-idempotent. The first run approves and swaps. The second run finds the allowance already set and skips the approval step — which means the test no longer exercises the approval flow. Worse, if the test asserts on the approval flow's UI (button labels, modals, gas estimates), it now fails for the wrong reason.
 
-The fix is what Victor proposed in the Slack thread that opened the spike:
-
-> *"yes en gros c'est pcq l'approve du token c'est a faire que 1x. et apres c'est good. donc faut ajouter un hook (before ou after) le test pour clean justement. et je crois que c'est potentiellement possible de faire ca avec le CLI mais faut investiguer."*
-
-Translated: add a before/after hook that revokes the approval. Revoking is just `approve(spender, amount = 0)` — same APDU shape, zero amount. After that the test starts at allowance = 0 every run.
+The fix is to add a **before/after hook** that revokes the approval as part of the test fixture. Revoking is just `approve(spender, amount = 0)` — same APDU shape, zero amount. After the hook runs, the test starts at allowance = 0 every run, regardless of whatever state previous runs left behind.
 
 Why a CLI for that hook and not Playwright?
 
@@ -93,6 +89,8 @@ Conversely, wallet-cli ships things the legacy CLI does not:
 - Do **not** mix the two in a single hook. They have different transport stacks (DMK vs hw-transport-node-hid), different descriptor formats (V1 vs V0), and different Node/Bun runtimes. Sequencing them in one shell script works in development and breaks in CI.
 
 A useful mental model: think of the two CLIs as two generations of the same family tree. The legacy `apps/cli` is the parent, with broad surface and the scars of a 2018-era stack. The new `apps/wallet-cli` is the child, with a narrower surface but a modern runtime. They share a grandparent (`@ledgerhq/live-common`) and that's it. When you read either codebase, ask which generation you're in: V0 descriptors and `hw-transport-*` mean legacy; V1 descriptors and DMK mean new. The two never mix in source code, and they shouldn't mix in your hooks either.
+
+> **Heads-up that surprises most readers:** **the legacy CLI is already wired into both `e2e/desktop/` and `e2e/mobile/` today.** Tests don't shell out to it directly — they go through a shared facade at `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` (high-level helpers like `liveDataCommand`, `getAccountAddress`, `parseTokenAllowanceCliOutput`, `isTokenAllowanceSufficientCommand`) and a sibling `runCli.ts` that does the actual `child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...])`. Test specs declare which CLI calls to run as fixture data: `{ cliCommands: [liveDataCommand(account)] }`. So when wallet-cli ships features like `revoke`, the migration path is to add a parallel `runWalletCli*` family in `runCli.ts` (or a new sibling), expose new wrappers in `cliCommandsUtils.ts`, and let test suites swap fixtures one helper at a time. The CLI part of this guide is therefore not just about the binary — it's about a layer that the test suites have been quietly leaning on for years. Ch 5.7.3 walks the integration in detail.
 
 The R5 wiki research is also worth saying out loud: the GitHub wiki has **zero pages** about wallet-cli, Bunli, DMK, or V1 descriptors. The only CLI page in the wiki (`LLC/LLC:dev-with-cli.md`) still references the deprecated tool and Node 14. You will not find this material on the wiki. This guide and the in-tree READMEs (`apps/wallet-cli/README.md`, `apps/wallet-cli/src/wallet/README.md`, `apps/wallet-cli/src/test/commands/README.md`, `apps/wallet-cli/src/shared/accountDescriptor/README.md`) are the canonical sources.
 
@@ -5161,7 +5159,31 @@ The answers shape the day:
 
 Write the outcome of the recon as 5 bullets in the Jira ticket. Your reviewer reads those bullets and immediately knows why your diff looks the way it does.
 
-### 5.7.3 Picking the Change Shape &mdash; Decision Tree
+### 5.7.3 How the Test Suites Already Use the CLI
+
+Before you decide what shape your change should take, understand the seam your work will plug into. The Desktop and Mobile E2E suites already invoke a CLI — the legacy `apps/cli` for now, with `wallet-cli` slated to take over piece by piece. They go through a shared facade so individual specs never touch `child_process` directly.
+
+**The two-file integration layer**, both inside `libs/ledger-live-common/src/e2e/`:
+
+- **`runCli.ts`** &mdash; the spawning engine. Resolves `LEDGER_LIVE_CLI_BIN = "../../../../apps/cli/bin/index.js"` and uses `child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])` to run the legacy CLI as a subprocess. Public helpers include `runCliLiveData`, `runCliGetAddress`, `runCliGetTokenAllowance`, and `runCliTokenApproval` &mdash; the last two are the read and write halves of allowance management, already shipped in the legacy CLI.
+- **`cliCommandsUtils.ts`** &mdash; the typed wrapper layer. Exposes higher-level helpers: `liveDataCommand(account)` (seeds an account into Live's `app.json`), `liveDataWithAddressCommand`, `getAccountAddress`, `parseTokenAllowanceCliOutput`, `isTokenAllowanceSufficientCommand(account, spenderAddress, minAmount)`. These are the helpers specs actually import.
+
+**How specs consume the layer**:
+
+- *Desktop:* `e2e/desktop/tests/specs/earn.v2.spec.ts` and `newSendFlow.tx.spec.ts` import the helpers directly: `import { liveDataCommand, liveDataWithAddressCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";` and pass them as fixture data — `{ cliCommands: [liveDataCommand(account)] }`. The desktop fixture engine consumes that array and calls each helper before the test starts.
+- *Mobile:* `e2e/mobile/jest.environment.ts:138` does `Object.assign(this.global, cliCommandsUtils);` — every helper becomes a global. `types/global.d.ts:104-110` mirrors that as ambient type declarations. So a mobile spec can just write `await liveDataCommand(account)(userdataPath)` without an import statement, because the Jest environment has injected the function before the spec runs.
+
+**Why this matters for your change**:
+
+1. *If your ticket adds a new wallet-cli command* — for example QAA-615's `revoke` — the test integration is not "done" when the binary works. There is a wire-up step where you add a `runWalletCliRevoke` to `runCli.ts` (or a sibling `runWalletCli.ts` if the team prefers separating the two transports), and a `revokeAllowanceCommand(account, spender)` wrapper to `cliCommandsUtils.ts`. *Then* desktop and mobile specs can use it via the existing fixture mechanisms.
+2. *If your ticket touches a flow that already has a legacy-CLI helper* — for example anything calling `liveDataCommand` — note that today's traffic still goes through `apps/cli`. Don't quietly break that. Until the wallet-cli wrapper lands, both transports may need to coexist for a release or two.
+3. *If your ticket is wallet-cli-only* — a feature that legacy CLI doesn't have and isn't supposed to gain — you can skip the wire-up step. Document explicitly in the spike report that no test-integration is in scope.
+
+**The migration trajectory**: as wallet-cli grows feature parity, helpers in `cliCommandsUtils.ts` migrate one at a time to point at the new transport. Migration is per-helper, never wholesale. The end state is `runCli.ts` deprecated, `cliCommandsUtils.ts` fully wallet-cli-backed, legacy `apps/cli` still on disk for the handful of niche features it owns (Speculos `bot`, app management, firmware ops). That migration is gradual and — explicitly — out of scope for any single QAA ticket.
+
+When you size your work, remember the integration layer is its own scope. A "small" CLI command change can imply a non-trivial test-integration update if specs already consume the helper you're touching.
+
+### 5.7.4 Picking the Change Shape &mdash; Decision Tree
 
 Most CLI tickets fit into one of three shapes. Pick the smallest that satisfies the AC. Anything bigger is over-engineered.
 
@@ -5204,7 +5226,7 @@ Concrete examples:
 
 QAA-615's sweet spot is the third row (wrapper). The EVM intent already accepts `--data` (see Ch 5.4); a `revoke` wrapper builds the calldata and forwards. That's why R1's headline finding stands: revoke is a thin wrapper, not new infrastructure.
 
-### 5.7.4 Local Iteration Loop
+### 5.7.5 Local Iteration Loop
 
 The CLI's edit-run-edit cycle is the fastest of any surface in this guide. There is no Metro bundler, no app to relaunch, no Detox build &mdash; just `bun run`. Aim for **sub-second feedback**.
 
@@ -5242,7 +5264,7 @@ $EDITOR src/commands/revoke.ts
 
 If a single change requires more than 30 s to validate, you are doing too much per iteration. Shrink the change.
 
-### 5.7.5 Writing Tests as You Go &mdash; TDD-Lite
+### 5.7.6 Writing Tests as You Go &mdash; TDD-Lite
 
 The wallet-cli test harness is mature enough that **mocked tests must come first**. The pattern is canonical TDD-lite (red &rarr; green &rarr; refactor) but tightened for CLI:
 
@@ -5269,7 +5291,7 @@ Assert exactly two things per test, no more:
 
 Three or more assertions per test is a smell &mdash; split the test.
 
-### 5.7.6 Smoke Against a Real Device
+### 5.7.7 Smoke Against a Real Device
 
 Only after the mocked tests are green do you plug a device in. Real-device smoke is **not a substitute** for mocked tests; it is the final acceptance check that the APDU shape your mock asserted matches what the embedded app actually expects.
 
@@ -5291,7 +5313,7 @@ The pattern is: every device-touching invocation gets the flag; every mocked tes
 
 After the run, **verify the clear-sign content on device**. The Ethereum app should display the calldata fields decoded by the ERC-7730 metadata service (DMK fetches them; see Ch 5.5 and the DMK overview in R4 §A.3). If the device shows a raw hex blob, that's blind-sign mode &mdash; either the metadata is missing for the contract or the origin token is not embedded. Note it in the ticket; do not silently approve.
 
-### 5.7.7 Codegen Check
+### 5.7.8 Codegen Check
 
 If you added or removed a command file under `src/commands/`, you **must** run codegen and commit the result:
 
@@ -5311,7 +5333,7 @@ Common gotchas:
 
 Treat `pnpm generate` like an autoformatter: run it whenever you change command file structure, commit the result, never edit the output by hand.
 
-### 5.7.8 Lint and Typecheck
+### 5.7.9 Lint and Typecheck
 
 The wallet-cli uses `oxlint` (linter) and `oxfmt` (formatter) &mdash; the Rust-toolchain replacements for ESLint and Prettier. They are 10&ndash;100x faster, which is why the workspace adopted them, and they share a config with the rest of the monorepo (`.oxlintrc.json` and `.oxfmtrc.json` at the package root, plus a shared `../../.oxfmtrc.json`).
 
@@ -5332,7 +5354,7 @@ pnpm lint && pnpm typecheck && pnpm test
 
 If `lint` complains and you genuinely cannot fix it (rare &mdash; the rules are deliberate), prefer a single-line `// oxlint-disable-next-line <rule>` over disabling at file scope. Reviewers will ask why you disabled the rule.
 
-### 5.7.9 Session Storage and Labels &mdash; Currently In Flight
+### 5.7.10 Session Storage and Labels &mdash; Currently In Flight
 
 This subsection is **informational, not load-bearing**. The wallet-cli's persistent state layout is in active flux between two designs. Do not depend on either path in tests &mdash; the tests redirect via `XDG_STATE_HOME` and a tmpdir (see `test/helpers/session-fixture.ts`, Ch 5.6).
 
@@ -5374,7 +5396,7 @@ with an open question about whether `deviceId` lives inside the descriptor (Solu
 
 This is an **honest gap**, not a bug. The codebase has the right indirection (`stateDir(APP_NAME)`) so that flipping to the ADR path is a one-line change.
 
-### 5.7.10 Commit and PR
+### 5.7.11 Commit and PR
 
 Conventional Commits, scoped to `cli`:
 
@@ -5416,7 +5438,7 @@ PR description checklist (paraphrased from the global PR template):
 
 For ticket flow detail (assignee transitions, "In Code Review" status moves, the `/create-pr` skill), see Part 0 Ch 0.5.
 
-### 5.7.11 Reviewer Routing
+### 5.7.12 Reviewer Routing
 
 Always look up the live owners in `.github/CODEOWNERS` &mdash; do not paste a stale list from this guide.
 
@@ -5440,7 +5462,7 @@ GitHub's branch protection auto-requests owners. Sanity-check that the list cont
 
 If the auto-request misses an owner you know should be there (because their CODEOWNERS rule is stale or your diff is novel), add them manually. Reviewers prefer being added explicitly to discovering a stealth diff three days later.
 
-### 5.7.12 Chapter 5.7 Quiz
+### 5.7.13 Chapter 5.7 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz &mdash; Daily CLI Workflow</h3>
@@ -5555,13 +5577,9 @@ Read it twice. Three things are worth pausing on before you write a line of code
 
 ### 5.8.2 Why This Matters — the regression-suite vs nightly distinction
 
-Victor's Slack message on 2026-04-24, in French, sets the architectural picture:
+The architectural picture is simple: a token approve only needs to happen *once* per address-spender pair. After it's set, every subsequent test that exercises the approval flow finds the allowance already in place and produces a different on-device screen than a first-time approval. The fix is a before/after hook (around the test, not inside it) that sets the allowance back to zero between runs. The CLI is the right tool for that hook — small, scriptable, fast, and free of any GUI dependency.
 
-> "yes en gros c'est pcq l'approve du token c'est a faire que 1x. et apres c'est good. donc faut ajouter un hook (before ou after) le test pour clean justement. et je crois que c'est potentiellement possible de faire ca avec le CLI mais faut investiguer."
-
-Translated: *"yes basically because the token approve only needs to be done once. After that it's good. So we need to add a before/after hook to the test to clean up. And I think it's potentially possible to do this with the CLI but it needs investigation."*
-
-That message is your charter. Two suites, two behaviours:
+Two suites, two behaviours:
 
 1. **The nightly suite (QAA-613)** — broadcast disabled. The Detox/Speculos test boots, fakes its way through the approve+swap signature flow on a synthetic chain that never receives the broadcast. On-chain allowance is never actually mutated. The next nightly run starts from the same on-chain state because nothing was published. **Revoke is not strictly necessary here** — the test starts each night from a clean slate by virtue of broadcast=off.
 2. **The broadcast-enabled regression suite** — broadcast on. The same test code, but pointing at a real testnet (or, occasionally, mainnet on a test seed) where the broadcast actually publishes. The first run leaves an `approve(router, N)` on chain. The second run's `approve` no-ops on the device's UI ("you already approved this") and the test misreads the state. The suite is no longer deterministic. **Revoke is the cleanup hook** that pulls the on-chain allowance back to zero so the next iteration is identical to the first.
@@ -5684,6 +5702,17 @@ wallet-cli send ethereum-1 \
 
 That command builds and broadcasts an approve(0x58df…, 0) on USDT mainnet. If you wonder *why are we even writing a revoke command then?* — keep reading. Section 5.8.4 unpacks why this is fine for a debugging session and unfit for a regression-suite hook.
 
+**The test-integration layer — already wired in for the legacy CLI.**
+
+Both `e2e/desktop/` and `e2e/mobile/` already shell out to the legacy `apps/cli` through a shared facade:
+
+- `libs/ledger-live-common/src/e2e/runCli.ts` — spawns `node apps/cli/bin/index.js <args>`. Public helpers include `runCliLiveData`, `runCliGetAddress`, `runCliGetTokenAllowance`, **`runCliTokenApproval`** (yes — the legacy CLI already has approve and revoke modes; that's where the spike's reference implementation comes from).
+- `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` — the typed wrapper layer specs actually import. Exposes `liveDataCommand(account)`, `getAccountAddress(account)`, `parseTokenAllowanceCliOutput(output)`, `isTokenAllowanceSufficientCommand(account, spender, minAmount)`. The `parse*` helper is your blueprint for the JSON-envelope-aware revoke companion in 5.8.9.
+- Desktop specs import from `@ledgerhq/live-common/e2e/cliCommandsUtils` and pass commands as fixture data: `{ cliCommands: [liveDataCommand(account)] }`. See `e2e/desktop/tests/specs/earn.v2.spec.ts` for a working example.
+- Mobile specs do not import — `e2e/mobile/jest.environment.ts:138` does `Object.assign(this.global, cliCommandsUtils)`, making every helper a global. `types/global.d.ts:104-110` mirrors this with ambient types.
+
+This layer is the **integration target for your `wallet-cli revoke`**. Once Path C lands, the next step (separately scoped — flag in your spike report) is to add a `runWalletCliRevoke` to `runCli.ts` (or a parallel `runWalletCli.ts` if reviewers prefer separating the two transports), then expose a `revokeAllowanceCommand(account, spender)` wrapper from `cliCommandsUtils.ts`. Desktop fixtures pick it up via the existing `cliCommands: [...]` array; mobile picks it up via the global injection. Specs migrate one helper at a time. Don't try to migrate the whole layer in this PR — keep it scoped to revoke.
+
 ### 5.8.4 Picking the Implementation Path
 
 R2's spike report compares three paths. Read it in full at `_r2_revoke_spike.md` before committing — these are summaries, not substitutes. The three options:
@@ -5696,7 +5725,7 @@ R2's spike report compares three paths. Read it in full at `_r2_revoke_spike.md`
 
 R2's recommendation: **Path C**. Rationale:
 
-- ✓ Justified — Path B is implemented but its UX is unfit for unattended hooks (long hex strings, no semantic logging, easy footgun). Victor's hook framing is the load-bearing constraint and rules out B.
+- ✓ Justified — Path B is implemented but its UX is unfit for unattended hooks (long hex strings, no semantic logging, easy footgun). The before/after-hook framing is the load-bearing constraint and rules out B.
 - ✓ Justified — Path C reuses 100% of the signing/broadcast plumbing. The new code is a *command shell*, not a new wallet path.
 - ~ Contestable — Paths A and C are technically equivalent; the distinction is whether you also factor out a shared `runEvmContractCall(intent)` helper. R2 defers that until `approve` lands so the abstraction is informed by 3 callers (send, approve, revoke), not 2.
 - ✗ Unjustified — adding a new EVM transaction `mode` discriminator (`"approve"` | `"revoke"`) to either coin-evm or the wallet-cli intent schema. The clear-sign decoder already keys off the calldata selector and the bridge already routes `data` correctly. A new `mode` would be premature uniformity with no UX gain.
@@ -6040,6 +6069,9 @@ in a shell, or as a child process from the QAA-613 test harness. JSON output mod
 recipient, amount, txHash }` suitable for `jq` parsing.
 
 ## What is NOT covered (out of scope for QAA-615)
+- The `cliCommandsUtils.ts` wire-up (a `revokeAllowanceCommand` wrapper backed by a new
+  `runWalletCliRevoke` engine in `runCli.ts`). Without it, this binary is shipped but not
+  consumed by any spec yet. Recommended as the immediate follow-up ticket.
 - Dynamic spender lookup from a known-DEX registry (e.g., resolve `--router uniswap-v3` to the
   current Uniswap V3 router address). Currently the user must pass the address.
 - Auto token registry — if the token isn't in `cryptoassets`, the command errors. Adding
@@ -6049,10 +6081,15 @@ recipient, amount, txHash }` suitable for `jq` parsing.
   ~70 LOC given the same helper).
 
 ## Recommended next steps
-1. Land `wallet-cli allowance` so QAA-613's hook can verify revoke worked, not just trust it.
-2. Wire `wallet-cli revoke` into QAA-613's `beforeEach` once that ticket starts.
-3. Expand the token registry / accept raw `--contract` for tokens not yet in the registry.
-4. Track the same pattern for ERC-721 and ERC-1155 (NFT) approvals, since
+1. Wire `wallet-cli revoke` into `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` so
+   desktop and mobile specs can consume it via the existing `cliCommands: [...]` fixture
+   pattern (mobile picks it up automatically through the global injection at
+   `e2e/mobile/jest.environment.ts:138`). Add a `runWalletCliRevoke` to `runCli.ts` (or a
+   parallel `runWalletCli.ts`) and a `revokeAllowanceCommand(account, spender)` wrapper.
+2. Land `wallet-cli allowance` so QAA-613's hook can verify revoke worked, not just trust it.
+3. Wire `wallet-cli revoke` into QAA-613's `beforeEach` once that ticket starts.
+4. Expand the token registry / accept raw `--contract` for tokens not yet in the registry.
+5. Track the same pattern for ERC-721 and ERC-1155 (NFT) approvals, since
    `setApprovalForAll` will eventually have the same regression-suite need.
 
 ## Evidence
@@ -6076,7 +6113,7 @@ The PR for QAA-615 should be small, isolated, and easy to review. Suggested comm
 
 **Reviewers:**
 - One owner of `apps/wallet-cli` (look at the most recent merged PRs to identify; usually `@ledgerhq/wallet-xp` or whatever team owns the wallet-cli workspace today).
-- The QAA SDET who will consume the command for QAA-613 — Victor, since he raised the requirement.
+- The QAA SDET who will consume the command for QAA-613 (the engineer who raised the hook requirement on the parent ticket).
 - Optionally, an EVM family owner if your PR touches `coin-evm` (it shouldn't, but if you decide to expose a new helper from the EVM logic module, this becomes mandatory).
 
 **PR title suggestion:** `feat(cli): add revoke command for ERC-20 token approvals (QAA-615 spike)`
@@ -6137,19 +6174,21 @@ Two important nuances:
 
 ### 5.8.16 Going Further
 
-Once `revoke` is shipping and being consumed by QAA-613's hook, the natural follow-ups split into four categories. None of these are in scope for QAA-615; all are reasonable items to file as new tickets.
+Once `revoke` is shipping and being consumed by QAA-613's hook, the natural follow-ups split into five categories. None of these are in scope for QAA-615; all are reasonable items to file as new tickets.
 
-**1. Companion `approve` command.** Symmetric to revoke but takes `--amount N` (or the literal `unlimited`, mapping to `2^256 - 1`). Reuses the same `getErc20ApproveData` helper with a non-zero amount. Estimated ~70 LOC. Useful for the regression suite's *setup* phase: pre-load an allowance before a swap test starts, so the test exercises the swap path rather than the approve path.
+**1. Wire `revoke` into `cliCommandsUtils.ts`.** This is the most consequential follow-up. Today QAA-613 (and every other test that needs a CLI fixture) goes through `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` — and that wrapper points at the legacy `apps/cli`. To make `wallet-cli revoke` consumable from desktop and mobile specs, you add a `runWalletCliRevoke` engine to `runCli.ts` (or a sibling `runWalletCli.ts` if reviewers prefer separating transports), then expose a `revokeAllowanceCommand(account, spender)` wrapper from `cliCommandsUtils.ts`. Desktop specs pick it up via `{ cliCommands: [revokeAllowanceCommand(account, router)] }`; mobile picks it up automatically because `jest.environment.ts` injects all `cliCommandsUtils` exports as globals. Estimated ~80 LOC across the two files plus tests. Without this step, `wallet-cli revoke` is shipped but unconsumed — the spike's binary deliverable does not become test infrastructure until the wrapper layer points at it.
 
-**2. Dynamic spender lookup.** Instead of `--spender 0x...` (raw address), accept `--router uniswap-v3` (provider name), and resolve internally to the current router address per (chain, version). Source of truth: `swap-configuration` repo. Pro: hooks become readable (`--router uniswap-v3` instead of a 40-hex-char blob). Con: introduces a network/config dependency on a moving target. File this as a separate ticket so the tradeoff is explicit.
+**2. Companion `approve` command.** Symmetric to revoke but takes `--amount N` (or the literal `unlimited`, mapping to `2^256 - 1`). Reuses the same `getErc20ApproveData` helper with a non-zero amount. Estimated ~70 LOC. Useful for the regression suite's *setup* phase: pre-load an allowance before a swap test starts, so the test exercises the swap path rather than the approve path.
 
-**3. Batch revoke.** Take a comma-separated `--spender 0xA,0xB,0xC` (or read a file) and emit one transaction per spender. Useful when a single test wipes multiple stale allowances at once. Each transaction is signed individually (no EIP-3074 / batched-tx assumptions); the device prompts once per signature. Pseudo-cost: linear in number of spenders, both in gas and in user-tap effort if running on a real device. Acceptable for CI on Speculos, painful for a human.
+**3. Dynamic spender lookup.** Instead of `--spender 0x...` (raw address), accept `--router uniswap-v3` (provider name), and resolve internally to the current router address per (chain, version). Source of truth: `swap-configuration` repo. Pro: hooks become readable (`--router uniswap-v3` instead of a 40-hex-char blob). Con: introduces a network/config dependency on a moving target. File this as a separate ticket so the tradeoff is explicit.
 
-**4. `--unlimited` toggle on `approve`.** Sets the allowance to `2^256 - 1`, which the device's clear-sign decoder renders as "Unlimited <ticker>". Useful for tests that need a "rich" account that can swap any amount without hitting allowance bounds. Already documented in `cli-transaction.ts:37` (`UNLIMITED_APPROVAL_AMOUNT = 2n ** 256n - 1n`). One-flag addition once `approve` lands.
+**4. Batch revoke.** Take a comma-separated `--spender 0xA,0xB,0xC` (or read a file) and emit one transaction per spender. Useful when a single test wipes multiple stale allowances at once. Each transaction is signed individually (no EIP-3074 / batched-tx assumptions); the device prompts once per signature. Pseudo-cost: linear in number of spenders, both in gas and in user-tap effort if running on a real device. Acceptable for CI on Speculos, painful for a human.
 
-A practice question to test your understanding: of these four, which one is closest to "free" (smallest review surface, biggest test-suite leverage)? Stop reading and answer before continuing.
+**5. `--unlimited` toggle on `approve`.** Sets the allowance to `2^256 - 1`, which the device's clear-sign decoder renders as "Unlimited <ticker>". Useful for tests that need a "rich" account that can swap any amount without hitting allowance bounds. Already documented in `cli-transaction.ts:37` (`UNLIMITED_APPROVAL_AMOUNT = 2n ** 256n - 1n`). One-flag addition once `approve` lands.
 
-> **Answer.** `approve` (item 1). The helper is already in your hand from QAA-615; the command is a 70-LOC clone of `revoke` with one extra option. Once `approve` ships, items 3 and 4 fall out almost for free (batch is a loop, `--unlimited` is one constant). Item 2 is the most useful but the most expensive — it ties wallet-cli to the swap config repo, which is its own moving target.
+A practice question to test your understanding: of these five, which one is closest to "free" (smallest review surface, biggest test-suite leverage)? Stop reading and answer before continuing.
+
+> **Answer.** Item 1 (the `cliCommandsUtils.ts` wire-up) is the highest leverage — without it, your spike's binary work does not reach the test suites it was scoped to serve. Item 2 (`approve`) is the closest to "free" in terms of code reuse — the helper is already in your hand from QAA-615, and the command is a 70-LOC clone of `revoke` with one extra option. Once `approve` ships, items 4 and 5 fall out almost for free (batch is a loop, `--unlimited` is one constant). Item 3 is the most useful but the most expensive — it ties wallet-cli to the swap config repo, which is its own moving target.
 
 ### 5.8.17 Chapter 5.8 Quiz
 
@@ -6166,7 +6205,7 @@ A practice question to test your understanding: of these four, which one is clos
 <button class="quiz-choice" data-value="C">C) The nightly QAA-613 suite runs broadcast-disabled, so on-chain allowance never moves and revoke isn't strictly needed for it; the broadcast-enabled regression suite (parent epic QAA-919) does mutate on-chain state, so it needs revoke as a cleanup hook to keep iterations deterministic</button>
 <button class="quiz-choice" data-value="D">D) Speculos cannot run during nightly windows</button>
 </div>
-<p class="quiz-explanation">The load-bearing constraint is the broadcast switch. Nightly = broadcast off = no state to clean. Regression = broadcast on = state must be reset between runs. Revoke is for the second case. Victor's Slack message frames the command as a `before/after` hook for exactly this reason.</p>
+<p class="quiz-explanation">The load-bearing constraint is the broadcast switch. Nightly = broadcast off = no state to clean. Regression = broadcast on = state must be reset between runs. Revoke is for the second case, used as a before/after hook around the test so each iteration starts from a known-clean allowance.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
@@ -6177,7 +6216,7 @@ A practice question to test your understanding: of these four, which one is clos
 <button class="quiz-choice" data-value="C">C) Path B requires changes to the EVM intent schema</button>
 <button class="quiz-choice" data-value="D">D) Path B is slower at runtime</button>
 </div>
-<p class="quiz-explanation">Path B is functionally correct — the example invocation in 5.8.3 produces a real revoke transaction. But the regression-suite hook context (Victor's "ajouter un hook before/after le test") is the load-bearing constraint. Hooks run unattended, must be greppable, and must not silently no-op or produce the wrong transaction when an author mistypes a digit. Path B fails all three; Path C addresses all three.</p>
+<p class="quiz-explanation">Path B is functionally correct — the example invocation in 5.8.3 produces a real revoke transaction. But the regression-suite hook context (a before/after hook running around every iteration of the swap test) is the load-bearing constraint. Hooks run unattended, must be greppable, and must not silently no-op or produce the wrong transaction when an author mistypes a digit. Path B fails all three; Path C addresses all three.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
@@ -6720,12 +6759,13 @@ how does QAA-613 consume it?</p>
 <p class="quiz-explanation">Chapter 5.10 documents the full QAA-615 spike:
 Path 3 wins because it gives users a clean <code>wallet-cli revoke</code> UX
 while keeping a single calldata builder shared with <code>approve</code>.</p>
-<p class="quiz-explanation">The hook pattern matches Victor's confirmation in
-the briefing — the approve only needs to happen once, and a before/after hook
-calling the CLI keeps the regression suite re-runnable. Nightly QAA-613 runs
-with broadcast disabled do not strictly need revoke (allowance never moves
-on-chain), but the broadcast-enabled regression suite does, and the same
-fixture serves both.</p>
+<p class="quiz-explanation">The hook pattern follows from a single
+fact about ERC-20 allowances: an approve only needs to happen once per
+address-spender pair, and a before/after hook calling the CLI is what keeps
+the regression suite re-runnable. Nightly QAA-613 runs with broadcast
+disabled do not strictly need revoke (allowance never moves on-chain), but
+the broadcast-enabled regression suite does, and the same fixture serves
+both.</p>
 <p class="quiz-explanation">The hook is a thin shell-out via
 <code>Bun.spawn</code> from the test setup, capturing exit code and stderr; on
 non-zero exit the test fails fast rather than running against a polluted
