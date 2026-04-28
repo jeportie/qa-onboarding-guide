@@ -60,7 +60,7 @@ Every chapter builds on the previous one. Each ends with an interactive quiz (80
 | **2** | [Shared Tooling](part2.md) | 2.1-2.5 | Git + changesets, pnpm/Turbo, Speculos device emulation, Firebase & feature flags, Allure & Xray |
 | **3** | [Desktop E2E](part3.md) | 3.1-3.10 | Desktop architecture + first test, Playwright zero-to-advanced, Electron, codebase catalog, daily workflow, QAA-1139 & QAA-1141 walkthroughs, exercises |
 | **4** | [Mobile E2E](part4.md) | 4.1-4.11 | Mobile architecture + first test, React Native primer, mobile toolchain, Detox zero-to-advanced, bridge + POMs, daily workflow, QAA-702 walkthrough, exercises |
-| **5** | [CLI Automation](part5.md) | 5.1-5.9 | wallet-cli & Bun/Bunli primer, Device Management Kit, codebase deep dive, account descriptors V1, mock-DMK testing, daily CLI workflow, QAA-615 spike walkthrough |
+| **5** | [CLI Automation](part5.md) | 5.1-5.9 | apps/cli (the canonical QAA CLI), ERC-20 approvals + revokes blockchain primer, manual revoke tools, the five-layer integration, Speculos lifecycle, broadcast discipline, daily CLI workflow, QAA-615 walkthrough |
 | **6** | [Swap Live App](part6.md) | 6.1-6.4 | Live Apps in Ledger Wallet, Swap architecture, releases & Firebase environments, QAA-1136 walkthrough |
 | **7** | [Mastery & Contributing](part7.md) | 7.1-7.4 | Test strategy & best practices, cross-platform debugging, CI/CD & test sharding, AI agents & automation |
 | **A** | [Appendix](appendix.md) | A-G | Commands, env vars, Ledger Live stack, devices, troubleshooting FAQ, git cheat sheet, glossary |

@@ -1,385 +1,404 @@
 # PART 5 — CLI AUTOMATION
 
-You finished Part 4 standing on a Detox simulator with a WebSocket bridge between your test process and a React Native app. Part 5 walks off that stack altogether. There is no UI to drive, no Speculos container to spawn, no bridge to inject state. There is a real Ledger over USB, a Bun process, and a command line. The QA value is the same: deterministic test data on demand.
+Part 5 covers the CLI surface QAA owns: `apps/cli`, the typed wrappers around it, the Speculos device-tap layer that drives signing, and the broadcast discipline that keeps regression tests deterministic. Ten chapters; this fragment contains the first two — the framing chapter (5.1) and the blockchain primer (5.2). Read them in order; everything after assumes the vocabulary established here.
 
----
+The reference branch for everything in Part 5 is `support/qaa_add_revoke_token` at commit `4fa4868a35`, authored by Abdurrahman SASTIM. Three small files, thirty-seven lines added — the canonical example of "do one thing well" in QAA tooling. By the end of the part you should be able to read those three files at a glance and know exactly which layer each line touches.
 
-## CLI Automation -- Architecture Deep Dive
+## CLI in QA — apps/cli is the canonical CLI
 
 <div class="chapter-intro">
-The mobile suite gave you a third surface — a React Native app, native builds, and a bridge to inject state. The CLI is your fourth surface and the cleanest. There is no app, no UI, no bridge. The Ledger device <em>is</em> the UI: the screen and two buttons (or the touchscreen) are the only confirmation surface, and a Bun process talks to that device over USB through the Device Management Kit. This chapter places <code>wallet-cli</code> in the monorepo, contrasts it with the legacy <code>apps/cli</code>, explains why a CLI part exists in this guide at all, and warns you about the footguns before you run a single command.
+You have learned the desktop E2E surface (Part 3) and the mobile E2E surface (Part 4). This chapter introduces the third surface QAA owns: the command-line interface. The CLI is not a product the customer touches — it is internal test-data infrastructure. It seeds accounts, reads device addresses, queries on-chain allowances, and signs approve / revoke transactions. The QAA-canonical binary is <code>apps/cli</code>; <code>apps/wallet-cli</code> is experimental and out of scope for this part.
 </div>
 
-### 5.1.1 What you'll learn
+### 5.1.1 What this part teaches and why a third E2E surface
 
-You'll learn that wallet-cli is the third E2E flavour after Desktop and Mobile, but inverted: the device replaces the application, the application is missing entirely, and the same DMK + USB transport that ships inside Ledger Live ships here too. You'll learn where it sits in the monorepo, why it exists, and which of its sharp edges to avoid.
+Parts 3 and 4 covered the two product-facing E2E suites: Playwright drives Ledger Live Desktop, Detox + Jest drives Ledger Live Mobile. Both can tap UI elements and read screens. Neither can cheaply seed an account, query an ERC-20 allowance, or burn a deterministic on-chain transaction before a test runs. That is why a third surface exists: the CLI.
 
-### 5.1.2 Why a CLI in QA at all
+### 5.1.2 Why a CLI in QA
 
-Your first instinct after Part 4 is probably "I already have Detox and Playwright; why would I want a CLI?" The answer is that the CLI is **test-data infrastructure**, not a third E2E framework competing with the first two. It does the things Playwright and Detox do badly.
+The CLI is test-data infrastructure. Three jobs are easier in a CLI subprocess than in a UI driver.
 
-The triggering ticket — **QAA-615** "Spike: Revoke token approval using CLI" — is the canonical example. The QAA team is automating the swap regression suite. To swap an ERC-20 token through a DEX (Thorchain, Uniswap, LiFi), the user has to sign two transactions on the device:
+**Test-data seeding.** A swap test needs an Ethereum account with a known balance, a known token balance, a known address, and a known derivation path. Building that state through the UI takes minutes per test and breaks every time a screen changes. The CLI builds it in one subprocess call, decoupled from the UI. Concretely: `liveDataCommand(account)` writes a JSON userdata file that the desktop app reads at launch, and the app boots straight into the prepared state. The UI driver never has to click through "Add account → Choose currency → Choose derivation → Confirm" four times before each test. That preparation cost — measured in tens of seconds per account, multiplied by every spec — collapses into a single subprocess call.
 
-1. `approve(spender = DEX_router, amount = N)` — gives the DEX contract permission to withdraw `N` tokens from the user's address.
-2. The actual swap transaction.
+**Allowance state determinism.** ERC-20 allowances live on-chain. They survive simulator restarts, repo re-clones, and CI runners. A nightly run that broadcasts an `approve(spender, 100)` leaves `allowance[seed][spender] = 100` permanently. The next run's "fresh approval" device screen reads "you already approved 100 — approve more?" and any test that asserts "Approve 100 USDC" content will fail. Manual recovery via revoke.cash is the human fallback (Chapter 5.3); the CLI hook is the automated one. This is the headline reason QAA-615 exists, and it's why Chapter 5.2 spends time on the storage model — without that mental picture, the determinism problem looks like a flaky test rather than a structural reality. There is no shortcut around this; you cannot "reset the chain" between test runs. You can only reset the slots you touch.
 
-Without step 1, step 2 fails with `ERC20: insufficient allowance`. Step 1 is **persistent on-chain state**: once the user has approved the DEX router, the allowance is recorded inside the ERC-20 token contract under the user's address. It does not reset when the test ends. It does not reset when you reboot the simulator. It sits on-chain until somebody explicitly sets it back to zero.
+**One-shot operations Playwright and Detox shouldn't do.** Reading a device address, signing a single revoke transaction, broadcasting it, and exiting is five lines of CLI. It is fifty lines of Page Object Model with a Speculos device dance. Use the right tool: UI drivers for UI behaviour, CLI for state operations. The CLI is also the only place where a non-product code path can reasonably live — the harness can call `tokenAllowance` to make a routing decision (skip the device dance if allowance is already sufficient) without polluting the desktop or mobile app with test-only code. This separation of concerns — product code stays product-only, test-only utilities live in `apps/cli` and `cliCommandsUtils.ts` — is one of the reasons the codebase stays maintainable.
 
-That makes the test non-idempotent. The first run approves and swaps. The second run finds the allowance already set and skips the approval step — which means the test no longer exercises the approval flow. Worse, if the test asserts on the approval flow's UI (button labels, modals, gas estimates), it now fails for the wrong reason.
+In short: the UI drivers test what the user does; the CLI prepares the world the user does it in. Confusing the two — trying to revoke through the UI, or trying to verify swap UI through CLI subprocesses — wastes test time and produces fragile suites.
 
-The fix is to add a **before/after hook** that revokes the approval as part of the test fixture. Revoking is just `approve(spender, amount = 0)` — same APDU shape, zero amount. After the hook runs, the test starts at allowance = 0 every run, regardless of whatever state previous runs left behind.
+### 5.1.3 The two CLIs — apps/cli vs apps/wallet-cli
 
-Why a CLI for that hook and not Playwright?
+The monorepo contains two CLI applications. **Only `apps/cli` is the QAA canonical CLI.** Use it. Teach it. Read its source.
 
-- **No UI overhead.** A revoke is one transaction on one account. Driving it through Live's UI means: launch the Electron binary, wait for the bridge, navigate to the swap page, click "manage allowances", confirm on Speculos, wait for broadcast, parse the receipt. That's 60+ seconds and ten flaky waits. A CLI command does it in three seconds.
-- **No app build.** You can revoke an allowance without building Live Desktop or Live Mobile. That matters for a hook that runs before every regression test on every CI shard.
-- **One-shot data ops are not what test runners are for.** Playwright's job is to drive a user-facing UI and assert visible state. Hammering it into a "broadcast a transaction" tool produces tests that are slow, brittle, and impossible to read. The CLI is the right shape for the right job.
-- **Local debugging.** When the regression suite fails on a Tuesday, you want to reproduce the broken state in 30 seconds, not stand up the full Live stack. `wallet-cli send --data 0x095ea7b3…` reproduces the exact APDU traffic Live would produce, against a real device.
+| | `apps/cli` | `apps/wallet-cli` |
+|---|---|---|
+| Package name | `@ledgerhq/live-cli` | `@ledgerhq/wallet-cli` |
+| Stack | Node + Commander | Bun + Bunli + DMK |
+| Status | Mature, used by E2E | Experimental |
+| QAA usage | **Canonical** — every E2E CLI helper invokes it | Not used by QAA |
+| Binary | `ledger-live` (`bin/index.js`) | Separate, not wired into E2E helpers |
+| Coverage in this part | Full | Out of scope |
 
-There's a precedent inside Ledger. The QA team already uses **vault-cli** as test-data infrastructure for the Vault E2E suite (Confluence: VAUL/2811756923 — Vault QA Automation strategy). The pattern is the same: a domain-specific CLI runs as a precondition step, populates state, and lets the user-facing E2E framework focus on user-facing assertions. Part 5 generalises that pattern to wallet flows.
+`apps/wallet-cli` is a future-facing rewrite using Bun and the new Device Management Kit. It is not part of the QAA workflow today. Earlier drafts of this onboarding guide taught wallet-cli; that material was wrong. If you read it elsewhere, ignore it. Everything in Part 5 from here on refers to `apps/cli`.
 
-The other tickets sitting in QAA-919's family follow the same pattern. **QAA-613** (the sibling — "Implement the token approval flow with Thorchain, Uniswap, LiFi") is the consumer of QAA-615. **QAA-617** (CI environment droplist) will need a CLI hook to reset CI fixtures. **QAA-722** (use MIN amount from request) will need a CLI helper to fetch the dynamic minimum. Once wallet-cli has revoke, every future swap-regression hook becomes a documented one-liner.
+> **Verify:** if a future PR adds wallet-cli wrappers in `cliCommandsUtils.ts`, the canonical-CLI claim must be revisited. As of `support/qaa_add_revoke_token` @ `4fa4868a35`, every wrapper invokes `apps/cli/bin/index.js`.
 
-### 5.1.3 Two CLIs in the monorepo: a brief and honest history
+The reason this section exists at all: earlier drafts of Part 5 of the onboarding guide taught wallet-cli as the canonical CLI, complete with Bun setup instructions, Bunli command authoring patterns, and DMK descriptor walkthroughs. That material was wrong — not "out of date", but actively misleading because no QAA test path uses any of it. If you onboard a teammate and they cite "I read in the guide that we use wallet-cli", that's a copy of the obsolete draft. Send them this chapter instead.
 
-Open the monorepo and you will find **two** workspaces under `apps/` whose names contain "cli". Onboarding guides and old wiki pages mix them up freely. They are different tools with different audiences. Knowing which is which is the first non-trivial fact in this part.
+A historical note that is occasionally useful: `apps/wallet-cli` was started as the long-term replacement for `apps/cli` once Bun and DMK matured. That replacement has not landed, the wallet-cli command surface is incomplete, and no E2E test currently invokes it. If you see a Slack thread or an old PR description that says "wallet-cli is the future", treat it as aspirational. For the work in front of you in 2025, `apps/cli` is the one that runs in production and the one Part 5 teaches.
 
-**`apps/cli/`** — the legacy CLI. Published on npm as `@ledgerhq/live-cli` (a public package). Built on Node.js (the README still pins Node 14 — `lts/fermium`). Uses the older `@ledgerhq/hw-transport-node-hid` stack and the V0 account-id format (`js:2:bitcoin:xpub…:native_segwit:0`). Wraps `@ledgerhq/live-common` directly. Its README documents **62 commands** including the heavyweights:
-
-- `swap` — perform an arbitrary swap between two currencies on the same seed.
-- `bot` / `botPortfolio` / `botTransfer` — Speculos-driven regression engine ("the bot").
-- `app` / `appUninstallAll` / `listApps` / `managerListApps` — manager / app installation.
-- `firmwareUpdate` / `firmwareRepair` — firmware operations.
-- `tokenAllowance` — read on-chain allowances.
-- `genuineCheck`, `deviceInfo`, `getBatteryStatus`, `repl` — device introspection.
-- `generateTestScanAccounts`, `generateTestTransaction` — fixture generators.
-- `signMessage`, `broadcast`, `getTransactionStatus`, `balanceHistory`, `countervalues`, `portfolio` — read/write helpers.
-
-Output is free-form text. A few commands accept `--format json` but the flag's behaviour varies. Errors come out as `console.error(String(e.message))`. Exit code is 0 (success) or 1 (anything else). Confluence has an architecture audit of this surface (TA/6951665759 — "Ledger Live CLI for AI Agent") that catalogues the friction points; it's the cleanest description of why a successor was needed.
-
-**`apps/wallet-cli/`** — the experimental replacement. Private to the monorepo (`"private": true` in `package.json`, name `@ledgerhq/wallet-cli`). Built on Bun and Bunli. Uses the **Device Management Kit (DMK)** over USB. Speaks the V1 account descriptor format (`account:1:address:ethereum:main:0x…:m/44h/60h/0h/0/0`). Has a smaller surface — today, around ten commands across two groups (exact catalog in Ch 5.4) — but every command speaks a unified `--output human|json` envelope. Version sits at **0.1.0** in `bunli.config.ts`. The README opens with:
-
-> "This software is experimental. It is provided 'as is,' without obligation to develop, support, or repair features. Ledger shall not be liable for damages arising from its use."
-
-So the practical state of play in 2026 is that wallet-cli is the right place for new work — but legacy `apps/cli` still ships features wallet-cli has not replicated. Notably:
-
-- **Swap** — wallet-cli has no `swap` command. The legacy CLI has one. Neither has on-chain `tokenAllowance` reads as a first-class command, though wallet-cli can broadcast an arbitrary `--data` calldata and the legacy CLI exposes `tokenAllowance` as a query.
-- **Speculos bot** — `bot`/`botPortfolio` are legacy-only. wallet-cli does not currently target Speculos at all (it's USB-only via DMK).
-- **App management** — `app install/uninstall`, `listApps`, `genuineCheck`, `firmwareUpdate` — legacy-only.
-- **Test fixture generation** — `generateTestScanAccounts`, `generateTestTransaction` — legacy-only.
-- **Sign arbitrary messages** — `signMessage` — legacy-only.
-
-Conversely, wallet-cli ships things the legacy CLI does not:
-
-- DMK transport (with the connectivity gains documented in WXP/6995411067 — LedgerJS vs DMK Benchmark, "internal data shows a >10x reduction in connectivity errors after migrating to DMK").
-- Bunli command framework with Zod-validated flags.
-- Single-binary build via `bunli build` (`darwin-arm64`, `linux-arm64`, `linux-x64`, `windows-x64`).
-- V1 versioned account descriptors with shell-safe hardened markers (`h` instead of `'`).
-- A unified JSON envelope on every command.
-- A persistent session layer (`session view` / `session reset`) — labels at `XDG_STATE_HOME/ledger-wallet-cli/session.yaml`.
-- `--dry-run` send mode that skips device + broadcast.
-- A real test harness: mock DMK + http-intercept + mock-server.
-
-> **Verify:** the count of legacy commands ("62" / "59" / "70" / "around 70") varies between the architecture study, the briefing, and the legacy README. They're all the same surface, the differences come from how you count subcommands and grouped commands. The exact number doesn't matter for QA work — what matters is that the surface is large, mostly stable, but built on stale runtime tooling.
-
-**Practical decision rule** (the only one that matters in the next twelve months):
-
-- New CLI work targets `apps/wallet-cli/`. Adding `revoke` for QAA-615? wallet-cli. Adding a fixture command for QAA-617? wallet-cli.
-- If you need a feature wallet-cli does not yet replicate — Speculos `bot`, `swap`, app management, firmware ops — fall back to legacy `apps/cli` and flag the dependency in your PR description.
-- Do **not** mix the two in a single hook. They have different transport stacks (DMK vs hw-transport-node-hid), different descriptor formats (V1 vs V0), and different Node/Bun runtimes. Sequencing them in one shell script works in development and breaks in CI.
-
-A useful mental model: think of the two CLIs as two generations of the same family tree. The legacy `apps/cli` is the parent, with broad surface and the scars of a 2018-era stack. The new `apps/wallet-cli` is the child, with a narrower surface but a modern runtime. They share a grandparent (`@ledgerhq/live-common`) and that's it. When you read either codebase, ask which generation you're in: V0 descriptors and `hw-transport-*` mean legacy; V1 descriptors and DMK mean new. The two never mix in source code, and they shouldn't mix in your hooks either.
-
-> **Heads-up that surprises most readers:** **the legacy CLI is already wired into both `e2e/desktop/` and `e2e/mobile/` today.** Tests don't shell out to it directly — they go through a shared facade at `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` (high-level helpers like `liveDataCommand`, `getAccountAddress`, `parseTokenAllowanceCliOutput`, `isTokenAllowanceSufficientCommand`) and a sibling `runCli.ts` that does the actual `child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...])`. Test specs declare which CLI calls to run as fixture data: `{ cliCommands: [liveDataCommand(account)] }`. So when wallet-cli ships features like `revoke`, the migration path is to add a parallel `runWalletCli*` family in `runCli.ts` (or a new sibling), expose new wrappers in `cliCommandsUtils.ts`, and let test suites swap fixtures one helper at a time. The CLI part of this guide is therefore not just about the binary — it's about a layer that the test suites have been quietly leaning on for years. Ch 5.7.3 walks the integration in detail.
-
-The R5 wiki research is also worth saying out loud: the GitHub wiki has **zero pages** about wallet-cli, Bunli, DMK, or V1 descriptors. The only CLI page in the wiki (`LLC/LLC:dev-with-cli.md`) still references the deprecated tool and Node 14. You will not find this material on the wiki. This guide and the in-tree READMEs (`apps/wallet-cli/README.md`, `apps/wallet-cli/src/wallet/README.md`, `apps/wallet-cli/src/test/commands/README.md`, `apps/wallet-cli/src/shared/accountDescriptor/README.md`) are the canonical sources.
-
-### 5.1.4 Where wallet-cli sits in the monorepo
-
-Part 1 introduced you to the monorepo layout: `apps/` for shippable applications, `libs/` for shared libraries, `e2e/` for the test workspaces. Part 3 placed Desktop E2E at `e2e/desktop/`. Part 4 placed Mobile E2E at `e2e/mobile/`. wallet-cli sits in a third location — and this distinction matters.
+### 5.1.4 Where apps/cli sits in the monorepo
 
 ```
 apps/
-|-- cli/                             # legacy @ledgerhq/live-cli (Node, hw-transport)
-|-- wallet-cli/                      # @ledgerhq/wallet-cli (Bun, DMK, USB)
-|   |-- package.json                 # "@ledgerhq/wallet-cli", private, bin: wallet-cli
-|   |-- bunli.config.ts              # name + commands directory + build targets
-|   |-- bunfig.toml                  # Bun runtime config (test coverage reporter)
-|   |-- tsconfig.json                # extends root, types: node + bun-types + w3c-web-usb
-|   |-- project.json                 # Nx targets (coverage / generate / build)
-|   |-- README.md                    # status + commands + prerequisites
-|   |-- CHANGELOG.md                 # changesets
-|   |-- .bunli/
-|   |   `-- commands.gen.ts          # CODEGEN — auto-registered command tree
-|   `-- src/
-|       |-- cli.ts                   # entry — Bunli wiring, side-effect imports
-|       |-- config.ts                # LiveConfig schema for wallet-cli
-|       |-- live-common-setup.ts     # registers coin modules + DMK transport
-|       |-- embed-usb-native.ts      # forces Bun --compile to embed usb addon
-|       |-- output.ts                # CommandOutput abstraction (human/json)
-|       |-- commands/                # Bunli defineCommand modules
-|       |-- device/                  # DMK builder + register-transport + mock-DMK
-|       |-- session/                 # YAML-persisted account labels
-|       |-- shared/                  # accountDescriptor + log + ui + response
-|       |-- wallet/                  # WalletAdapter facade (bridge + alpaca)
-|       `-- test/                    # bun test suite
-|           |-- commands/            # per-command integration tests
-|           `-- helpers/             # cli-runner / mock-server / http-intercept
-|-- ledger-live-desktop/             # the Electron desktop app
-|-- ledger-live-mobile/              # the React Native mobile app
-e2e/
-|-- desktop/                         # the Playwright workspace (Part 3)
-`-- mobile/                          # the Detox workspace (Part 4)
+|-- cli/                              # @ledgerhq/live-cli
+|   |-- bin/
+|   |   `-- index.js                  # entry: `ledger-live` binary
+|   |-- src/
+|   |   |-- commands/
+|   |   |   |-- blockchain/           # 16 blockchain commands (catalog below)
+|   |   |   |-- live/                 # liveData, etc. (account fixtures)
+|   |   |   `-- device/               # firmware / app management (out of QAA scope)
+|   |   |-- transaction.ts            # inferTransactionsOpts (parses --mode, --token, --spender)
+|   |   `-- scan.ts                   # scanCommonOpts (--currency, --index, --scheme)
+|   |-- scripts/
+|   |   |-- gen.mjs                   # zx-driven prebuild: generates command index
+|   |   |-- build.mjs                 # zx-driven build
+|   |   `-- test.mjs                  # zx-driven local tests
+|   `-- package.json
+|
+`-- wallet-cli/                       # OUT OF SCOPE — do not study for QAA work
 ```
 
-Compared with Part 3 and Part 4, the structural difference is:
+The `package.json` highlights:
 
-- **`e2e/desktop/`** is a peer workspace dedicated to testing `apps/ledger-live-desktop/`. The application under test lives in `apps/`; the tests live in `e2e/`.
-- **`e2e/mobile/`** is the same arrangement for `apps/ledger-live-mobile/`.
-- **`apps/wallet-cli/`** is its own application. It has no peer `e2e/cli/`. Its tests live **inside the application workspace**, at `apps/wallet-cli/src/test/`. There is no separate test workspace because there is no separate test runner — `bun test` executes the same TypeScript that the production binary executes, with mock seams installed via env vars.
+```json
+{
+  "name": "@ledgerhq/live-cli",
+  "bin": { "ledger-live": "./bin/index.js" },
+  "scripts": {
+    "prebuild": "zx ./scripts/gen.mjs",
+    "build": "zx ./scripts/build.mjs",
+    "test": "zx ./scripts/test.mjs"
+  }
+}
+```
 
-This is a design choice, not an oversight. Three reasons:
+`zx` is Google's Bash-in-JavaScript helper. The `prebuild` step regenerates the command index — a single file that imports every command in `src/commands/**` so Commander can register them. After cloning and installing, you must `pnpm --filter @ledgerhq/live-cli build` once before E2E tests can find the binary.
 
-1. **The CLI is small.** Around 5,860 lines of source. Splitting it into a peer test workspace would add Nx and pnpm boilerplate that buys nothing. Detox and Playwright workspaces exist because the test code is ten times larger than the app code; here it's the inverse.
-2. **The mock seams are inside the source tree.** `src/device/mock-dmk.ts` and `src/test/helpers/dmk-intercept.ts` install the mock device by calling `_setTestDmkTransport()` — an internal export from `src/device/register-dmk-transport.ts`. Putting the tests in a peer workspace would force that internal export to leak across a workspace boundary.
-3. **Bun's test runner runs from any directory.** `bun test src/` walks the tree. There is no Jest config to maintain at a peer level, no Detox config, no Playwright project file.
+The runtime stack is Node + Commander. No Bun, no Bunli, no DMK. Reading the source is straightforward TypeScript.
 
-So when you read sentences like "wallet-cli's E2E tests" in this part, mentally translate that to "wallet-cli's integration tests under `apps/wallet-cli/src/test/commands/`". They are the equivalent of Part 3's `e2e/desktop/tests/specs/` and Part 4's `e2e/mobile/specs/`, but they live in-place.
+A handful of Commander idioms recur across the blockchain commands and are worth recognising on first read:
 
-### 5.1.5 The transport layer at a glance
+- `scanCommonOpts` — a shared options bundle (`--currency`, `--index`, `--scheme`, `--xpub`, etc.) attached to every command that needs to identify an account.
+- `inferTransactionsOpts` — a shared options bundle for transaction-shaped commands (`--amount`, `--recipient`, `--token`, `--mode`, `--approveAmount`, etc.). Lives in `apps/cli/src/transaction.ts` and dispatches into family-specific handlers (e.g. `libs/coin-modules/coin-evm/src/cli-transaction.ts`).
+- `--format` — most commands accept `default | json | silent` and swap their output writer accordingly. The wrappers in `cliCommandsUtils.ts` always pass `--format json` when they need to parse output (`tokenAllowance`, mainly).
+- `--ignore-errors` — sometimes used to keep the rxjs pipeline from short-circuiting on partial failures.
 
-The Device Management Kit (DMK) replaces the older `hw-transport-*` stack. You'll get a full primer in Chapter 5.3, but you need three facts now:
+You will not need to touch the CLI source on day one of a QAA fix campaign. But when something goes wrong — the wrapper passes args that the CLI doesn't recognise, or the output format changed and the parser breaks — being able to read `send.ts` end-to-end is the difference between a 30-minute fix and a half-day of guessing.
 
-1. **DMK is the library between client code and the physical device.** Confluence (CS/7014678571 — Device Management Kit) puts it like this:
+A note on `bin/index.js` itself: it is a thin shim. It imports the auto-generated commands index produced by `prebuild`, registers each command with Commander, and dispatches based on argv. There is no bespoke argument parsing in the entry point — Commander handles it. This is why a stale `prebuild` (no commands index, or a commands index that omits a recently-added command) produces "unknown command" errors instead of silent failures. If `apps/cli` doesn't seem to know about a command you can see in the source, run `pnpm --filter @ledgerhq/live-cli build` and try again.
 
-   > "The Device Management Kit is the library that sits between clients (for instance the Ledger Wallet) and the physical Ledger signer. In the context of Clear Signing, it is the client-side orchestration layer responsible for fetching ERC-7730 metadata, packaging it alongside the raw transaction, and delivering it to the device over USB or Bluetooth."
+### 5.1.5 The 16 blockchain commands at a glance
 
-2. **wallet-cli wires DMK over USB only.** No Bluetooth (the node-side BLE story is unsettled). No HTTP-Speculos transport. The CLI's `device/dmk.ts` builds DMK with a single transport factory:
+Path: `apps/cli/src/commands/blockchain/`.
 
-   ```ts
-   return new DeviceManagementKitBuilder()
-     .addTransport(nodeWebUsbTransportFactory)
-     .addLogger(new LedgerLiveLogger(LogLevel.Warning))
-     .addConfig({ firmwareDistributionSalt })
-     .build();
-   ```
+| File | Purpose | QAA uses? |
+|---|---|---|
+| `bot.ts` | Speculos bot (long-running test stress) | No — out of QAA scope |
+| `botPortfolio.ts` | Bot portfolio management | No |
+| `botTransfer.ts` | Bot-driven transfers | No |
+| `broadcast.ts` | Broadcast a pre-signed tx | Maybe (debug only) |
+| `confirmOp.ts` | Confirm an operation | No |
+| `derivation.ts` | Derivation path utility | No |
+| `estimateMaxSpendable.ts` | Estimate max sendable amount | No |
+| `generateTestScanAccounts.ts` | Test fixture generator | No |
+| `generateTestTransaction.ts` | Test fixture generator | No |
+| **`getAddress.ts`** | **Read device address** | **YES** — `runCliGetAddress` |
+| `getTransactionStatus.ts` | Get tx status | No |
+| `receive.ts` | Receive flow utility | No |
+| **`send.ts`** | **Sign + (maybe) broadcast a tx; supports `--mode approve\|revokeApproval`** | **YES** — `runCliTokenApproval` |
+| `signMessage.ts` | Sign EIP-191 / EIP-712 messages | No |
+| `sync.ts` | Account sync | No |
+| `testDetectOpCollision.ts`, `testGetTrustedInputFromTxHash.ts` | Test utilities | No |
+| **`tokenAllowance.ts`** | **Read ERC-20 allowance** | **YES** — `runCliGetTokenAllowance` |
 
-   That's the entire production transport surface. Mock tests replace it wholesale via `MockDeviceManagementKit`.
+Plus `apps/cli/src/commands/live/`:
 
-3. **DMK contributions you do not pay for in legacy.** The benchmark doc (WXP/6995411067 — LedgerJS vs DMK) reports a **>10x reduction in connectivity errors** after migrating to DMK. The reconnection state machine, the device state introspection, the per-app signer kits (`@ledgerhq/device-signer-kit-ethereum`, `…-solana`, `…-bitcoin`, …) — all live in DMK.
+- `liveData.ts` — generates the account fixture file Ledger Live consumes at startup. Used by `runCliLiveData` and is QAA's most heavily used CLI helper. Every spec that needs a pre-loaded account fans out from here.
 
-The trade-off is that DMK is bigger surface area to learn than `hw-transport-node-hid`. Chapter 5.3 walks the whole stack.
+And `apps/cli/src/commands/device/` — firmware / app management, out of QAA scope.
 
-### 5.1.6 The runtime
+Of the 16 blockchain commands, **four** are part of the QAA workflow. Everything else is either bot infrastructure (long-running stress tests, separate concern) or low-level test utilities the wrappers in `cliCommandsUtils.ts` do not expose. Stay focused on the four.
 
-Bun, not Node. The package.json declares `"engines": { "bun": ">=1.1.0" }`. Why it matters:
+A few of the "out of scope" entries are worth a one-line description so you don't waste time on them:
 
-- **Faster startup.** A `pnpm wallet-cli start -- balances --help` finishes in under half a second. Cold Node is over a second on the same hardware.
-- **Native TypeScript.** No `tsc` step. No `ts-node`. `bun run ./src/cli.ts` executes TypeScript directly. The codebase still has a `pnpm typecheck` script (`tsc --noEmit`) for type errors that Bun's bundler doesn't catch, but you don't need a build step to run.
-- **Native test runner.** `bun test` is built in. Coverage via `bun test --coverage` (lcov, configured in `bunfig.toml`).
-- **`bun --compile`** produces a single ~94 MB binary that embeds the Bun runtime and the `usb` native addon. That's the QA-relevant artifact: the binary you can drop into a CI shard without installing Node, pnpm, or any monorepo packages.
+- `bot.ts` — runs a Speculos-driven stress loop that exercises send / sync / portfolio over many accounts and many currencies. It is its own product surface, owned by a different team. If you find yourself reading it, you've taken a wrong turn.
+- `botTransfer.ts`, `botPortfolio.ts` — building blocks for the bot above.
+- `broadcast.ts` — takes a hex-encoded signed transaction and broadcasts it. Useful only for very specific debug scenarios where you have a signed tx blob from somewhere else and want to push it to chain.
+- `confirmOp.ts`, `getTransactionStatus.ts` — utilities for waiting on or inspecting an operation by hash. The QAA wrappers fold the equivalent functionality into the `--wait-confirmation` flag of `send`.
+- `derivation.ts` — derive an address for a given path / xpub combo. The QAA equivalent is `getAddress` on a real device, which gives you both the path and the on-device confirmation that the device computes the same thing.
+- `signMessage.ts` — EIP-191 / EIP-712 signing. The QAA E2E layer doesn't currently exercise this through the CLI; message-signing flows are tested via the UI driver.
 
-Bun is not a casual choice and it isn't a clean replacement for Node either. The team had to patch `@bunli/core` to avoid a dynamic `import()` that hangs in standalone mode. They had to embed the `usb` N-API addon manually because Bun's bundler can't follow `node-gyp-build`'s dynamic `fs.readdirSync`. They call `LiveConfig.setConfig` twice (once via ESM, once via CJS) because Bun resolves the same module to two different singletons depending on the import shape. None of these are Bun bugs in the usual sense; they are the cost of building inside a wider monorepo whose libraries assume Node's resolver semantics. Chapter 5.2 unpacks the implications.
+If the day-job lands you in any of these, ask first whether you're solving the right problem at the right layer. Most of the time the answer is "use one of the four canonical commands instead".
 
-### 5.1.7 Comparison to Part 3 / Part 4 stacks
+**Why `liveData` lives under `commands/live/` and not `commands/blockchain/`.** Because it's not a blockchain command. It builds an off-chain JSON userdata file from public derivation data — no transaction, no signature, no RPC call. Putting it under `commands/live/` makes the boundary clear: blockchain commands talk to chains and devices; live commands prepare client-side state. The directory layout is a hint about what each command does.
 
-The mental model you built in Part 3 (Playwright + page objects + Speculos REST) and Part 4 (Detox + thin specs + Speculos via WebSocket bridge) does not transfer to Part 5 cleanly. Here's the side-by-side:
+This split also explains why `liveData` has no Speculos requirement: it doesn't need a device because it doesn't sign anything. It can run on a laptop with no Docker, no emulator, no network, and produce a fully populated userdata file in milliseconds. Tests that only need account fixtures (most of them) thus avoid the full Speculos overhead — they just consume the userdata file the fixture engine generated.
 
-| Aspect | Desktop (Part 3) | Mobile (Part 4) | CLI (Part 5) |
-|---|---|---|---|
-| **Runner** | Playwright (test framework) | Detox + Jest | Bunli (handler framework, not a test framework) |
-| **Test framework** | `playwright/test` | `jest` | `bun test` |
-| **Transport** | `hw-transport-node-speculos-http` | DMK over WebSocket bridge | DMK over USB (node-webusb) |
-| **Execution location** | `e2e/desktop/` (peer workspace) | `e2e/mobile/` (peer workspace) | `apps/wallet-cli/src/test/` (in-place) |
-| **Mock layer** | Speculos REST + HTTP-Transport mocks | bridge server + Detox sync | mock-DMK + http-intercept + mock-server |
-| **First-class concept** | Page Object | thin spec + driver | command + intent + bridge adapter |
-| **App under test** | Electron (Live Desktop) | React Native (Live Mobile) | None — the device is the UI |
-| **Build step before run** | Rspack bundle (~2 min) | Xcode/Gradle native (~10-30 min) | None (`bun run ./src/cli.ts`) |
-| **Parallelism** | Full (random ports) | 1-3 workers (device limit) | One device per process (singleton DMK) |
-| **State injection** | Playwright fixture | WebSocket bridge | `account discover` writes session.yaml |
-| **Fixture format** | userdata JSON | userdata JSON | session.yaml + V1 descriptors |
-| **Output** | HTML report + Allure | Allure | JSON envelope on stdout |
-| **Pass/fail convention** | Test runner exit code | Test runner exit code | Process exit code (0 ok, 1 error) |
+### 5.1.6 The four commands QAA actually uses
 
-Three things to internalise from this table:
+**`liveData`** (under `commands/live/`) — the workhorse. Generates a JSON userdata file with the accounts your test needs. Called via `runCliLiveData` and wrapped in the curried fixture helpers `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithParentAddressCommand`, `liveDataWithRecipientAddressCommand`. Every desktop test fixture's `cliCommands: [...]` array starts with one of these. Forward-ref Chapter 5.4 for the curried-function pattern. The reason this command is so central: a single `liveData` invocation can produce a userdata snapshot covering Bitcoin, Ethereum, Polygon, Solana, an ERC-20 sub-account, and a derivation-path variant — enough world to run almost any spec.
 
-- **Bunli is not a test runner.** Playwright and Detox + Jest are *frameworks for asserting on a running application*. Bunli is a *framework for declaring CLI commands*. You declare a command with `defineCommand({ name, description, options, handler })`, Bunli parses argv, validates flags via Zod, and dispatches your handler. Test assertions in this part are written with `bun test` plus a custom `cli-runner` helper that spawns the actual `cli.ts` and inspects stdout/stderr/exit code. Two different layers, two different concerns.
-- **The transport story changes shape, not direction.** All three parts ultimately drive a Ledger device (real or simulated). Desktop reaches it through Speculos's HTTP transport. Mobile reaches it through the bridge that proxies APDUs between the React Native app and the Speculos container. CLI reaches it directly through DMK over USB to a real device — or through a `MockDeviceManagementKit` for tests. Same APDU exchanges underneath.
-- **The "no UI" property is the design freedom.** Speculos exists because Detox and Playwright cannot tap on a physical Nano S. The CLI doesn't have that problem because there's nothing to tap on — the device's own screen is the only confirmation surface, the user reads it, the user presses the buttons. That's why the CLI can be USB-only: it doesn't need to virtualise a button press. Speculos is still useful for testing command-side correctness without a physical device, but wallet-cli does not currently wire it. Chapter 5.3 covers why and what the workaround is.
+**`getAddress`** — reads a device address for a given currency and derivation path. Called via `runCliGetAddress`. Used implicitly through `getAccountAddress(account)`, which both fetches the address and writes it back onto the in-memory account object so subsequent assertions can reference it. This command is the bridge between "the test thinks the account is at index 0 on path m/44'/60'/0'/0/0" and "the chain agrees that's address `0xabc...def`": without it, send-flow assertions ("verify the recipient on screen matches the address you expect") cannot be written.
 
-### 5.1.8 What this Part covers and what it doesn't
+**`tokenAllowance`** — reads the on-chain ERC-20 allowance for `(owner, spender, token)`. Called via `runCliGetTokenAllowance`. Wrapped by `isTokenAllowanceSufficientCommand` — the pre-check that lets `ensureTokenApproval` skip the device dance when the allowance is already large enough. Output is parsed by `parseTokenAllowanceCliOutput`. This is a read-only RPC call — no signing, no broadcast, no Speculos required, fast (~1 second). The pre-check pattern (read first, only act if necessary) is what keeps `ensureTokenApproval` cheap on warm seeds.
 
-**Covers:**
+**`send --mode approve|revokeApproval`** — the same `send` command does both. With `--mode approve` and `--approveAmount N` it sets `allowances[you][spender] = N`. With `--mode revokeApproval` it sets it back to `0`. Wrapped by `runCliTokenApproval`, then by `approveTokenCommand` / `revokeTokenCommand` in `cliCommandsUtils.ts`. Forward-ref Chapter 5.4 for the layer-by-layer walkthrough and Chapter 5.6 for the broadcast gate that sits inside this command.
 
-- wallet-cli architecture, runtime, codebase walk (this chapter, 5.4, 5.5).
-- Bun and Bunli primer, your first command (Chapter 5.2).
-- DMK primer — transports, sessions, device actions, the singleton (Chapter 5.3).
-- Account descriptors V1 — V0 vs V1 history, parser internals, why hardened path uses `h` not `'` (Chapter 5.6 / will be referenced from here forward).
-- Daily workflow: from ticket to PR for a CLI feature (Chapter 5.7).
-- Testing patterns: mock DMK + http-intercept + cli-runner (Chapter 5.6).
-- The QAA-615 spike walkthrough end-to-end — designing `revoke`, choosing a path, shipping the PoC, integrating into a test hook (Chapter 5.8).
-- CLI exercises and a Part 5 final assessment.
+That's the surface. Four commands. Eight or nine wrappers. Everything in Part 5 is built on these.
 
-**Does not cover:**
+A useful mental model: `liveData` is the "before" hook (set up state cheaply, no device required); `getAddress` and `tokenAllowance` are the "during" reads (cheap queries the test driver makes to decide what to do); `send --mode ...` is the "before / after" hook that actually moves on-chain state (expensive, requires a Speculos device, optionally broadcasts). The four commands cover the full lifecycle: prepare, observe, mutate.
 
-- Legacy `apps/cli` deeply. We name what it has that wallet-cli lacks (so you know when to reach for it) but we don't teach its 62 commands. The README at `apps/cli/README.md` is the reference for that surface; the architecture study at TA/6951665759 is the analysis.
-- Wallet API and Live Apps. Those are Part 6 (which used to be Part 5 — the renumbering happened to make room for this part). If you're looking for `swap-live-app`, it's there.
-- DMK internals — XState machines, secure-channel cryptography, firmware-update protocol. The CLI consumes DMK through its public API (`createDeviceManagementKit`, `dmk.executeDeviceAction`, `dmk.sendApdu`). The internals are documented at the DMK package level; this guide stays at the integration boundary.
-- ERC-7730 metadata authoring. The CLI can clear-sign transactions whose contracts have ERC-7730 descriptors registered with Ledger's metadata service, but writing those descriptors is the Clear Signing team's surface (CS/6038847989).
+| Command | Cost | Speculos required? | Network call? | Mutates state? |
+|---|---|---|---|---|
+| `liveData` | low | no | no | local file only |
+| `getAddress` | low | yes (cheap, no signing) | no | no |
+| `tokenAllowance` | low | no | yes (RPC read) | no |
+| `send --mode approve\|revokeApproval` | high | yes (full signing) | yes (RPC + broadcast) | yes (when not gated) |
 
-### 5.1.9 Footguns to know upfront
+The cost asymmetry here is exactly why the test fixtures lean so heavily on `liveData` and the pre-check pattern: the cheap operations run unconditionally; the expensive ones run only when necessary.
 
-Before you run `bun install` or `pnpm wallet-cli start`, internalise the following list. These bite people in week one and are not flagged anywhere except the SKILL.md and a handful of source comments.
+**A note on `runCliTokenApproval`'s broadcast-on assumption.** The wrapper that produces the `send --mode approve|revokeApproval` command line does not itself manage the broadcast env. That's why both `approveTokenCommand` and `revokeTokenCommand` (the higher-level wrappers around `runCliTokenApproval`) explicitly flip `DISABLE_TRANSACTION_BROADCAST` to `"0"` before calling and restore it after. If you call `runCliTokenApproval` directly without flipping the env first — and the calling test had broadcast disabled by default — your approve / revoke will sign and silently not land. Always go through `approveTokenCommand` / `revokeTokenCommand` for approve and revoke flows; that's where the env discipline lives.
 
-**1. Base uses the Ethereum app on the device.**
+### 5.1.7 The five-layer integration at a glance
 
-The CLI's SKILL.md says it explicitly:
+| # | Path | Role |
+|---|---|---|
+| 1 | `apps/cli/bin/index.js` | Legacy CLI binary (Node, Commander) |
+| 2 | `libs/ledger-live-common/src/e2e/runCli.ts` | `child_process.spawn` engine + retries |
+| 3 | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | Typed TypeScript wrappers |
+| 4 | `libs/ledger-live-common/src/e2e/families/evm.ts` | Speculos device-tap automation |
+| 5 | `e2e/desktop/tests/page/swap.page.ts`, `e2e/mobile/page/trade/swap.page.ts` | POM methods orchestrating Speculos + CLI |
 
-> "Supported networks: bitcoin, ethereum, base, solana (mainnet and testnets). On Ledger devices, **Base uses the Ethereum app**."
+Read this table top-down: it's the call stack of a single revoke. A POM method (5) calls a typed wrapper (3); the wrapper builds an arg string and hands it to the spawn engine (2); the engine forks `node apps/cli/bin/index.js` (1); meanwhile, in parallel, the device-tap helper (4) drives Speculos's REST API to walk the on-screen review and press hold-to-sign. Both halves must finish for the revoke to land. Chapter 5.4 walks the full path line by line.
 
-The README and source say nothing. If you `discover` a Base account and the CLI prompts you to open "Ethereum" on the device, that's expected. The device firmware handles Base, Polygon, Arbitrum, Optimism, and other EVM L2s through the Ethereum app — they share a chainId-driven derivation. Internally the CLI's `withCurrencyDeviceSession` looks up `getCryptoCurrencyById(currencyId).managerAppName` and opens whatever the live-common metadata says — for any EVM family chain, that's "Ethereum".
+Why five layers? Because each one solves a different concern.
 
-> **Verify:** confirm that `live-common-setup.ts` actually wires Base into `setSupportedCurrencies()`. R1 flagged that the README lists only bitcoin / ethereum / solana; the SKILL.md mentions base; the source has not been confirmed to call `setSupportedCurrencies(["base"])` explicitly. Base support may be implicit through EVM family detection or may not be reachable at all in the CLI surface today.
+- Layer 1 is the binary itself, the only thing that knows how to actually build, sign, and broadcast a transaction.
+- Layer 2 isolates "spawn a Node child process" from "construct CLI args" — the spawn engine is generic, and the same `runCliCommand` services every helper.
+- Layer 3 is where typing lives: `revokeTokenCommand(account: TokenAccount, spender: string)` is checkable at compile time; the equivalent string-building inside a spec would not be.
+- Layer 4 is the bridge to Speculos. The CLI subprocess and the device-tap helper run *concurrently*: the CLI blocks waiting for an APDU response; the helper drives the screens in parallel until a hold-to-sign completes; only then does the CLI receive its signature and broadcast.
+- Layer 5 is per-feature orchestration: the swap POM knows it needs to flip `DISABLE_TRANSACTION_BROADCAST`, snapshot the Speculos port, swap to an Ethereum-app device, run the revoke, restore the port, and unflip the env. None of that belongs in a CLI wrapper; it's swap-specific glue.
 
-**2. Persistent DMK to avoid stacking node-usb hotplug listeners.**
+A diagram for orientation:
 
-A comment in `src/device/register-dmk-transport.ts` reads:
+```
+   Spec (Playwright / Detox test file)
+       |
+       v
+   POM method (e.g. swap.page.ts:revokeTokenApproval)
+       |  flips DISABLE_TRANSACTION_BROADCAST="0"
+       |  snapshots SPECULOS_API_PORT
+       |  starts new Speculos for the right app
+       v
+   Typed wrapper (cliCommandsUtils.ts:revokeTokenCommand)
+       |  builds args: send --currency X --mode revokeApproval ...
+       v
+   Spawn engine (runCli.ts:runCliCommand)              ─╮
+       |  child_process.spawn("node", [bin, ...args])  │
+       v                                               │ in parallel
+   apps/cli (Node + Commander)                         │
+       |  signOperation → broadcast (gated by env)     │
+       |  blocks on device APDU response               │
+       ^                                               │
+       │ APDU                                          │
+       │                                               │
+   Speculos Docker container (REST API)                │
+       ^                                               │
+       │ /button, /touch, /screenshot                  │
+       │                                               │
+   families/evm.ts:approveToken()  ─────────────────── ╯
+       walks screens, presses Hold to sign for 3s
+```
 
-> "One DMK per CLI process: each `createDeviceManagementKit()` adds node-usb hotplug listeners; closing + recreating stacks listeners and breaks the 3rd in-process connect (same pattern as the former node-hid kit)."
+Read this as: the typed wrapper calls the spawn engine, which forks a CLI subprocess; the CLI dials Speculos for signing; the device-tap helper, started in parallel by the POM method, drives Speculos's REST API to walk through the on-screen review and execute the hold-to-sign. When the device-tap completes, Speculos returns the APDU response to the CLI, which broadcasts (or doesn't) and exits.
 
-Translation: do not call `createDeviceManagementKit()` more than once per process. If you write a test that loops `for (const account of accounts) { await someCliFunction() }` and that function calls `createDeviceManagementKit()` internally, the third iteration will fail with a garbled APDU error. The CLI handles this by exposing one process-wide singleton (`persistentDmk`) and a `_setTestDmkTransport(t)` seam for tests. Respect the singleton.
+Every chapter from here unpacks one slice of this diagram.
 
-**3. Sandbox: device-touching commands need `dangerouslyDisableSandbox: true` in the Bash tool.**
+### 5.1.8 Footguns to know upfront
 
-This applies to AI agents driving the CLI from inside Claude Code or Cursor — and that includes you when you write QA hooks with Claude Code's help. From SKILL.md:
+Five things will catch you out if you don't know them.
 
-> "Sandbox: Commands that open the USB device (`account discover`, `receive`, `send`) **must** be run with `dangerouslyDisableSandbox: true` in the Bash tool — the sandbox blocks USB access and causes a `Timeout has occurred` error. Commands that don't need the device (`balances`, `operations`, `send --dry-run`) work fine in the sandbox."
+**The CLI is invoked as a subprocess, not a programmatic API.** `runCli.ts` calls `child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])` and reads stdout. There is no `import { send } from "@ledgerhq/live-cli"`. Every call pays Node startup cost (~300-500 ms). This is by design — the CLI was a standalone binary first, the E2E harness wrapped it later. Don't try to short-circuit with a programmatic call; the wrappers expect stdout strings.
 
-Plain shell users (CI, local dev terminal) are not affected. Only the agent harness sandbox.
+A small but important consequence: stdout parsing is the wrappers' contract. When `tokenAllowance` outputs `--format json`, the wrapper expects a parseable JSON line; when `send` outputs default text, the wrapper expects specific success / error markers. If a CLI command's output format changes — even for a "harmless" log line addition — the wrappers can break in non-obvious ways. The `parseTokenAllowanceCliOutput` helper is fragile in exactly this way: it greps for a known JSON shape inside potentially noisy stdout. This is a known sharp edge, and Chapter 5.4 covers the parsing layer in detail.
 
-**4. Storage layout in flux.**
+**The `+` separator in arg lists.** The engine joins args with `+` and splits them back inside the spawn call:
 
-There are two competing storage layouts in flight, and they disagree:
+```ts
+const args = command.split("+");
+const child = spawn("node", [LEDGER_LIVE_CLI_BIN, ...args], { ... });
+```
 
-- **ADR (TA/6978928805 — "ADR — CLI Storage", status: Proposed)** says `~/.ledger/cli/*.yaml`.
-- **LIVE-29495 (the actually shipping code)** uses `@bunli/utils stateDir(APP_NAME)` which on Linux/macOS resolves to `~/.local/state/ledger-wallet-cli/session.yaml` (XDG state dir), not `~/.ledger/cli/`.
+So `runCliTokenApproval` builds:
 
-The shipping code wins until the ADR moves from Proposed to Accepted. Don't be surprised if the location changes in a future release. Tests use `XDG_STATE_HOME` to redirect to a temp dir per test (`test/helpers/session-fixture.ts`).
+```
+"send+--currency+ethereum+--mode+revokeApproval+--token+ethereum/erc20/usd_coin+--spender+0xRouter+--index+0+--wait-confirmation"
+```
 
-**5. wallet-cli is v0.x experimental; expect breakage.**
+…which splits into the ten-element argv `apps/cli` expects. The reason: shell-escape pain is awful when args are forwarded across multiple processes and `+` never appears in real CLI arg values. If you build a custom command string with literal `+` characters in a value, you will break the splitter. Don't.
 
-The README states it twice — once at the top:
+**`DISABLE_TRANSACTION_BROADCAST` env can silently flip behaviour.** The CLI's broadcast step is gated on `process.env.DISABLE_TRANSACTION_BROADCAST` (and the equivalent CLI flag `--disable-broadcast`). When set to `"1"` the CLI signs locally and exits without calling `bridge.broadcast(...)`. When unset or `"0"` it broadcasts. Many test files set the flag at module load; the approve / revoke wrappers temporarily flip it back to `"0"` inside a try/finally. If the finally is missing, every subsequent CLI call in the run silently broadcasts. Chapter 5.6 deep-dives this.
 
-> "Experimental command-line tool for Ledger Wallet flows over USB, built on the Device Management Kit (DMK) and Bunli. Version 0.1.0 (see `bunli.config.ts`)."
+The "silent" part is what gets people. There is no error message when broadcast is suppressed, no warning, no log line in the default format. The CLI looks like it succeeded (it did sign), the test driver continues, and only later — when the next test reads on-chain state and finds the previous "approval" never actually landed — does the failure surface, often far from the cause. Discipline around the env flag is non-negotiable; treat it like an `O_NONBLOCK` flag on a file descriptor.
 
-— and once under "Status":
+**Speculos port mutation is global state.** The Speculos lifecycle helpers set `process.env.SPECULOS_API_PORT` (and the live-env mirror `setEnv("SPECULOS_API_PORT", port)`) so the spawned CLI knows which Docker container to connect to. This is a global mutation. Two parallel tests cannot both start Speculos on different ports without serialising the env update. Chapter 5.5 walks the snapshot/restore pattern.
 
-> "wallet-cli is **not production-ready**. Behavior and flags may change without notice."
+This is also why Playwright's per-worker test parallelism interacts oddly with CLI-driven specs: each worker is its own Node process with its own `process.env`, so workers don't fight each other directly — but tests *within* the same worker that both want their own Speculos on different ports definitely do. The discipline is "one Speculos at a time per worker, snapshot/restore around any swap-in".
 
-For QA hooks consumed by the regression suite, this is a real risk: a flag rename in wallet-cli 0.2.x will break your hook silently if your hook does not pin the wallet-cli workspace version. Treat wallet-cli the way you'd treat any pre-1.0 dependency: pin via the monorepo lockfile, add an integration smoke test, plan for refactor effort on minor bumps.
+**Two Speculos instances cannot share a port.** Each Speculos Docker container binds to a host port to expose its REST API. The CLI subprocess uses the env-var port to dial that container. If two containers needed to share one port, the OS would reject the second `bind()`. The harness prevents this by running one Speculos at a time per worker and serialising port swaps. A test that already has one Speculos running for the Exchange app, and now wants to start a second Ethereum-app Speculos to issue a revoke, must save the previous port, launch the new device, run the revoke, and restore the previous port in `finally`. The senior's `revokeTokenApproval` POM method on `swap.page.ts` does exactly this:
 
-**6. Device contention.**
+```ts
+const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+try {
+  // do the revoke
+} finally {
+  await cleanSpeculos(speculos, previousSpeculosPort);
+}
+```
 
-From SKILL.md again:
+Without the snapshot you leak the port; without the restore you break the swap test that runs next.
 
-> "Only one command can use the device at a time. Never run two device-required commands in parallel — they will conflict and fail with `[object Object]` or a garbled APDU error. Run device commands sequentially."
+A sixth thing worth flagging early: **there is no transactional rollback**. If a CLI revoke broadcasts and then the test fails for an unrelated reason, the on-chain state is already mutated. The revoke is permanent. Tests that broadcast must be designed assuming every successful broadcast lands and every failed broadcast leaves state in an undefined intermediate place — typically "broadcast succeeded but the harness crashed before it noticed". This is why broadcast-enabled tests almost always run on testnets with cheap, recoverable state, and why `DISABLE_TRANSACTION_BROADCAST=1` is the default in most CI paths.
 
-This is enforced at the DMK singleton level (you cannot open two USB sessions to the same device anyway). Practical implication for hooks: in `Promise.all([revoke(), swap()])`, the second one will fail unpredictably. Always serialise device-touching steps.
+**Output parsing assumes a stable format.** Already mentioned in passing, but it's worth its own bullet because it is the source of the most surprising regressions. The wrappers in `cliCommandsUtils.ts` parse stdout — sometimes greping for a substring, sometimes parsing JSON. If a CLI command starts emitting an extra log line (debug print, deprecation warning, even a leading newline) the parser can break. The fix is always in the parser, not the CLI: the canonical output format is whatever the CLI emits, and the parsers accommodate it. But "test fails because the CLI now logs an extra warning" is a real failure mode. When triaging a sudden mass test failure, run the failing CLI command by hand and eyeball the stdout against what the parser expects.
 
-**7. `--data` is unsanitised raw calldata.**
+**Retry semantics are coarse.** The spawn engine's `runCliCommandWithRetry` retries on a list of "retryable" error patterns (network blips, RPC timeouts, transient Speculos issues). It does not retry on signing rejections, calldata errors, or "no such command". The retry policy is shared by every CLI helper, so a flake in one helper benefits all helpers — but the policy is also a cudgel: a non-retryable error fails fast and surfaces as the test failure. If you're seeing a "command failed" without retries, check the error message against `isRetryableError`'s pattern list to confirm whether the error type was eligible.
 
-The EVM intent schema (`src/wallet/intents/families/evm.ts`) accepts `--data` as any 0x-prefixed hex string with even length. The CLI does not parse it, does not match it against a whitelist of selectors, does not warn. If you pass calldata that authorises an unlimited transfer, the device will display the raw transaction (clear-signed if there's an ERC-7730 descriptor for the contract, blind-signed if not), and any human pressing the button has the final word. For automated hooks, treat `--data` the way you'd treat raw SQL: only build it from validated components, never accept it as an external string from a config file or env var.
+### 5.1.9 What this part covers and what it does not
 
-**8. Bunli's `--dry-run` boolean flag.**
+**Covers.** `apps/cli` and the four commands above; the spawn engine in `runCli.ts`; the typed wrappers in `cliCommandsUtils.ts`; the Speculos device-tap automation in `families/evm.ts`; the POM methods in `swap.page.ts`; Speculos lifecycle (`speculosUtils.ts`); the `DISABLE_TRANSACTION_BROADCAST` flow; the daily QAA workflow; and a line-by-line walkthrough of the QAA-615 commit.
 
-From the open ticket **LIVE-29404** ("`--dry-run` flag silently ignored"):
+**Does not cover.**
+- `apps/wallet-cli` — out of QAA scope, do not study.
+- The Speculos bot at `apps/cli/src/commands/blockchain/bot.ts` — separate stress-test surface, not part of QAA's E2E loop.
+- WalletSync via CLI (`runCliKeyRingProtocol`, `runCliLedgerSync`) — used by Ledger Sync features, not part of the approve/revoke story.
+- Deep coin-evm internals — Chapter 5.2 covers what you need about ERC-20 calldata; the bridge layer at `libs/coin-modules/coin-evm/src/cli-transaction.ts:inferTransactions` is referenced but not traced line-by-line.
 
-> "@bunli/core's `option()` requires explicit value for `z.boolean()` options; bare `--dry-run` is dropped."
+If a question lands in your inbox about wallet-cli, redirect to the team that owns it. QAA owns `apps/cli`.
 
-This is a live Bunli behaviour, not a wallet-cli bug. If you write `wallet-cli send … --dry-run`, Bunli may not bind it. The current workaround at the time of writing is `--dry-run true` or `--dry-run=true`. **This is the most dangerous footgun on the list:** a CI hook intending a dry run that gets interpreted as a real broadcast moves real funds. Verify the behaviour against the version you're using and add an explicit `=true` in production hooks. Chapter 5.7 covers safe broadcast guards.
+**A minimal mental model to carry into the next chapters.** The CLI exists for state. State is either off-chain (account fixtures via `liveData`) or on-chain (allowances via `tokenAllowance` to read, `send --mode approve|revokeApproval` to write). State writes need a Speculos device because the CLI needs to obtain a hardware-style signature. State writes are gated by `DISABLE_TRANSACTION_BROADCAST` — the difference between "sign and stop" (no chain mutation) and "sign and broadcast" (chain mutation). Tests choose between those modes deliberately; the wrappers help by encapsulating the env management inside try/finally blocks.
 
-### 5.1.10 Resources
+Hold that picture in mind for Chapters 5.3 onward and the rest of Part 5 will compose cleanly.
+
+### 5.1.10 A first orientation in practice
+
+To make this concrete, here is what your first ten minutes with `apps/cli` look like in a typical fix-campaign flow.
+
+**Step 1 — locate the binary.** From the monorepo root:
+
+```
+$ ls apps/cli/bin/index.js
+apps/cli/bin/index.js
+```
+
+If that path doesn't exist, the prebuild hasn't run. Run `pnpm --filter @ledgerhq/live-cli build` and try again.
+
+**Step 2 — find the wrappers.** Open `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` and read end-to-end. It is short — under 250 lines — and every helper you'll touch is named in there. Pay attention to `setDisableTransactionBroadcastEnv` and the try/finally pattern around `approveTokenCommand` / `revokeTokenCommand`.
+
+**Step 3 — find the spawn engine.** Open `libs/ledger-live-common/src/e2e/runCli.ts`. Eighty lines. Read `runCliCommand` once; you now understand how every CLI invocation is wired.
+
+**Step 4 — find the device-tap layer.** Open `libs/ledger-live-common/src/e2e/families/evm.ts`. The two functions `approveTokenTouchDevices` and `approveTokenButtonDevice` are the entire device-side of the approve / revoke flow. Note that they share `approveToken()` as the entry point, which dispatches based on `isTouchDevice()`.
+
+**Step 5 — find an existing call site.** `e2e/desktop/tests/page/swap.page.ts` imports `approveTokenCommand`, `isTokenAllowanceSufficientCommand`, and (on the senior's branch) `revokeTokenCommand`. Read `ensureTokenApproval` once. This is the canonical pattern.
+
+**Step 6 — find a fixture-style call site.** Open `e2e/desktop/tests/specs/earn.v2.spec.ts` and look at any of the `cliCommands: [liveDataCommand(...)]` entries. This is the *other* canonical pattern: instead of calling a CLI helper imperatively from a POM method, you declare the CLI calls the test needs as part of the test's metadata, and the desktop fixture engine in `e2e/desktop/tests/fixtures/common.ts` runs them at the right moment. Most spec authors interact with the CLI exclusively through this pattern — they never call `runCli*` themselves; they list the curried fixture helpers in their test's `cliCommands` array and trust the engine.
+
+You now have the full call stack in your head: spec → POM method → wrapper → spawn engine → CLI binary, with the device-tap helper running in parallel. You also have the alternative entry point: spec metadata → fixture engine → curried wrapper → spawn engine → CLI binary. Everything else in Part 5 is depth on top of this skeleton.
+
+### 5.1.11 Resources
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><a href="https://ledgerhq.atlassian.net/wiki/spaces/VAUL/pages/6907625515/Ledger+Wallet+CLI">Ledger Wallet CLI (PRD) — VAUL/6907625515</a> — the canonical product spec for v0/v1/v2 phases, command grammar, JSON envelope, terminal UX, security principles. Quote source for everything "what this CLI is supposed to do".</li>
-<li><a href="https://ledgerhq.atlassian.net/wiki/spaces/VAUL/pages/7039778832/Ledger+Wallet+CLI+internal+testing">Ledger Wallet CLI internal testing — VAUL/7039778832</a> — the dogfood runbook: prerequisites, the six-prompt suite, expected results, common errors and remediation.</li>
-<li><a href="https://ledgerhq.atlassian.net/wiki/spaces/TA/pages/6951665759/Ledger+Live+CLI+for+AI+Agent">Ledger Live CLI for AI Agent (architecture study) — TA/6951665759</a> — audit of the legacy <code>apps/cli</code>'s 59-62 commands, friction points, and the proposed error-code taxonomy.</li>
-<li><a href="https://ledgerhq.atlassian.net/wiki/spaces/CS/pages/7014678571/Device+Management+Kit">Device Management Kit overview — CS/7014678571</a> — DMK's five responsibilities, the Client → DMK → Signer diagram, the Clear Signing fallback story.</li>
-<li><a href="https://ledgerhq.atlassian.net/wiki/spaces/WXP/pages/6995411067/LedgerJS+vs+DMK+Benchmark+Comparison">LedgerJS vs DMK Benchmark — WXP/6995411067</a> — the tier model: LedgerJS = blind sign, DMK no token = gated, DMK + token = full clear signing. The "&gt;10x connectivity error reduction" quote.</li>
-<li><a href="https://ledgerhq.atlassian.net/wiki/spaces/TA/pages/6978928805/ADR+CLI+Storage">ADR — CLI Storage — TA/6978928805</a> — the (Proposed) storage layout ADR: YAML, <code>~/.ledger/cli</code>. Conflicts with the actually shipping XDG-based location.</li>
-<li><a href="https://ledgerhq.atlassian.net/browse/QAA-615">QAA-615 — Spike: Revoke token approval using CLI</a> — the Jira ticket that motivated this guide part.</li>
-<li><a href="https://ledgerhq.atlassian.net/browse/LIVE-29404">LIVE-29404 — <code>--dry-run</code> flag silently ignored</a> — the open Bunli boolean-flag bug.</li>
+<li><code>apps/cli/README.md</code> — the binary's own quickstart</li>
+<li>Branch <code>support/qaa_add_revoke_token</code> @ commit <code>4fa4868a35</code> — the senior's reference implementation of <code>revokeTokenCommand</code> + <code>revokeTokenApproval</code></li>
+<li><code>libs/ledger-live-common/src/e2e/runCli.ts</code> — the spawn engine (~80 lines, read it once end-to-end)</li>
+<li><code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code> — the typed wrappers (~250 lines)</li>
+<li><code>libs/ledger-live-common/src/e2e/families/evm.ts</code> — Speculos device-tap helpers</li>
+<li><a href="https://github.com/google/zx">Google zx</a> — the prebuild scripting layer</li>
+<li><a href="https://github.com/tj/commander.js">Commander.js</a> — the CLI argument parser</li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> wallet-cli is the third E2E surface — the one without a user-facing application. It exists because some test-data operations (allowance revokes, fixture resets, account discovery) are simply not what Playwright and Detox are for, and a domain-specific CLI does them faster and more reliably. It lives at <code>apps/wallet-cli/</code> next to (but not replacing) the legacy <code>apps/cli</code>. It runs on Bun, talks to the device through DMK over USB, and tests itself via in-place mock seams rather than a peer test workspace. Six footguns matter on day one: Base uses the Ethereum app, the DMK is a process-wide singleton, the agent sandbox blocks USB, the storage layout ADR conflicts with what ships, the v0.x version contract is "expect breakage", and Bunli's bare boolean flags currently get dropped. Internalise those before Chapter 5.2 puts you in front of a real prompt.
+<strong>Key takeaway:</strong> <code>apps/cli</code> is the canonical QAA CLI. Sixteen blockchain commands exist; four matter (<code>liveData</code>, <code>getAddress</code>, <code>tokenAllowance</code>, <code>send --mode approve|revokeApproval</code>). The CLI is not a library — it is a subprocess invoked via <code>child_process.spawn</code>, and its behaviour is shaped by two pieces of global state: <code>SPECULOS_API_PORT</code> and <code>DISABLE_TRANSACTION_BROADCAST</code>. Get those two right and the rest of Part 5 lands cleanly.
 </div>
 
-### 5.1.11 Quiz
+### 5.1.12 Quiz
 
 <!-- ── Chapter 5.1 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
+<h3>Chapter 5.1 Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> Why does QAA-615 propose a CLI command (rather than a Playwright test) to revoke a token allowance between regression runs?</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q1.</strong> Which CLI is the QAA canonical CLI?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Playwright cannot sign transactions on a Ledger device</button>
-<button class="quiz-choice" data-value="B">B) Playwright tests are not permitted to broadcast to mainnet</button>
-<button class="quiz-choice" data-value="C">C) Token allowances are persistent on-chain state that does not reset between runs; a one-shot data op is faster, less flaky, and doesn't need a built application</button>
-<button class="quiz-choice" data-value="D">D) The Ledger device only exposes its USB transport to CLI processes</button>
+<button class="quiz-choice" data-value="A">A) <code>apps/cli</code> (<code>@ledgerhq/live-cli</code>) — Node + Commander</button>
+<button class="quiz-choice" data-value="B">B) <code>apps/wallet-cli</code> (<code>@ledgerhq/wallet-cli</code>) — Bun + Bunli + DMK</button>
+<button class="quiz-choice" data-value="C">C) Both, depending on the test</button>
+<button class="quiz-choice" data-value="D">D) Neither — QAA uses a programmatic API instead</button>
 </div>
-<p class="quiz-explanation">An ERC-20 allowance lives inside the token contract. Once approved, it stays approved until explicitly set to zero. To re-test the approval flow, you must revoke between runs. Doing that through the Live UI takes 60+ seconds and a built app; a CLI does it in three. The CLI is test-data infrastructure, not a Playwright competitor.</p>
+<p class="quiz-explanation"><code>apps/cli</code> is canonical and is what every E2E helper in <code>cliCommandsUtils.ts</code> spawns. <code>apps/wallet-cli</code> is experimental and out of scope for QAA.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> Why does QAA need a CLI surface in addition to Playwright (desktop) and Detox (mobile)?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The UI drivers cannot launch Ledger Live</button>
+<button class="quiz-choice" data-value="B">B) Playwright and Detox are too slow for any test</button>
+<button class="quiz-choice" data-value="C">C) The CLI handles test-data infrastructure (seeding accounts, reading allowances, signing one-shot approve / revoke tx) more cheaply and deterministically than UI drivers</button>
+<button class="quiz-choice" data-value="D">D) The CLI is required to compile the desktop app</button>
+</div>
+<p class="quiz-explanation">UI drivers test what users do; the CLI prepares the world they do it in. Allowance state determinism (Chapter 5.2) is the headline reason a CLI revoke hook exists.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> Where do wallet-cli's integration tests live?</p>
+<p><strong>Q3.</strong> The CLI is invoked from tests via what mechanism?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) In a peer workspace at <code>e2e/cli/</code>, mirroring <code>e2e/desktop/</code> and <code>e2e/mobile/</code></button>
-<button class="quiz-choice" data-value="B">B) Inside the application workspace at <code>apps/wallet-cli/src/test/</code></button>
-<button class="quiz-choice" data-value="C">C) Under <code>libs/test-helpers/wallet-cli/</code></button>
-<button class="quiz-choice" data-value="D">D) Inside <code>apps/cli/</code> alongside the legacy CLI tests</button>
+<button class="quiz-choice" data-value="A">A) Direct TypeScript import of <code>send</code> / <code>tokenAllowance</code> from <code>@ledgerhq/live-cli</code></button>
+<button class="quiz-choice" data-value="B">B) <code>child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])</code> in <code>runCli.ts</code></button>
+<button class="quiz-choice" data-value="C">C) HTTP request to a running CLI daemon</button>
+<button class="quiz-choice" data-value="D">D) WebSocket bridge from Detox</button>
 </div>
-<p class="quiz-explanation">wallet-cli is small (~5,860 lines) and uses internal mock seams (<code>_setTestDmkTransport</code>) that would leak across a workspace boundary. Tests live in-place at <code>apps/wallet-cli/src/test/</code>, run with <code>bun test src/</code>, and spawn the actual <code>cli.ts</code> via a custom <code>cli-runner</code> helper.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> Which CLI does the team direct new work to, given that <code>apps/cli</code> still exists alongside <code>apps/wallet-cli</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>apps/wallet-cli/</code> for new work; fall back to <code>apps/cli/</code> only when wallet-cli does not yet replicate the feature (swap, bot, app management, firmware ops)</button>
-<button class="quiz-choice" data-value="B">B) <code>apps/cli/</code> for everything because it has 62 commands and is on npm</button>
-<button class="quiz-choice" data-value="C">C) Either one, freely interchanged within a single hook</button>
-<button class="quiz-choice" data-value="D">D) <code>apps/wallet-cli/</code> only when the operation is read-only; everything else goes through legacy</button>
-</div>
-<p class="quiz-explanation">wallet-cli has the modern stack (Bun, DMK, V1 descriptors, JSON envelope) and is where new work belongs. Legacy <code>apps/cli</code> is still consulted for features wallet-cli has not replicated, but the two should never be mixed in one shell script — different transports, different descriptor formats, different runtimes.</p>
+<p class="quiz-explanation">The CLI is a Node subprocess, not a library. <code>runCli.ts</code> spawns <code>node apps/cli/bin/index.js</code>, captures stdout, and reports exit codes. Every call pays Node startup cost.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> What does the SKILL.md mean by "Base uses the Ethereum app"?</p>
+<p><strong>Q4.</strong> Why does <code>runCliCommand</code> join args with <code>+</code> and split them inside the spawn call?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) wallet-cli does not support Base at all</button>
-<button class="quiz-choice" data-value="B">B) Base transactions are blind-signed, never clear-signed</button>
-<button class="quiz-choice" data-value="C">C) The Base app on the device is named "Ethereum" for branding reasons</button>
-<button class="quiz-choice" data-value="D">D) On the Ledger device firmware, EVM L2s like Base, Polygon, Arbitrum and Optimism are signed via the Ethereum app — there is no separate Base app to open. wallet-cli's <code>withCurrencyDeviceSession</code> opens whatever the live-common metadata's <code>managerAppName</code> declares, which is "Ethereum" for any EVM family.</button>
+<button class="quiz-choice" data-value="A">A) Commander requires <code>+</code>-separated args</button>
+<button class="quiz-choice" data-value="B">B) It enables Bash globbing of arg lists</button>
+<button class="quiz-choice" data-value="C">C) It is required by Speculos's REST API</button>
+<button class="quiz-choice" data-value="D">D) To avoid shell-escape pain when forwarding args across processes; <code>+</code> never appears in real CLI arg values</button>
 </div>
-<p class="quiz-explanation">This is a silent constraint in source and README — only the SKILL.md flags it explicitly. The device firmware uses the Ethereum app for any chainId in the EVM family. If you discover a Base account and see "Open the Ethereum app", that's expected.</p>
+<p class="quiz-explanation">The <code>+</code> separator is a convention. The engine splits on <code>+</code> before passing argv to <code>spawn</code>, which itself does not invoke a shell — the trick is purely about safely composing the arg string in a single TypeScript variable.</p>
 </div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> Why does <code>register-dmk-transport.ts</code> hold a process-wide DMK singleton instead of creating one per command?</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q5.</strong> What does <code>LEDGER_LIVE_CLI_BIN</code> resolve to?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) DMK is too expensive to instantiate</button>
-<button class="quiz-choice" data-value="B">B) Bun does not garbage-collect DMK objects</button>
-<button class="quiz-choice" data-value="C">C) Each <code>createDeviceManagementKit()</code> call adds node-usb hotplug listeners; closing and recreating stacks listeners and breaks the 3rd in-process connect</button>
-<button class="quiz-choice" data-value="D">D) The Ledger device only accepts one DMK session per firmware lifetime</button>
+<button class="quiz-choice" data-value="A">A) An absolute path to <code>apps/cli/bin/index.js</code> computed via <code>path.resolve(__dirname, "../../../../apps/cli/bin/index.js")</code></button>
+<button class="quiz-choice" data-value="B">B) The string <code>"ledger-live"</code> resolved via <code>$PATH</code></button>
+<button class="quiz-choice" data-value="C">C) An npm package URL</button>
+<button class="quiz-choice" data-value="D">D) The path to <code>apps/wallet-cli/bin/index.js</code></button>
 </div>
-<p class="quiz-explanation">A source comment in <code>register-dmk-transport.ts</code> spells it out. Tests respect the singleton via the <code>_setTestDmkTransport()</code> seam.</p>
+<p class="quiz-explanation">The constant in <code>runCli.ts</code> is a relative-path resolution from the compiled location of <code>runCli.ts</code> back up to the monorepo root and into <code>apps/cli/bin/index.js</code>. It does not depend on <code>$PATH</code> and it does not use the <code>ledger-live</code> bin alias.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -387,5810 +406,3581 @@ This is a live Bunli behaviour, not a wallet-cli bug. If you write `wallet-cli s
 
 ---
 
-## Bun & Bunli Primer
+
+## Approvals and revokes — the blockchain primer
 
 <div class="chapter-intro">
-The CLI runs on a stack you have not seen earlier in the guide. Part 3's desktop suite is Node-on-Electron. Part 4's mobile suite is Node-on-Detox. Part 5's CLI is Bun. The command framework on top of Bun is Bunli. This chapter covers just enough Bun to stop you tripping over the differences from Node, then takes you through Bunli's command shape carefully — because every command you write or read will look like the same five-piece skeleton — and ends with you running your first wallet-cli command.
+Before we walk the five layers of CLI integration, you need a mental model of what an ERC-20 approval actually <em>is</em> on chain — and why the state it creates is the QA problem the revoke hook exists to solve. This chapter is a focused primer: ERC-20 storage, the <code>approve</code> selector, calldata layout, the unlimited-approval footgun, and how the Ledger device clear-signs the operation.
 </div>
 
-### 5.2.1 Why Bun
+### 5.2.1 What you'll learn
 
-Bun is a JavaScript runtime, package manager, bundler, and test runner. It started in 2022 as "a faster Node" and reached 1.0 in 2023. By 2026 it is stable enough to ship production CLIs on. The wallet-cli team picked it; here's the reasoning condensed.
+You will learn how ERC-20 token contracts store balances and allowances; what the `approve(address,uint256)` function does at the calldata level; why allowances persist across test runs and break determinism; and how `revoke` is the same function with `amount = 0`. Forty minutes of theory, then we wire it into the CLI in Chapter 5.3 onward. If you already know ERC-20 inside out, skim 5.2.6 (the QA framing of why the state matters) and 5.2.9 (clear-sign behaviour on the device) — those are the QA-specific pieces that connect the blockchain primer to the rest of Part 5.
 
-**Speed.** Bun's startup is on the order of 50-150 ms cold for a non-trivial TypeScript file. Node's is closer to 200-500 ms with `tsx` or `ts-node`. For a CLI you might invoke 50 times in a regression hook, a 150 ms-per-invocation saving compounds. The numbers are not magic — Bun is written in Zig, uses JavaScriptCore (Safari's engine, faster startup than V8), and has a faster module resolver — but the practical effect is "runs and exits before you notice".
+### 5.2.2 ERC-20 storage model
 
-**Native TypeScript.** No `tsc` step before run. No `ts-node`. No `tsx`. `bun run ./src/cli.ts` executes the file. The wallet-cli's `start` script is literally `"start": "bun run ./src/cli.ts"`. There is still a `pnpm typecheck` script (`tsc --noEmit -p tsconfig.json`) that catches type errors Bun's bundler doesn't enforce at runtime — Bun strips types, it doesn't check them — but you don't pay the type-check cost on every run.
+An ERC-20 token contract holds two pieces of state, both indexed by Ethereum address:
 
-**Native test runner.** Bun ships `bun test`. No Jest, no Vitest, no setup. The test framework is API-compatible with Jest in the parts that matter (`describe`, `it`, `expect`, `beforeAll`/`afterEach`, mocks). It also has a `--coverage` flag that emits lcov by default. The wallet-cli's `bunfig.toml` configures it:
-
-```toml
-[test]
-coverageReporter = ["lcov"]
-coverageDir = "coverage"
 ```
-
-That's the whole test runner config. Compare with `e2e/mobile/jest.config.js` and the per-environment Jest setup files from Part 4.
-
-**`bun --compile`** produces a single ~94 MB binary that embeds the Bun runtime and all dependencies. The wallet-cli targets four platforms (`darwin-arm64`, `linux-arm64`, `linux-x64`, `windows-x64`) via `bunli build`. For QA, the implication is that you can drop a wallet-cli binary into a CI runner without a Node install or a pnpm install. Open ticket **LIVE-29308** ("Installation/distribution strategy") tracks the alternative `npm install -g @ledgerhq/wallet-cli` path; today the standalone binary is the primary distribution model.
-
-**What Bun is not.** Bun is not yet 100% Node-compatible. There are corners where it diverges:
-
-- Bun's resolver treats CJS and ESM imports of the same module as **separate singletons**. wallet-cli's `live-common-setup.ts` calls `LiveConfig.setConfig(walletCliConfig)` twice for that reason — once via ESM, once via CJS — because Alpaca-routed families read ESM and bridge-routed families read CJS.
-- Bun's bundler can't follow `node-gyp-build`'s dynamic `fs.readdirSync` for native addons. wallet-cli works around this with `embed-usb-native.ts`, a manual `require()` of the platform-specific `usb/prebuilds/*/node.napi.node`.
-- `@bunli/core`'s default `createCLI()` does a dynamic `import('file://...')` of the generated commands manifest. In Bun standalone mode that hangs. wallet-cli applies a local patch to `@bunli/core` and replaces the dynamic import with a static one in `cli.ts` (you'll see the comment in the next section).
-
-These are not deal-breakers — the team works around them — but they are the kind of thing a "just use Bun" pitch elides. You will see Bun-specific workarounds in the wallet-cli source and they all trace back to one of the three issues above.
-
-The reader question to keep in mind: is Bun the right choice for *your* CLI? For wallet-cli, yes — speed and the standalone binary outweigh the workarounds. For a one-off ten-line script, probably not. For Part 5 you don't need to relitigate the choice; you just need to know the runtime well enough to read the source.
-
-### 5.2.2 Bunli at a glance
-
-Bunli is a CLI framework for Bun. It is to Bun what Yargs or Commander is to Node — it parses argv, validates flags, dispatches to handlers, generates `--help`. Three things distinguish it:
-
-1. **Command-and-handler model**, similar to oclif or Cobra (Go) but lighter. You declare a command with `defineCommand({ name, description, options, handler })`. Bunli builds the parser tree, validates with Zod, calls the handler.
-2. **Codegen step.** `bunli generate` walks the commands directory and produces a static command manifest. The manifest is committed to `.bunli/commands.gen.ts`. CI verifies it via a `generate:check` script.
-3. **`bunli build` produces standalone binaries.** Each target (`darwin-arm64`, `linux-arm64`, `linux-x64`, `windows-x64`) gets its own Bun-compiled binary with the runtime embedded.
-
-Where Bunli lives in the project:
-
-- **`bunli.config.ts`** — top-level config: name, version, commands directory, build targets.
-- **`bunfig.toml`** — Bun runtime config (the `[test]` section affects `bun test`).
-- **`.bunli/commands.gen.ts`** — codegen output. Auto-generated, committed.
-- **`src/commands/`** — per-command modules. Each file (or sub-directory `index.ts` for groups) exports a `defineCommand` or `defineGroup` default.
-
-The `bunli.config.ts` file in the wallet-cli is small. Verbatim:
-
-```ts
-import { defineConfig } from "bunli";
-
-export default defineConfig({
-  name: "wallet-cli",
-  version: "0.1.0",
-  description: "Ledger Wallet CLI",
-  commands: { directory: "./src/commands" },
-  build: {
-    entry: "./src/cli.ts",
-    outdir: "./dist",
-    minify: true,
-    targets: ["darwin-arm64", "linux-arm64", "linux-x64", "windows-x64"],
-  },
-});
-```
-
-Five fields you'll touch and zero you won't:
-
-- `name` — the binary name. After `bunli build`, the binary is `wallet-cli`.
-- `version` — currently `0.1.0`. Pre-1.0 means breaking changes are allowed.
-- `description` — appears in `--help`.
-- `commands.directory` — Bunli scans this tree for `defineCommand`/`defineGroup` modules.
-- `build` — entry, outdir, targets, minify flag.
-
-The minify flag is the reason `embed-usb-native.ts` works. With minify on, Bun evaluates `process.platform` and `process.arch` at compile time, dead-code-eliminating the branches for other platforms. Each binary contains only its own platform's prebuilt USB addon.
-
-Now look at the entry file (`src/cli.ts`, full text — 20 lines):
-
-```ts
-#!/usr/bin/env bun
-import "./embed-usb-native";
-import { createCLI } from "@bunli/core";
-import "./live-common-setup";
-// createCLI() normally tries to import .bunli/commands.gen.ts from process.cwd() via a file:// URL.
-// Our @bunli/core patch removes that dynamic import entirely because it can hang in Bun standalone
-// mode, this static import registers commands instead.
-// This side-effect import registers commands in the standalone binary.
-import "../.bunli/commands.gen";
-import bunliConfig from "../bunli.config";
-import { disposeWalletCliDmkTransportFully } from "./device/register-dmk-transport";
-
-// Pass config explicitly so the compiled binary does not depend on cwd for bunli.config.* discovery.
-const cli = await createCLI(bunliConfig as unknown as Parameters<typeof createCLI>[0]);
-await cli.run();
-
-// Release the process-wide DMK + node-usb hotplug listeners (see persistentDmk in register-dmk-transport).
-// Error paths already call process.exit(1) inside bunli, so this only runs on success.
-await disposeWalletCliDmkTransportFully();
-process.exit(0);
-```
-
-Six side effects, in order:
-
-1. **`embed-usb-native`** — fires the platform-specific `require()` so Bun bundles the native addon.
-2. **`createCLI` import** — pulls in the patched `@bunli/core`.
-3. **`live-common-setup`** — registers coin modules with live-common, registers the DMK transport module so anywhere live-common does `withDevice("wallet-cli-dmk")(…)` it routes through DMK, configures `LiveConfig` (twice, ESM + CJS).
-4. **`commands.gen`** — the generated manifest. Importing it triggers `registerGeneratedStore(...)`, statically wiring every command into the Bunli store.
-5. **`createCLI(bunliConfig)`** — builds the CLI from the explicit config.
-6. **`cli.run()`** — Bunli parses argv, validates flags, dispatches.
-
-After `cli.run()` returns, the success path explicitly disposes the DMK to release node-usb hotplug listeners. Error paths exit via Bunli's own `process.exit(1)` and skip the dispose; that's intentional because errors already triggered cleanup.
-
-The two non-obvious decisions:
-
-- **Why static import of `commands.gen.ts`?** Because Bun standalone mode hangs on `@bunli/core`'s default dynamic `import('file://...')`. The local patch replaces dynamic with static.
-- **Why pass `bunliConfig` explicitly?** Because the standalone binary can't find `bunli.config.ts` at runtime (its `cwd` is wherever the user runs it from, not the project root). The config is bundled in.
-
-### 5.2.3 The Bunli command shape
-
-Every Bunli command file follows the same skeleton. The smallest non-trivial example in the wallet-cli is `src/commands/balances.ts` — 34 lines. Here it is annotated.
-
-```ts
-// 1. Imports — Bunli's defineCommand and Zod's option helper, plus the
-//    shared option helpers (account-resolution, output format) and the
-//    output abstraction.
-import { defineCommand, option } from "@bunli/core";
-import { z } from "zod";
-import { accountOption, outputOption, resolveAccountArg, resolveAccountDescriptor } from "./inputs";
-import { createCommandOutput } from "../output";
-import { networkStringFromCurrencyId } from "../shared/accountDescriptor";
-import { WalletAdapter } from "../wallet";
-
-// 2. The default export. defineCommand is Bunli's command constructor.
-export default defineCommand({
-
-  // 3. Name — what the user types after the binary. For a top-level
-  //    command, this is the verb directly: `wallet-cli balances`.
-  name: "balances",
-
-  // 4. Description — used in `--help` output, both for the parent and
-  //    in the command's own help.
-  description: "Print balances for an account (native + token sub-accounts).",
-
-  // 5. Options — keyed by flag name. Each value is `option(zodSchema, meta)`.
-  //    Bunli auto-generates --help text from the Zod descriptions and
-  //    validates the parsed value against the schema before calling the
-  //    handler.
-  options: {
-    account: accountOption,    // `--account/-a <descriptor-or-label>`
-    output: outputOption,      // `--output human|json` (default human)
-  },
-
-  // 6. The handler. Receives `flags` (the validated option values) and
-  //    `positional` (the array of positional args). Returns Promise<void>.
-  handler: async ({ flags, positional }) => {
-
-    // 6a. Build the JSON-envelope context. `command`, `network`, and
-    //     `account` are filled in as we resolve them.
-    const ctx = { command: "balances", network: "", account: "" };
-
-    // 6b. createCommandOutput returns either a HumanCommandOutput or a
-    //     JsonCommandOutput depending on flags.output. Both expose the
-    //     same semantic methods (`balances`, `address`, `sendEvent`).
-    const out = createCommandOutput(flags.output, ctx);
-
-    // 6c. out.run(fn) wraps the body. Errors thrown inside fn are
-    //     caught by the JSON output (which writes an error envelope and
-    //     exit(1)) or rethrown by the human output (so Bunli's default
-    //     error display kicks in).
-    await out.run(async () => {
-
-      // 6d. Resolve the account argument. resolveAccountArg picks the
-      //     value from --account, falling back to positional[0]. It
-      //     throws if neither is set.
-      const accountArg = resolveAccountArg(flags.account, positional);
-
-      // 6e. resolveAccountDescriptor handles two shapes:
-      //     - contains ":" → it's a descriptor, parse it directly.
-      //     - no ":" → it's a session label, look it up in session.yaml.
-      const descriptor = await resolveAccountDescriptor(accountArg);
-
-      // 6f. Fill in the envelope context now that we know the network.
-      ctx.network = networkStringFromCurrencyId(descriptor.currencyId);
-      ctx.account = descriptor.id;
-
-      // 6g. Fetch the data via WalletAdapter (which routes to Alpaca
-      //     for EVM, bridge sync otherwise).
-      const balances = await WalletAdapter.getAccountBalances(descriptor);
-
-      // 6h. Hand the data to the output abstraction. It formats
-      //     human-readable lines on stdout or buffers for the JSON
-      //     envelope.
-      out.balances(balances);
-    });
-  },
-});
-```
-
-Five things to internalise:
-
-- **Zod everywhere.** Flags are Zod schemas. Intent shapes are Zod schemas. Outputs are Zod schemas. Validation happens before your handler runs and after your handler returns. There is no manual `if (typeof x === "string")`.
-- **`out.run(fn)` is the canonical wrapper.** Every command's handler calls `out.run(async () => { … })`. That's where error-to-envelope translation happens, where the JSON shape is computed, where the human spinner is started and stopped. Don't write commands that bypass it.
-- **Three resolution helpers**, all in `src/commands/inputs.ts` (the file the briefing called `shared-options.ts`). `resolveAccountArg` picks between `--account` and positional. `resolveAccountInput` handles label-vs-descriptor. `resolveAccountDescriptor` parses to a V0 descriptor (the legacy live-common shape). For V1-only commands there's `resolveAccountDescriptorV1`.
-- **Context object is mutable.** `ctx.network` and `ctx.account` are filled in *after* the descriptor is resolved. The output abstraction reads `ctx` each time you call a method — so when your handler eventually calls `out.balances(...)`, the envelope already has the right `network` and `account` set.
-- **The handler returns nothing.** Bunli does not collect a return value. Output goes through `out.*` methods (which know whether to write text or buffer JSON). Exit code is 0 unless `out.run` catches an error.
-
-For comparison, look at the legacy CLI's `balances` equivalent in `apps/cli/`. It's free-form `console.log` with no envelope, no Zod, no shared option helpers. That's the Yargs/Commander idiom — and it's why TA/6951665759's friction-point list opens with "Output is human-readable strings. There is no structured JSON envelope."
-
-The architectural value of the Bunli command shape is that **every command file looks the same**. Once you've read `balances.ts`, you've read the structure of `operations.ts`, `receive.ts`, `send.ts`, and the future `revoke.ts`. The differences are in:
-
-- **Which options are declared** — `send.ts` has `--to`, `--amount`, `--data`, `--dry-run`, etc.
-- **Whether the handler opens a device session** — `balances` and `operations` skip `withCurrencyDeviceSession`; `receive` (with `--verify`), `send`, and `account discover` use it.
-- **Which `WalletAdapter` method is called** — `getAccountBalances`, `getAccountOperations`, `verifyAddress`, `send`, etc.
-- **What the output type is** — a list, a single value, a stream of events.
-
-Those are the four axes of variation. The plumbing — option parsing, error envelope, JSON serialisation, spinner, exit code — is identical across all commands. Once you can write one command, you can write all of them.
-
-The Bunli command-and-handler model gives you the structure for free. You write five lines of declaration, you get `--help`, type validation, parsing, dispatch, and a typed `flags` object inside your handler.
-
-A group command (subcommand parent) uses `defineGroup` instead of `defineCommand`. Example from `src/commands/account/index.ts`:
-
-```ts
-import { defineGroup } from "@bunli/core";
-import DiscoverCommand from "./discover";
-import FreshAddressCommand from "./fresh-address";
-
-export default defineGroup({
-  name: "account",
-  description: "Account management commands",
-  commands: [DiscoverCommand, FreshAddressCommand],
-});
-```
-
-This makes `wallet-cli account discover` and `wallet-cli account fresh-address` valid invocations. Bunli composes `name` segments to build the dispatch tree.
-
-### 5.2.4 The codegen step
-
-Bunli's static command manifest lives at `.bunli/commands.gen.ts`. Its header is unambiguous:
-
-> "This file was automatically generated by Bunli. You should NOT make any changes in this file as it will be overwritten."
-
-What it does (215 lines, condensed):
-
-```ts
-// 1. Static imports of every command module.
-import Account from '../src/commands/account/index.js';
-import Balances from '../src/commands/balances.js';
-import Discover from '../src/commands/account/discover.js';
-import FreshAddress from '../src/commands/account/fresh-address.js';
-import Operations from '../src/commands/operations.js';
-import Receive from '../src/commands/receive.js';
-import Reset from '../src/commands/session/reset.js';
-import Send from '../src/commands/send.js';
-import Session from '../src/commands/session/index.js';
-import View from '../src/commands/session/view.js';
-
-// 2. Builds a `modules` map (path → command) and a `metadata` map
-//    (path → mirrored option schema).
-
-// 3. Calls registerGeneratedStore(createGeneratedHelpers(modules, metadata)).
-
-// 4. Auto-registers commands on import.
-```
-
-Why the codegen exists:
-
-1. **Static dispatch.** Without the manifest, Bunli would walk `src/commands/` at runtime via `fs.readdir`. That works in dev but breaks in standalone-binary mode where the directory doesn't exist on the user's filesystem.
-2. **Type-safe command registry.** The generated `metadata` map mirrors every command's option schema, which downstream tooling can introspect (autocompletion, AI skills).
-3. **Single source of truth.** The team can add a command, run `bunli generate`, and the manifest is updated. CI verifies via `pnpm generate:check`.
-
-The `generate:check` script is a CI gate:
-
-```json
-"generate:check": "bunli generate && git diff --exit-code -- .bunli/commands.gen.ts"
-```
-
-It runs the generator, then `git diff --exit-code` fails if anything changed. If the developer added a command but forgot to commit the regenerated manifest, CI catches it. This is identical in spirit to the lockfile drift check in many monorepos: the generated artefact is committed and verified.
-
-For the QA reader, three implications:
-
-- **Adding a command is two steps**: write the file under `src/commands/`, run `pnpm generate`. Forgetting step 2 fails CI.
-- **Don't hand-edit `commands.gen.ts`**. Your change will be obliterated on the next `pnpm generate`.
-- **The manifest is also why `cli.ts` does the static import**. The manifest registers commands as a side effect of being imported. Static import pulls in the side effect; dynamic import would be slower and (in Bun standalone) hangs.
-
-### 5.2.5 Shared options across commands
-
-`src/commands/inputs.ts` (53 lines) defines the option helpers every leaf command imports. Two of them are flags; the rest are resolution functions.
-
-```ts
-import { option } from "@bunli/core";
-import { z } from "zod";
-import { OutputFormatSchema, parseAccountDescriptor } from "../wallet/models";
-import { parseV1, type AccountDescriptorV1 } from "../shared/accountDescriptor";
-import { Session } from "../session/session-store";
-
-// Shared flag definitions.
-
-export const accountOption = option(z.string().min(1).optional(), {
-  description: "Account descriptor or session label (e.g. ethereum-1). Can also be the first positional arg.",
-  short: "a",
-});
-
-export const outputOption = option(OutputFormatSchema.default("human"), {
-  description: "Output format: human (default) or json",
-});
-
-// Resolution helpers.
-
-export function resolveAccountArg(account: string | undefined, positional: readonly string[]): string {
-  const arg = account ?? positional[0];
-  if (!arg) throw new Error("Missing account: use --account <descriptor-or-label> or pass as first positional argument.");
-  return arg;
-}
-
-// Contains ":" → V0/V1 descriptor passthrough; no ":" → session label lookup.
-export async function resolveAccountInput(input: string): Promise<string> {
-  if (input.includes(":")) return input;
-  const session = await Session.read();
-  const entry = session.accounts.find(e => e.label === input);
-  if (!entry) {
-    throw new Error(
-      `No account labeled "${input}" in session. Available labels: ${session.accounts.map(e => e.label).join(", ") || "(none)"}. Run "wallet-cli account discover <network>" to populate.`
-    );
+USDC contract @ 0xA0b8...eB48:
+  balances: {
+    0xYou:   100_000_000   // 100 USDC (6 decimals)
+    0xAlice:  50_000_000   // 50 USDC
+    ...
   }
-  return entry.descriptor;
-}
-
-export async function resolveAccountDescriptor(input: string) {
-  return parseAccountDescriptor(await resolveAccountInput(input));
-}
-
-export async function resolveAccountDescriptorV1(input: string): Promise<AccountDescriptorV1> {
-  return parseV1(await resolveAccountInput(input));
-}
-```
-
-Three things this file does that you should not duplicate per-command:
-
-1. **`accountOption`** standardises the `--account/-a` flag with a uniform description and shorthand. Every command that takes an account adopts this exact flag definition.
-2. **`outputOption`** standardises `--output human|json` with a `human` default. Every command supports both modes by including this option.
-3. **`resolveAccountInput`** implements the **session label resolver**. If your input contains `":"`, it's a descriptor; pass it through. If not, it's a label like `ethereum-1`; look it up in `session.yaml`. After running `account discover ethereum`, you get auto-generated labels (`ethereum-1`, `ethereum-2`, …) and every subsequent command accepts the short label.
-
-The "labels resolve when no colon" rule is concise enough to memorise. It also explains why the V1 descriptor uses `h` for hardened path segments instead of `'`: a single quote breaks shell quoting, and `h` is a documented alias in the V1 spec. Hardened path `m/44'/60'/0'/0/0` becomes `m/44h/60h/0h/0/0`.
-
-When you write a new command (say, `revoke`), you should import the same helpers:
-
-```ts
-import { accountOption, outputOption, resolveAccountArg, resolveAccountDescriptor } from "./inputs";
-
-export default defineCommand({
-  name: "revoke",
-  description: "...",
-  options: {
-    account: accountOption,
-    spender: option(z.string().regex(/^0x[0-9a-fA-F]{40}$/), { description: "DEX router address" }),
-    output: outputOption,
-  },
-  handler: async ({ flags, positional }) => {
-    const descriptor = await resolveAccountDescriptor(resolveAccountArg(flags.account, positional));
-    // …
-  },
-});
-```
-
-You get the right flag descriptions, the right shorthand, the right session-label behaviour, the right error messages — all from one import.
-
-### 5.2.6 Output: human vs JSON envelope
-
-Every wallet-cli command supports `--output human` (default, colourful, spinner-driven) and `--output json` (one envelope per process to stdout).
-
-The JSON envelope is the contract for any test hook consuming the CLI. It looks like this for success (from `src/shared/response.ts`):
-
-```ts
-// makeEnvelope(command, network, data, account?)
-return {
-  status: "success",
-  command,
-  network,
-  ...(account == null ? {} : { account }),
-  ...data,
-  timestamp: new Date().toISOString(),
-};
-```
-
-So a successful `balances` command returns:
-
-```json
-{
-  "status": "success",
-  "command": "balances",
-  "network": "ethereum:main",
-  "account": "account:1:address:ethereum:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44h/60h/0h/0/0",
-  "balances": [
-    { "asset": "ethereum", "amount": "1.5 ETH" },
-    { "asset": "ethereum/erc20/usd_tether__erc20_", "amount": "100 USDT" }
-  ],
-  "timestamp": "2026-04-27T14:32:00.000Z"
-}
-```
-
-For a successful `send`:
-
-```json
-{
-  "status": "success",
-  "command": "send",
-  "network": "ethereum:main",
-  "account": "account:1:address:ethereum:main:0x…:m/44h/60h/0h/0/0",
-  "tx_hash": "0xabc...123",
-  "amount": "0.5 ETH",
-  "fee": "0.0003 ETH",
-  "timestamp": "2026-04-27T14:32:00.000Z"
-}
-```
-
-For a `--dry-run` send, the payload is `{ dry_run: true, recipient, amount, fee }` and there is no `tx_hash`.
-
-The error envelope is **a different shape** — and this is a real wart, flagged in R1:
-
-```json
-{ "ok": false, "error": { "command": "balances", "message": "No account labeled \"foo\" in session…" } }
-```
-
-There's no `status: "success"` on errors. There's `ok: false` instead. Tests check `data.ok === false` for error and `data.command` for success. R1 calls this "a real wart" and recommends future versions unify on a single shape; for now, hooks must handle both.
-
-Why human and JSON share the same handler:
-
-- **`createCommandOutput(flags.output, ctx)`** picks the implementation:
-  - **`HumanCommandOutput`** uses `yocto-spinner` on stderr, ANSI colours on stdout, and re-throws errors so Bunli's default error display fires.
-  - **`JsonCommandOutput`** buffers data, emits a single envelope at the end via `writeSync(1, JSON.stringify(envelope))`. On error it writes the error envelope and `process.exit(1)`. (It uses `writeSync(1, …)` because Bun.spawn on Linux doesn't reliably capture fd 2 (stderr) — observable in CI, hence the workaround.)
-
-For a hook, the contract is simple:
-
-1. Spawn `wallet-cli <cmd> --output json`.
-2. Capture stdout. Wait for process exit.
-3. `JSON.parse(stdout.trim())`. If `parsed.ok === false`, the command failed — read `parsed.error.message`. Otherwise read the success fields.
-4. Don't capture stderr for parsing — that's where spinners and human messages go in mixed-mode CI runs.
-
-A worked example. Consider the QAA-613 nightly hook that has to ensure allowance is zero before each test:
-
-```ts
-// e2e/desktop/hooks/revoke-before-swap.ts (illustrative — Chapter 5.8 ships the real version)
-import { spawn } from "node:child_process";
-
-export async function ensureAllowanceZero(label: string, spender: string): Promise<void> {
-  const args = ["wallet-cli", "start", "--", "revoke", label, "--spender", spender, "--output", "json"];
-  const proc = spawn("pnpm", args, { stdio: ["ignore", "pipe", "inherit"] });
-  let stdout = "";
-  proc.stdout.on("data", (chunk) => { stdout += chunk; });
-  const code = await new Promise<number>((res) => proc.on("close", res));
-  const parsed = JSON.parse(stdout.trim());
-  if (parsed.ok === false || code !== 0) {
-    throw new Error(`revoke failed: ${parsed.error?.message ?? "unknown"}`);
+  allowances: {
+    0xYou: {
+      0xUniswap: 0
+      0xLifi:    0
+      0xRouter:  100_000_000   // you've allowed Router to spend 100 USDC of yours
+    }
+    0xAlice: { ... }
   }
-  // parsed.tx_hash is now available for logging.
-}
 ```
 
-That's the entire integration shape. The hook is twenty lines, the test it serves is unchanged, and the wallet-cli does the heavy lifting (build calldata, sign on device, broadcast, parse receipt). When the regression suite runs, this hook executes before each swap test, the chain state resets to allowance=0, and the test starts deterministic.
+`balances[addr]` answers "how much do I own?". `allowances[owner][spender]` answers "how much of `owner`'s balance is `spender` allowed to move on `owner`'s behalf?". Both are persistent on-chain state. Both survive every off-chain restart you can think of: simulator restarts, repo re-clones, CI runner recycles, your laptop reboot.
 
-This pattern is also what makes Chapter 5.8's QAA-615 walkthrough land cleanly — the spike's deliverable is the `revoke` command, the consumer is exactly this kind of pre-test hook.
+The only way to change `allowances[you][spender]` is to send a transaction that calls a function on the token contract — almost always `approve(spender, newAmount)`.
 
-### 5.2.7 Bun's test runner — first peek
+Two storage details matter for QA work. First, `balances[addr]` and `allowances[owner][spender]` are *separate* mappings; spending allowance does not move balance. A spender contract calls `transferFrom(owner, recipient, amount)`, which atomically decreases `allowances[owner][spender]` by `amount` and decreases `balances[owner]` by `amount` (transferring it to `recipient`). A revoke does not refund balance — it only zeroes the delegation. Second, every token contract is its own state silo: USDC's allowances map is independent of USDT's, of DAI's, of every other ERC-20. Revoking USDC does nothing for USDT. Tests that touch multiple tokens need a revoke per token they touched.
 
-Bun's test runner is the default for `bun test src/`. It's API-compatible with Jest in the parts you'll use (`describe`, `it`, `expect`, `beforeAll`, `afterEach`, `vi.mock` equivalents).
-
-For wallet-cli, `pnpm test` runs `bun test src/`. `pnpm coverage` adds `--coverage`. Coverage output is lcov per `bunfig.toml`.
-
-A single test from `src/commands/inputs.test.ts` (19 lines) gives you the flavour:
-
-```ts
-import { describe, it, expect } from "bun:test";
-import { resolveAccountArg } from "./inputs";
-
-describe("resolveAccountArg", () => {
-  it("prefers --account over positional", () => {
-    expect(resolveAccountArg("ethereum-1", ["ethereum-2"])).toBe("ethereum-1");
-  });
-  it("falls back to positional[0] when --account is undefined", () => {
-    expect(resolveAccountArg(undefined, ["ethereum-2"])).toBe("ethereum-2");
-  });
-  it("throws when neither is set", () => {
-    expect(() => resolveAccountArg(undefined, [])).toThrow(/Missing account/);
-  });
-});
-```
-
-Three things to notice:
-
-- `import { describe, it, expect } from "bun:test"` — note the `bun:` namespace. In Jest you import from `@jest/globals` (or rely on globals); in Bun you import from `bun:test`.
-- No config file. The test runner picks up `*.test.ts` files under the path you give it (`bun test src/`).
-- Mocks are colocated. Tests that need a mock device install it via env vars (`WALLET_CLI_MOCK_DMK=1`). Tests that need a mock HTTP server spin up a `MockServer` in `beforeEach`.
-
-Chapter 5.6 walks the entire test harness: `cli-runner`, `mock-DMK`, `http-intercept`, `mock-server`, `session-fixture`. For now, the takeaway is:
-
-- Unit tests live next to the file they cover (`inputs.test.ts` next to `inputs.ts`).
-- Integration tests live under `src/test/commands/` and spawn the actual CLI subprocess to assert on stdout.
-- Both run under `bun test src/`.
-
-### 5.2.8 Your first wallet-cli command — `balances --help`
-
-Time to actually run something. We'll do this in three steps and avoid touching the device.
-
-**Step 1: install dependencies.**
-
-From the repo root:
-
-```bash
-pnpm install
-```
-
-This installs everything in the monorepo. wallet-cli is one workspace among many — pnpm picks it up automatically.
-
-**Step 2: get help.**
-
-The cleanest first invocation is `--help`. It needs no device, no network, and works in the agent sandbox:
-
-```bash
-pnpm wallet-cli start -- balances --help
-```
-
-The `--` separates pnpm's own argv from the wallet-cli's. `pnpm wallet-cli start` resolves to `pnpm --filter @ledgerhq/wallet-cli run start --` (per the root-level passthrough in the monorepo's `package.json`), which resolves to `bun run ./src/cli.ts`, which then receives `balances --help` as its own argv.
-
-You should see something like:
+A worked illustration of the two-mapping separation:
 
 ```
-Usage: wallet-cli balances [options]
+Before:
+  USDC.balances[Alice]            = 1000
+  USDC.allowances[Alice][Router]  = 100
 
-Print balances for an account (native + token sub-accounts).
+Alice signs and sends:
+  Router.swapExactTokensForETH(100, ...) on Router contract
 
-Options:
-  -a, --account <string>     Account descriptor or session label (e.g. ethereum-1).
-                             Can also be the first positional arg.
-      --output <human|json>  Output format: human (default) or json (default: "human")
-  -h, --help                 Show help
+Inside Router.swap(...):
+  Router calls USDC.transferFrom(Alice, Router, 100)
+  USDC contract atomically:
+    balances[Alice]            -= 100   → 900
+    balances[Router]           += 100   → +100
+    allowances[Alice][Router]  -= 100   → 0
+  Router then routes the 100 USDC through pools, eventually
+  sending ETH to Alice.
+
+After:
+  USDC.balances[Alice]            = 900
+  USDC.allowances[Alice][Router]  = 0   (consumed exactly)
+  Alice received some ETH (off the USDC contract)
 ```
 
-The flag list and descriptions come from your Zod schemas in `inputs.ts`. The `-a` shorthand comes from `accountOption`'s `short: "a"`. The default value of `--output` comes from `outputOption`'s `OutputFormatSchema.default("human")`.
+In this example the swap consumed the allowance exactly, so the post-state allowance is already zero — no explicit revoke needed. In practice, most swaps approve a slippage-padded amount (the `× 1.2` in `ensureTokenApproval`), the swap consumes only the actual amount, and a small leftover allowance remains. That leftover is benign but persistent — the next test sees a non-zero allowance and may take a different on-device path. Hence the revoke hook.
 
-**Step 3: try a no-device JSON call.**
+### 5.2.3 Why allowances exist
 
-`balances` does not need the device — it routes to Alpaca (for EVM) or to a bridge sync (other families). Both are network calls, not USB. So we can run it in the sandbox.
+ERC-20 was finalised as EIP-20 in late 2015. The original design separated two concerns:
 
-Use a known address (Vitalik's, padded with the deterministic Hardhat address for path):
+1. **Ownership.** Only the address that owns tokens can move them.
+2. **Delegation.** A protocol (a DEX, a lending market, a staking contract) needs to move user tokens during a swap or deposit, but the user does not want to send tokens to the protocol first and then trust it to send them back.
 
-```bash
-pnpm wallet-cli start -- balances \
-  account:1:address:ethereum:main:0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045:m/44h/60h/0h/0/0 \
-  --output json
+Allowances are the delegation primitive. The user calls `approve(spender, N)` once, and afterwards the spender contract can call `transferFrom(user, anywhere, ≤N)` without the user signing each individual movement. The user remains the owner; the spender is a bounded delegate.
+
+This is why every ERC-20 swap, every Aave deposit, every Compound supply, every staking deposit starts with an approval transaction. It's also why "infinite approvals" became the industry default — and why they're a security footgun (5.2.8).
+
+The flow for a typical swap, from the chain's point of view:
+
+```
+Tx 1:  user --approve(Router, 100)--> USDC contract
+       (sets allowances[user][Router] = 100; gas: ~46k)
+
+Tx 2:  user --swap(usdc=100, ...)--> Router
+       Inside Router's logic:
+         Router --transferFrom(user, Router, 100)--> USDC contract
+         (atomically: allowances[user][Router] -= 100, balances[user] -= 100,
+          balances[Router] += 100)
+         …Router then routes those 100 USDC through one or more pools,
+         eventually delivering output tokens back to the user…
 ```
 
-You'll get something like:
+Two transactions, two signatures. The approval is the user saying "yes, this Router can take up to 100 USDC of mine"; the swap is what the Router does with that permission. After the swap completes, `allowances[user][Router]` is back to 0 (the swap consumed exactly the approved amount). If the user had infinite-approved, the allowance would still be near-infinite afterwards — which is convenient, and dangerous.
 
-```json
-{
-  "status": "success",
-  "command": "balances",
-  "network": "ethereum:main",
-  "account": "account:1:address:ethereum:main:0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045:m/44h/60h/0h/0/0",
-  "balances": [
-    { "asset": "ethereum", "amount": "<some non-zero ETH amount> ETH" },
-    { "asset": "ethereum/erc20/usd_coin", "amount": "<USDC balance> USDC" }
-  ],
-  "timestamp": "2026-04-27T14:32:00.000Z"
-}
+### 5.2.4 The approve operation
+
+`approve(address spender, uint256 amount)` is a standard ERC-20 function. Its 4-byte selector is the first four bytes of the keccak-256 hash of the function signature:
+
+```
+keccak256("approve(address,uint256)")[0:4] = 0x095ea7b3
 ```
 
-> **Verify:** the actual balances depend on Vitalik's wallet at the time you run this. The `assets` keys come from live-common's CAL (Crypto Assets List) — the format is `<chain>/<token-standard>/<asset-id>`.
+Calldata for `approve(0xRouter, 100)` is sixty-eight bytes:
 
-**Step 4 (optional, if you have a device):** discover your own accounts.
-
-```bash
-pnpm wallet-cli start -- account discover ethereum --output json
+```
+0x095ea7b3                                                          // 4-byte selector
+  000000000000000000000000<20-byte-spender-address>                 // 32 bytes: spender, left-padded
+  000000000000000000000000000000000000000000000000000000000000_0064 // 32 bytes: amount = 100, left-padded
 ```
 
-The CLI will:
-1. Detect the device over USB.
-2. Print `[~] Waiting: Ledger detected but locked. Enter your PIN on the device.` to stderr if locked.
-3. Print `[i] Opening Ethereum app on your Ledger... ACTION REQUIRED: Confirm on device screen.` and prompt you on the device.
-4. Stream discovered accounts as JSON envelope fields.
-5. Persist labels to `~/.local/state/ledger-wallet-cli/session.yaml`.
+Concretely, an approve-100-USDC tx to Router `0x1111...2222` looks like:
 
-After this, `pnpm wallet-cli start -- balances ethereum-1 --output json` works without re-typing the descriptor.
+```
+0x095ea7b3
+00000000000000000000000011111111111111111111111111111111_22222222
+0000000000000000000000000000000000000000000000000000000000000064
+```
 
-Remember the sandbox rule from 5.1.9: device-touching commands need `dangerouslyDisableSandbox: true` in the agent harness. Plain shell users don't hit this.
+(Whitespace and `_` added for readability; the on-chain bytes are contiguous.)
 
-### 5.2.9 The 5+ commands at a glance
+The Ledger device, when displaying this transaction, recognises the selector `0x095ea7b3` and decodes the two arguments. Instead of the generic "Contract Data — Are you sure?" warning that unrecognised contract calls trigger, the device renders a clear-sign screen: "Approve <token>", amount, spender. We come back to this in 5.2.9.
 
-There's a discrepancy between the SKILL.md (which says "5 commands") and the actual codebase (R1 found 10 leaf commands across 2 groups). The likely explanation: the SKILL.md was written when the project shipped 5 commands; the codebase has grown since. The Confluence PRD (VAUL/6907625515) tracks the *target* surface, not the *current* one. Always consult the source tree of the day.
+For QAA work, the calldata is built by `getErc20ApproveData(spender, amount)` in the EVM family of `libs/coin-modules/coin-evm`. You do not construct the calldata yourself — the CLI does it for you when you pass `--mode approve --token X --spender Y --approveAmount N`. Knowing the layout matters only when you're debugging: if a test broadcasts a tx and Etherscan decodes the input data unexpectedly, walk the bytes against this table to confirm the selector is `0x095ea7b3` and the two 32-byte words match the expected spender and amount. A mismatch usually means the test passed the wrong `--token` or `--spender` flag and the CLI built calldata against the wrong contract or recipient.
 
-Here's the catalog as of R1's audit:
+A worked decode of a real revoke calldata blob:
 
-| Command | Group | Device? | Purpose |
-|---|---|---|---|
-| `account discover` | account | yes | Scan accounts for a network, persist labels to session.yaml |
-| `account fresh-address` | account | no | Next unused receive address (no device unless UTXO + sync needed) |
-| `balances` | (top) | no | Native + token balances for an account |
-| `operations` | (top) | no | Transaction history with `--limit`, `--cursor` |
-| `receive` | (top) | yes (default) | Returns address; `--verify=true` confirms on device |
-| `send` | (top) | yes (unless `--dry-run`) | Build, sign, broadcast a transaction |
-| `session view` | session | no | Print all `(label, descriptor)` pairs |
-| `session reset` | session | no | Wipe `session.yaml` |
+```
+0x095ea7b3                                                         ← approve selector
+000000000000000000000000a73c628eaf6e283e26a7b1f8001cf186aa4c0e8e   ← spender (the Router)
+0000000000000000000000000000000000000000000000000000000000000000   ← amount = 0 (revoke)
+```
 
-Plus there are unit-only helpers (`inputs.ts` resolution functions) that are not commands.
+That's all 68 bytes. The transaction's `to` field is the token contract (e.g. USDC's `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` on mainnet), the `value` is `0` (you're not sending ETH), and the `data` field is the 68 bytes above. The signed transaction wraps these in the standard Ethereum tx envelope — nonce, gas params, signature — but the *intent* is fully captured in the calldata.
 
-Notable missing commands relative to the legacy CLI: no `swap`, no `bot`, no `app install`, no `firmwareUpdate`, no `signMessage`, no `tokenAllowance`, no `genuineCheck`. Chapter 5.4 walks each of these eight commands deeply with example output and edge cases. For now, the takeaway is that the surface is small, every command speaks the same envelope, and the device contract (which commands need it, which don't) is uniform.
+If you ever need to hand-verify what `apps/cli` produced, an Etherscan tx-input decoder or a quick Python `eth_abi.decode(['address','uint256'], data[4:])` will give you back the spender and amount. This is how Chapter 5.8 verifies that the senior's revoke commit produces the right calldata for the right spender.
 
-The PRD adds future commands not yet implemented:
+A short note on EVM endianness: all `uint256` values, including `amount`, are encoded as **big-endian** 32-byte words. The decimal value `100` becomes `0x...0064` at the rightmost end of the 32-byte slot, padded with zeros on the left. The decimal value `2^256 − 1` becomes `0xFFFF...FFFF` (all 32 bytes set). Do not get confused if you eyeball calldata and see "lots of leading zeros, then a small number at the end" — that is the canonical encoding, not a bug. The selector itself (`0x095ea7b3`) is the only piece that's not 32-byte-aligned; selectors are 4 bytes by design, and Solidity dispatch logic reads exactly the first 4 bytes of calldata.
 
-- `swap quote / execute / status` (v1).
-- `secrets init / encrypt` (v0.5).
-- `token approve / revoke` (the QAA-615 spike target — not in PRD as a named verb today, see the chapter outro of 5.1).
+Token decimals also matter when reading amounts. USDC has 6 decimals: `100_000_000` in the calldata means 100 USDC. ETH and most tokens have 18 decimals: `100000000000000000000` means 100 tokens. If a test logs an amount as raw smallest-units, multiplying by `10^decimals` in your head saves a lot of "wait, did we approve 100 USDC or 100 micro-USDC?" confusion.
 
-### 5.2.10 Bunli vs Yargs vs Commander
+### 5.2.5 Three operations, one function
 
-A quick positioning paragraph because you'll have used at least one of these in past Node CLIs.
+| Op | Calldata | On-chain effect |
+|---|---|---|
+| Approve N | `0x095ea7b3 + spender(32) + N(32)` | `allowances[you][spender] = N` |
+| Revoke | `0x095ea7b3 + spender(32) + 0(32)` | `allowances[you][spender] = 0` |
+| Unlimited | `0x095ea7b3 + spender(32) + (2^256 − 1)(32)` | `allowances[you][spender] = 2^256 − 1` |
 
-- **Yargs** — the workhorse of Node CLIs. Fluent builder API (`yargs.command(...).option(...).argv`). Excellent help generator. Validates types loosely (it's mostly stringly-typed). The thing you reach for when you need a CLI in five minutes.
-- **Commander** — the other workhorse. Class-based API. Slightly cleaner for nested subcommands. Same loose typing. Shipped in many old codebases.
-- **oclif** — Salesforce's CLI framework. Class-per-command. Heavy, opinionated, stuck in CommonJS for a long time. Powerful for very large CLIs (Heroku, Salesforce, Adobe).
-- **Bunli** — Bun-native, codegen-based, Zod-validated. The thing you pick when you're already on Bun and want typed flags.
+All three are the same function. The only difference is the amount. There is no separate `revoke()` function on standard ERC-20 — revoke is a convention that means "approve zero".
 
-Why the team picked Bunli is not documented in any ADR R4 found. Inferred reasons:
+Some newer tokens implement `increaseAllowance` and `decreaseAllowance` to mitigate a 2017-era race condition (the "approve front-running" bug), but those are extensions; the core ERC-20 spec only has `approve`.
 
-- Bun-native, no Node-bridging.
-- Static codegen plays well with Bun's standalone-binary mode (no runtime fs walks).
-- Zod-typed flags eliminate a class of runtime errors (mistyped string-as-boolean, missing required, wrong enum).
-- Single-binary build through `bunli build`.
+The race condition: if `allowances[user][spender] = 100` and the user wants to change it to `50`, the spender can race the new approval — `transferFrom` 100 first, then receive the new approval of 50, then `transferFrom` another 50, for a total of 150 against the user's stated intent. The mitigation that wallets and dApps adopted: revoke first (set to 0), then re-approve to the new value. Two transactions, two signatures, no race window. This is why most "change allowance" UIs do the two-step dance even today.
 
-You won't choose between these for QA hooks — you'll consume what wallet-cli provides — but knowing where Bunli sits in the framework landscape helps when you read its source and wonder why a `defineCommand` instead of a `class extends Command`.
+For QAA, the practical implication is that a clean test pre-state is *zero allowance*, not "the right allowance". The revoke hook gets you to a known floor; the test then sets up the exact allowance it wants. That's structurally simpler than trying to detect "is the current allowance the one I want?" and conditionally adjusting it.
 
-### 5.2.11 Resources
+The race condition also clarifies why "approve, do the thing, revoke" is the safe full-cycle test pattern: every step has a deterministic on-chain effect, and the post-state matches the pre-state (zero), so the test is fully reversible. Compare with "increase by N, do the thing, decrease by N": same in-flight semantics, but it relies on `increaseAllowance` / `decreaseAllowance` being implemented (not all tokens do) and on no other test having mutated the slot in between.
 
-<div class="resource-box">
-<h4>Resources</h4>
-<ul>
-<li><a href="https://bun.sh/docs">Bun documentation</a> — the runtime, package manager, bundler, test runner. Start with the "CLI" section for <code>bun run</code> / <code>bun test</code> / <code>bun --compile</code>.</li>
-<li><a href="https://www.npmjs.com/package/bunli">Bunli on npm</a> — official package readme. Defines <code>defineCommand</code>, <code>defineGroup</code>, <code>option</code>.</li>
-<li><a href="https://zod.dev">Zod documentation</a> — the schema validator behind every <code>option(...)</code> in wallet-cli.</li>
-<li><a href="https://ledgerhq.atlassian.net/browse/LIVE-29495">LIVE-29495</a> — Session layer: discover persists to session.yaml. Confirms the XDG state-dir layout.</li>
-<li><a href="https://ledgerhq.atlassian.net/browse/LIVE-29404">LIVE-29404</a> — bare <code>--dry-run</code> silently dropped. Live Bunli boolean-flag bug.</li>
-<li><a href="https://ledgerhq.atlassian.net/browse/LIVE-29308">LIVE-29308</a> — installation/distribution strategy. Standalone binary vs npm install path.</li>
-<li>In-tree: <code>apps/wallet-cli/README.md</code>, <code>apps/wallet-cli/src/wallet/README.md</code>, <code>apps/wallet-cli/src/test/commands/README.md</code>, <code>apps/wallet-cli/src/shared/accountDescriptor/README.md</code>.</li>
-</ul>
-</div>
+**Why no separate revoke ABI?** Because adding a function to a deployed token contract is impossible without redeploying. ERC-20 was finalised in late 2015; tokens deployed since then ship with whatever ABI they had at deploy time. A new function in the standard would only apply to newly-deployed tokens. Convention won out: every wallet, every dApp, every block explorer agreed that "revoke" means "approve zero", and that convention is now load-bearing. The same logic applies to anything else you might wish ERC-20 had — there's no way to add it retroactively to existing tokens, so the ecosystem either lives without it or layers external infrastructure (off-chain indexers, helper contracts) on top.
+
+This convention does have a gotcha. Some token contracts implement non-standard `approve` semantics — refusing to allow a non-zero approve when the current allowance is non-zero (USDT historically did this). For those tokens, the only path to change a non-zero allowance is "approve zero, then approve the new amount" — two transactions. QAA tests that touch such tokens need the revoke step woven into normal flow, not just as an end-of-test cleanup.
+
+### 5.2.6 Why allowance state is the QA problem
+
+Allowance state lives on the token contract on-chain. It is not in your repo. It is not in `~/.ledger-live`. It is not in the Speculos Docker volume. It is on the chain.
+
+That means:
+
+- A run that broadcasts `approve(Router, 100)` permanently leaves `allowances[seed][Router] = 100`.
+- The next run starts with `allowances[seed][Router] = 100` already in place, regardless of how clean your local environment is.
+- A "fresh approval" device screen now reads "you already approved 100 — approve 50 more?" — different copy, different screen count, different hold-to-sign timing.
+- Any test that asserts the device shows "Approve 50 USDC" against the previous state's "Approve 50 more USDC" fails on a string mismatch.
+
+**Worked example.** Nightly run #1 issues `approve(Router, 100)` against the QAA test seed at 02:00. The test passes. The on-chain allowance is now 100. Nightly run #2 starts at 02:00 the next day. The test fixture imports the same seed, opens the same swap flow, taps "Allow", and the device — which queries the token contract via the network plugin — reads the existing 100 and renders an "increase allowance" flow instead of an "initial approval" flow. The test driver waits for the "Initial approval — Hold to sign" label, never sees it, times out, fails.
+
+Nothing in the test driver, the simulator, or the harness changed between run #1 and run #2. Only the chain state did. Without a revoke hook between iterations, every nightly run after the first is a different test from the first one.
+
+That is the QA problem. Manual revoke tools (Chapter 5.3) are the human fallback. The CLI revoke hook (the senior's commit, walked in Chapter 5.8) is the automated solution.
+
+Three more failure modes worth naming, because each one looks like a different bug but has the same root cause:
+
+- **"Test passes locally, fails in CI."** The CI runner uses a shared seed that nightlies have already touched; your laptop uses a freshly-revoked seed because you ran revoke.cash an hour ago. Same code, different chain state, different test outcome.
+- **"Test passes the first time, fails on the second."** First run leaves an allowance behind; second run sees the increase-allowance flow instead of the fresh-approval flow.
+- **"Test passes for a week, then starts failing for no reason."** Some other test in the same suite started broadcasting (perhaps a teammate flipped `DISABLE_TRANSACTION_BROADCAST` to `0` for a debugging session and forgot the `finally`), accumulated allowance state on the shared seed, and now your assertion against fresh-approval copy breaks.
+
+All three are the same problem in different costumes. The cure is the same: revoke between iterations, on a known-clean seed, with discipline around the broadcast env (Chapter 5.6).
+
+**The seed matters.** QAA's test seed is shared infrastructure. Multiple developers, multiple CI runs, multiple debugging sessions touch the same address space on the same testnets. The chain doesn't care that "this allowance came from Alice's local debugging at 3pm and should be irrelevant to Bob's nightly at 2am" — they're the same `(owner, spender, token)` triple as far as the storage slot is concerned. Hygiene around the test seed is a team-level discipline, not just a per-test concern. Chapter 5.3 covers the manual cleanup tools because human-driven hygiene is a real part of the workflow, not just an emergency fallback.
+
+A useful comparison: think of the test seed like a shared development database. You wouldn't expect tests to run reliably on a database that other people are mutating concurrently and that doesn't get cleaned between runs. The seed-on-chain situation is structurally identical, except (a) you can't `TRUNCATE TABLE allowances` to reset, you have to issue revoke transactions one by one, and (b) the cleanup costs gas. Hence the importance of making the cleanup automatic via the CLI hook, and of running broadcast-enabled tests on testnets where gas is free and transaction throughput is high.
+
+**The opposite of "broadcast" is not "do nothing" — it's "sign and discard".** The CLI still runs through the full sign flow when broadcast is disabled: it prompts the device, walks the screens, builds an APDU, gets a signature back, and then does *not* push the signed bytes to chain. This is the right behaviour for tests that want to assert "the device shows the right approval screen" without touching state — the signing exercise is real, but the on-chain consequence is absent. The wrappers around `approveTokenCommand` and `revokeTokenCommand` flip this exact behaviour: they need broadcast on, because the *point* of the call is the on-chain mutation, not the screen flow assertion.
+
+A subtler point about the `Approval` event: every `approve(spender, N)` emits `Approval(owner, spender, N)`. Indexers and block explorers consume this event to display "current allowances per token" views. revoke.cash, for example, builds its UI by walking `Approval` events for a given owner and computing the current state per `(token, spender)` pair. That is why a revoke that doesn't actually change state still emits the event, and why you can verify a revoke landed by looking for the `Approval(_, _, 0)` log on the broadcast tx receipt. If the receipt has the event but the on-chain `allowance(owner, spender)` query returns non-zero, you've found a divergence — most likely between the broadcast you observed and a later approve that crossed it on the wire. This rarely happens in QA testing because tests run sequentially per worker, but it's a useful debugging concept.
+
+The cross-check is also useful when verifying that a CLI revoke actually landed in CI. The CLI returns "broadcast successful" when the RPC accepts the tx — that doesn't mean it's mined. A test that needs the post-revoke state to be observable should `--wait-confirmation` (which polls until the tx is included in a block), and afterwards a `tokenAllowance` read can confirm the slot is zero. Three sources of truth: the wait-confirmation succeeded, the tx receipt has the `Approval(_, _, 0)` event, and the `allowance(owner, spender)` query returns zero. All three agreeing is the definition of "the revoke landed".
+
+### 5.2.7 Revoke = approve(spender, 0)
+
+Mechanically, a revoke is identical to an approve with `amount = 0`. Same selector, same calldata layout, same gas profile, same APDU shape on the Ledger device, same on-chain receipt format. There is no distinct "revoke" event in the ERC-20 standard; the `Approval(owner, spender, 0)` event a revoke emits is the same shape as the event an "approve zero" emits.
+
+The Ledger device's clear-sign decoder is what makes the user-facing experience differ. When the firmware's ERC-20 plugin recognises `amount == 0`, it may render the screen as "Revoke <token>" instead of "Approve <token>, Amount: 0". The exact wording depends on firmware version and device family.
+
+> **Verify:** the exact device-screen text on Stax / Flex / Nano S+ for `amount == 0` (e.g., "Revoke USDC" vs "Approve USDC — Amount: 0"). Confirm by running `apps/cli` in `--mode revokeApproval` against a Speculos Ethereum device and reading <code>fetchCurrentScreenTexts</code> output. The CLI integration tests use whichever literal label `DeviceLabels.HOLD_TO_SIGN` resolves to; the QAA E2E layer never needs to assert the visual revoke vs approve-zero wording explicitly.
+
+The on-chain receipt is indistinguishable from any other allowance change. A block explorer like Etherscan typically labels both `approve(spender, 0)` and `approve(spender, N)` as "Approve" in its decoded function-call view, with the amount column reading 0 for revokes.
+
+Practically, this means three things for QAA work:
+
+1. The CLI's `--mode revokeApproval` produces the same calldata shape as `--mode approve` with `amount = 0`. There is no separate "revoke" code path inside `apps/cli`; both modes route through the same EVM transaction builder, just with different amounts.
+2. The Speculos device-tap helper `approveToken()` works for both modes without modification. Same screen sequence, same hold-to-sign, same final APDU.
+3. The on-chain receipt for a revoke is fungible with any zero-amount approve: a tx that sets allowance to zero by any means produces the same `Approval(owner, spender, 0)` event. This is why Etherscan's "Token Approvals" view treats both interchangeably and why revoke.cash's "is this revoked?" check is a simple "is the current allowance zero?" query.
+
+A subtle behaviour: the EVM allows zero-amount approvals to skip the actual SSTORE if the slot is already zero. Some token contracts implement this optimisation (writing to a slot that's already `0` costs gas; emitting a no-op event might be skipped). Most don't. From the test's point of view, calling `approve(spender, 0)` against an already-zero slot is a no-op — it broadcasts, costs gas, emits an `Approval(owner, spender, 0)` event, and the post-state is still zero. Idempotent in the on-chain sense.
+
+This idempotence is why `revokeTokenApproval` has no pre-check the way `ensureTokenApproval` does. `ensureTokenApproval` checks "is the allowance already at least N?" and skips if yes (saves a device dance and a broadcast). `revokeTokenApproval` just always revokes — the cost is small, the result is deterministic, and the conditional logic to skip would itself be a possible source of bugs. "Always revoke" is simpler and correct.
+
+### 5.2.8 Unlimited approval — the security footgun
+
+`amount = 2^256 − 1` (the max `uint256` value, often displayed as `0xFFFF...FFFF`) is the "infinite approval" pattern. dApps adopted it for two reasons:
+
+- **Gas savings.** One `approve(spender, ∞)` is cheaper than approving each swap individually.
+- **UX.** The user signs one approval, then every subsequent swap is a single signature instead of two (approve + swap).
+
+The cost: if the spender contract is ever compromised — by an upgrade, an admin-key takeover, a logic bug, a governance attack — the attacker can `transferFrom(victim, attacker, victim_balance)` for every victim that infinite-approved that contract. This was the vector in the BadgerDAO front-end compromise of December 2021 (~$120M drained), in multiple 2022 phishing campaigns where users were tricked into infinite-approving drainer contracts, and in the rolling pattern of "approval phishing" that revoke.cash exists to clean up.
+
+The industry response: wallet UI warnings on infinite approvals, the rise of EIP-2612 `permit` (signature-based approvals with no on-chain allowance write), and revoke.cash itself.
+
+EIP-2612 `permit` is worth a sentence because it occasionally appears in test scenarios. It lets a token holder sign an off-chain message authorising a spender for a specific amount with a specific deadline; the spender contract then submits both the user's `permit` signature and the swap call in a single transaction. Net effect: the user signs once instead of twice, and there's no persistent on-chain allowance to clean up afterwards. From a QAA determinism perspective, `permit`-based flows are easier — they leave no allowance state behind. But not all tokens implement `permit`, and Ledger's clear-sign for `permit` is a separate device flow with its own labels. If a test exercises a permit flow, the device-tap helper needs a different label set and `revokeTokenApproval` is irrelevant (no allowance to revoke). For now, the QAA mainstream is still classic `approve` + revoke.
+
+The pragmatic posture for tests: assume classic `approve` until proven otherwise; if a token is `permit`-capable and the dApp under test uses `permit`, design the test around the no-allowance semantics; if a test mixes both (some flows use `permit`, some don't), keep the revoke hook for the classic-approve flows and skip it for `permit` flows. A single test should not change which flow it uses run-to-run; deterministic test design picks one and sticks with it.
+
+QAA tests almost never use unlimited approval. The `ensureTokenApproval` helper passes `minAmount × 1.2` (a 20% slippage buffer over the swap amount), not `2^256 − 1`. We use exact, finite amounts so the device renders the same screen flow every run, and so the revoke hook can cleanly zero the slot when the test ends.
+
+There is one place QAA might legitimately want to test infinite approval: a regression test for the device's "infinite-approval warning" screen. If product behaviour requires a different on-device warning when the amount is `2^256 − 1`, that path needs explicit coverage. But that's a single-purpose test, not the default. Every other ERC-20 swap / earn / delegate test uses finite amounts.
+
+> **Verify:** the exact threshold above which Ledger firmware considers an amount "effectively infinite" and shows a warning screen. Older firmware checks for the literal `2^256 − 1`; newer firmware may use a heuristic threshold (e.g. amount > 10^28). If a test needs to assert "the warning appears", confirm with current firmware behaviour first.
+
+**A subtle gas point.** A revoke transaction costs gas. On Ethereum mainnet that's anywhere from a few cents (when the network is quiet) to several dollars (when it's congested). On testnets it's effectively free. QAA tests run on testnets specifically so the cost-per-revoke doesn't matter. If a future test ever needs to run against mainnet (e.g. a real-money smoke test), the cumulative cost of revoke hooks across many test runs becomes a budget item — at which point the team would weigh "broadcast disabled" coverage against "fully on-chain" coverage and make an explicit choice. For day-to-day work, "always revoke after every test that approved" is the right default.
+
+### 5.2.9 Clear-sign behaviour on the Ledger device
+
+When the Ledger device receives an Ethereum transaction whose `to` field is an ERC-20 contract and whose calldata starts with `0x095ea7b3`, the firmware's ERC-20 plugin decodes the calldata into structured fields:
+
+- The token symbol (resolved from the `to` address via the device's bundled token registry, or via a "trusted name" plugin response signed by Ledger's services).
+- The spender address.
+- The amount, formatted with the token's decimals.
+
+Instead of the fallback "Contract Data — Are you sure?" warning that displays for unrecognised contract calls, the device shows a sequence like:
+
+```
+Review transaction
+Approve <token>
+Amount: <human-readable>
+Spender: <0xabc...def>
+[Hold to sign]
+```
+
+This is the screen sequence `families/evm.ts:approveTokenTouchDevices` walks via `pressUntilTextFound(DeviceLabels.HOLD_TO_SIGN)` and `longPressAndRelease(DeviceLabels.HOLD_TO_SIGN, 3)`. The button-device variant uses `pressUntilTextFound(DeviceLabels.SIGN_TRANSACTION)` and a both-buttons press to confirm.
+
+Two things matter for QAA. First, the device-tap automation is keyed off the *labels* (`DeviceLabels.*` constants), not absolute screen positions, so it survives minor copy changes. Second, both `--mode approve` and `--mode revokeApproval` go through the *same* clear-sign path on the device — only the amount field differs. The Speculos device-tap helper does not need to branch on mode; it just walks "Review → press until Hold to sign → hold". Forward-ref Chapters 5.4 and 5.5.
+
+If clear-sign is *not* available — for an unrecognised token contract, an unrecognised chain, or a firmware that lacks the ERC-20 plugin — the device falls back to the generic "Contract Data — Are you sure?" warning. That warning *can* be signed (with a "I accept the risk" toggle in the firmware's settings on some device families), but the test would need to drive a different label sequence. QAA tests by default run on chains and tokens where clear-sign is reliable; if you add a new chain to the matrix and the device falls back to generic-contract-data, expect the device-tap helper to need a new label set.
+
+Two more subtleties of clear-sign worth noting:
+
+- **Token recognition is data-driven.** The firmware ships a registry of known token contracts; for tokens outside that registry, Ledger's "trusted name" service can sign a JSON descriptor at the wallet level that the firmware verifies before rendering. If neither path resolves, clear-sign degrades to "Approve <unknown token at 0x...>" — which is still better than the fully generic warning but worse than a clean named display.
+- **Spender display.** The device shows the spender as a hex address by default. Some firmware versions can resolve known spender addresses (e.g. major DEX routers) to human-readable names via the same trusted-name infrastructure. If your test asserts on the spender display, know whether the spender for the chain / version under test resolves to a name or to a raw hex.
+
+For most QAA work on mainstream EVM chains and well-known tokens, clear-sign just works. The edge cases above are worth knowing exist; they're rarely the thing that breaks a test on a normal day.
+
+> **Verify:** older firmware versions or non-ERC-20 token standards (ERC-721, ERC-1155, BEP-20 on BSC) may render different labels. The QAA-canonical path is ERC-20 on EVM L1s with current production firmware. If a test introduces a new chain or asset class, re-verify the device labels with <code>fetchCurrentScreenTexts</code> on a real Speculos run before relying on <code>approveToken()</code>.
+
+An aside on the touch-device flow specifically: on Stax and Flex, the "Hold to sign" gesture is a three-second hold on a specific UI region, not a button press. The Speculos device-tap helper simulates this with `longPressAndRelease(DeviceLabels.HOLD_TO_SIGN, 3)`. If the user releases early — or the helper sleeps less than three seconds — the firmware aborts the signature and the CLI subprocess waits forever (or until its `--wait-confirmation-timeout` fires). When a test hangs at the device-tap stage on touch devices, "did the long-press actually hit three seconds?" is the first thing to check.
+
+### 5.2.10 The QA bridge — why the QAA-615 hook exists
+
+Putting the pieces together:
+
+1. Allowances are persistent on-chain state (5.2.6).
+2. Regression tests that broadcast leave allowances behind every run (5.2.6).
+3. Revoke is `approve(spender, 0)` — same selector, same shape, no special primitive (5.2.7).
+4. The Ledger device clear-signs both approve and revoke through the same screen flow (5.2.9).
+5. Therefore: a CLI hook that issues `send --mode revokeApproval` between test iterations cleanly resets state, and the existing Speculos device-tap helper (`approveToken()` in `families/evm.ts`) drives the device side without modification.
+
+That is exactly what the senior's QAA-615 commit on `support/qaa_add_revoke_token` adds: `revokeTokenCommand` in `cliCommandsUtils.ts` (the typed wrapper), `revokeTokenApproval` on `swap.page.ts` (the POM method), and the swap spec switching from `ensureTokenApproval` to `revokeTokenApproval` for the dev loop. Chapters 5.3 through 5.8 unpack each layer.
+
+The manual alternative — revoke.cash, Etherscan's Write tab — is what humans use when the harness isn't available. Same on-chain effect, different UX, same primitive: `approve(spender, 0)`.
+
+**Why `revokeTokenApproval` is a POM method and not a CLI helper.** The senior's commit puts `revokeTokenApproval` on `swap.page.ts`, not in `cliCommandsUtils.ts`. The CLI wrapper layer (`revokeTokenCommand`) does the typed CLI call; the POM method (`revokeTokenApproval`) does the swap-test-specific orchestration: snapshot the Speculos port, swap to an Ethereum-app device, run the revoke, restore the port, attach the result to the Allure report. That separation matters: the CLI wrapper is reusable across any spec that needs to revoke an allowance; the POM method is specific to "I am in the middle of a swap test and need to inject a revoke at this point". Chapter 5.4 walks both. If a future feature needs revokes outside the swap context — say, a test for the new "Manage approvals" UI in Ledger Live — it would import `revokeTokenCommand` directly and write its own POM method, without touching the swap-page version.
+
+**Connection to the rest of Part 5.** Everything from here builds on the picture in 5.2.5: same selector, three amounts, one function. Chapter 5.3 covers the manual tools that read and write that slot for human cleanup. Chapter 5.4 walks how the CLI wrapper builds the calldata for you. Chapter 5.5 covers the Speculos lifecycle that makes the device-side signing possible. Chapter 5.6 is about choosing whether to actually mutate chain state. Chapter 5.7 is the daily workflow. Chapter 5.8 is the senior's QAA-615 commit annotated line by line. By the end of Part 5 you should be able to read the senior's `revokeTokenApproval` method, point at every line, name the layer it touches, and explain why each choice was made.
+
+**One more framing.** The blockchain primer in this chapter is the *what*. The five-layer integration in Chapter 5.4 is the *how*. The footguns in Chapter 5.6 are the *what could go wrong*. Hold these three together as you go: every line of code in Part 5 is doing one of three things — describing what to do on chain, wiring how to do it through the test harness, or guarding against a known footgun. If you can map a piece of code to one of those three categories you understand it well enough to maintain it.
+
+A final pre-Chapter-5.3 checklist. Before moving on, you should be able to:
+
+- Name the four QAA-canonical CLI commands (5.1.6).
+- Draw the five-layer integration diagram from memory (5.1.7).
+- Explain why a CLI exists in addition to UI drivers (5.1.2).
+- State the `approve` selector and the calldata layout from memory (5.2.4 / 5.2.5).
+- Give one sentence on why allowance state breaks test determinism (5.2.6).
+- Name the two pieces of global state the CLI workflow depends on: `SPECULOS_API_PORT` and `DISABLE_TRANSACTION_BROADCAST` (5.1.8).
+
+If any of those don't come easily, re-read the relevant subsection. The rest of Part 5 will be friendlier when these are second-nature.
+
+**A small reading order recommendation.** If you came to this guide as a backend engineer who's never written E2E tests, read Chapters 5.3 (manual tools, hands-on UX), then 5.7 (daily workflow, more hands-on UX), then 5.4 (the layered architecture). The hands-on chapters give you a concrete picture before the layered architecture asks you to hold five abstractions at once. If you came as a UI-test engineer who's never touched ERC-20, read Chapter 5.2 carefully (this one), then 5.4 to see how it's wired into the harness, then 5.6 to understand the safety controls. Both paths converge at Chapter 5.8.
+
+**Glossary anchors for what's coming.** Quick definitions you'll see across the next chapters:
+
+- **Speculos** — the Ledger device emulator, runs as a Docker container, exposes a REST API the test harness drives.
+- **APDU** — Application Protocol Data Unit, the binary message format the host uses to talk to the (real or emulated) Ledger device.
+- **Bridge** (in `bridge.signOperation`, `bridge.broadcast`) — the per-currency adapter inside live-common that knows how to build, sign, and broadcast transactions for that currency. Not to be confused with the WebSocket bridge in mobile E2E (Part 4).
+- **POM** — Page Object Model. The convention where each app screen is an object with methods that perform the actions a test needs.
+- **Allure** — the test reporting framework. The `allure.description(...)` calls you'll see attach human-readable context to test results.
+- **Userdata** — the JSON file format Ledger Live consumes at startup to pre-populate accounts and settings. `liveData` produces it; the desktop fixture engine points the app at it via `--userdata <path>`.
+
+These names recur. Knowing what they mean now means the next chapters read at full speed.
+
+**Where Chapter 5.3 picks up.** The next chapter walks the manual revoke tools — revoke.cash, Etherscan's Read and Write tabs — that humans use when the harness is unavailable, when something has gone wrong, or when you want to audit chain state directly. The mechanics are the same as everything in this chapter: same `approve(spender, 0)` selector, same on-chain effect, same `Approval(_, _, 0)` event. The difference is the UX: a human in a browser instead of a CLI subprocess. Knowing both is essential, because the manual tools are the ground truth you fall back to when the automation lies.
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Bun is the runtime — fast cold start, native TypeScript, native test runner, single-binary build. Bunli is the framework — declare commands as <code>defineCommand({ name, description, options, handler })</code>, validate flags with Zod, dispatch through a static codegen manifest. Every wallet-cli command follows the same five-piece skeleton: imports, default export, name, options keyed by flag, async handler that wraps its body in <code>out.run(...)</code>. Shared option helpers in <code>src/commands/inputs.ts</code> standardise <code>--account/-a</code> and <code>--output</code> across every command, and the session-label resolver makes <code>--account ethereum-1</code> equivalent to the full V1 descriptor after a <code>discover</code>. JSON output follows a stable success envelope (<code>status: "success"</code>, <code>command</code>, <code>network</code>, <code>account</code>, command-specific payload, <code>timestamp</code>) and a separate error envelope (<code>ok: false</code>, <code>error.message</code>) — hooks must handle both shapes. You ran your first command (<code>balances --help</code>, then a no-device JSON call), saw the envelope, and have the catalog of eight commands in your head. Next chapter walks DMK end-to-end so you understand what happens when <code>send</code> actually opens a device session and exchanges APDUs.
+<strong>Key takeaway:</strong> An ERC-20 allowance is one slot in the token contract's nested mapping <code>allowances[owner][spender]</code>. Approve sets it; revoke sets it to zero; both are calls to the same <code>approve(address,uint256)</code> function with selector <code>0x095ea7b3</code>. Allowance state is on-chain and persistent — and that persistence is the determinism problem the CLI revoke hook (Chapter 5.8) exists to solve. Up next, Chapter 5.3 covers the manual revoke tools you reach for when the harness isn't available.
 </div>
 
-### 5.2.12 Quiz
+### 5.2.11 Quiz
 
 <!-- ── Chapter 5.2 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<h3>Chapter 5.2 Quiz</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> Why does <code>cli.ts</code> statically import <code>../.bunli/commands.gen</code> instead of letting <code>@bunli/core</code> discover commands at runtime?</p>
+<p><strong>Q1.</strong> What is the function selector <code>0x095ea7b3</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The team prefers static imports for code style reasons</button>
-<button class="quiz-choice" data-value="B">B) <code>@bunli/core</code>'s default behaviour is a dynamic <code>import('file://...')</code> of the manifest, which can hang in Bun standalone-binary mode; a local patch removes the dynamic import and the static one registers commands as a side effect</button>
-<button class="quiz-choice" data-value="C">C) Static imports are required for ESM compatibility</button>
-<button class="quiz-choice" data-value="D">D) Dynamic imports break Zod schema validation</button>
+<button class="quiz-choice" data-value="A">A) The selector for <code>transfer(address,uint256)</code></button>
+<button class="quiz-choice" data-value="B">B) The selector for <code>approve(address,uint256)</code> — <code>keccak256("approve(address,uint256)")[0:4]</code></button>
+<button class="quiz-choice" data-value="C">C) The selector for <code>revoke(address)</code> — a separate ERC-20 function</button>
+<button class="quiz-choice" data-value="D">D) The selector for <code>permit(...)</code> from EIP-2612</button>
 </div>
-<p class="quiz-explanation">A comment in <code>cli.ts</code> explains: "Our @bunli/core patch removes that dynamic import entirely because it can hang in Bun standalone mode, this static import registers commands instead." Each command module's import has a side effect of registering itself into Bunli's command store.</p>
+<p class="quiz-explanation">Standard ERC-20 has no separate revoke function. Revoke is <code>approve(spender, 0)</code> — same selector <code>0x095ea7b3</code>, same calldata shape, just <code>amount = 0</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> What is the contract for a wallet-cli JSON success envelope?</p>
+<p><strong>Q2.</strong> What on-chain state does a successful revoke transaction move?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Always <code>{ ok: true, data: ... }</code></button>
-<button class="quiz-choice" data-value="B">B) Always <code>{ result: ..., error: null }</code></button>
-<button class="quiz-choice" data-value="C">C) <code>{ status: "success", command, network, account?, ...payload, timestamp }</code></button>
-<button class="quiz-choice" data-value="D">D) The shape varies per command and must be consulted in <code>src/output.ts</code></button>
+<button class="quiz-choice" data-value="A">A) <code>balances[you] = 0</code> on the token contract</button>
+<button class="quiz-choice" data-value="B">B) An entry in a global revoke registry contract</button>
+<button class="quiz-choice" data-value="C">C) <code>allowances[you][spender] = 0</code> on the token contract</button>
+<button class="quiz-choice" data-value="D">D) Nothing — revoke is purely off-chain wallet state</button>
 </div>
-<p class="quiz-explanation"><code>src/shared/response.ts</code>'s <code>makeEnvelope</code> spells out the success shape. The error shape is different (<code>{ ok: false, error: { command, message } }</code>) — a real inconsistency hooks have to handle.</p>
+<p class="quiz-explanation">Allowances live on the token contract, indexed by <code>(owner, spender)</code>. A revoke writes <code>0</code> into the slot for that pair. It does not touch the owner's balance and there is no global revoke registry.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> What does <code>resolveAccountInput("ethereum-1")</code> do when the input contains no colon?</p>
+<p><strong>Q3.</strong> A nightly E2E run yesterday broadcast <code>approve(Router, 100)</code>. Today's run starts the same swap test. What screen will the Ledger device most likely render when the user reaches the approval step?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Treats the input as a session label, reads <code>session.yaml</code>, and returns the matching descriptor — or throws with a list of available labels</button>
-<button class="quiz-choice" data-value="B">B) Throws because all account inputs must be V1 descriptors</button>
-<button class="quiz-choice" data-value="C">C) Tries to fetch the descriptor from the network</button>
-<button class="quiz-choice" data-value="D">D) Generates a new descriptor with the given label</button>
+<button class="quiz-choice" data-value="A">A) An approval flow that reflects the existing 100 allowance — different copy / step count from a "fresh approval" flow, and a likely test failure if the test asserts fresh-approval text</button>
+<button class="quiz-choice" data-value="B">B) The same fresh-approval flow as yesterday, because allowance state resets when Speculos restarts</button>
+<button class="quiz-choice" data-value="C">C) The same fresh-approval flow as yesterday, because allowance state resets when the repo is re-cloned</button>
+<button class="quiz-choice" data-value="D">D) An error screen, because the previous allowance blocks any new approve</button>
 </div>
-<p class="quiz-explanation">The session-label rule is concise: "contains <code>:</code> → descriptor passthrough; no <code>:</code> → session label lookup." After running <code>account discover ethereum</code>, the auto-generated label <code>ethereum-1</code> is registered, and every subsequent command accepts the short form.</p>
+<p class="quiz-explanation">Allowance state is persistent on-chain and survives Speculos restarts and repo re-clones. The device queries the token contract for the current allowance and renders a different flow when one already exists. This is exactly the determinism problem the revoke hook solves.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Why does the team commit <code>.bunli/commands.gen.ts</code> to the repository and verify it in CI via <code>generate:check</code>?</p>
+<p><strong>Q4.</strong> Why does QAA almost never use unlimited approval (<code>amount = 2^256 − 1</code>) in tests?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because it's faster to import a committed file than to generate one</button>
-<button class="quiz-choice" data-value="B">B) Because Bun cannot regenerate it at install time</button>
-<button class="quiz-choice" data-value="C">C) Because the codegen depends on network access that CI does not have</button>
-<button class="quiz-choice" data-value="D">D) Because the manifest is the single source of truth for the static command tree (Bun standalone can't walk <code>src/commands/</code> at runtime), and committing it plus a <code>git diff --exit-code</code> CI gate ensures developers regenerate after adding/removing commands</button>
+<button class="quiz-choice" data-value="A">A) The Ledger device refuses to sign infinite approvals</button>
+<button class="quiz-choice" data-value="B">B) Speculos cannot represent <code>uint256</code> max</button>
+<button class="quiz-choice" data-value="C">C) Infinite approvals cost more gas than finite ones</button>
+<button class="quiz-choice" data-value="D">D) Finite, exact amounts (e.g. <code>minAmount × 1.2</code>) keep device screens reproducible run-to-run and make revoke cleanup verifiable; infinite approvals are also the historical attack vector behind major DeFi drains</button>
 </div>
-<p class="quiz-explanation">Without the gate, a developer could add a new command file, forget to run <code>pnpm generate</code>, and the CI green-lights a build that doesn't ship the new command. The gate prevents that drift.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> Which command can you run in the agent sandbox without setting <code>dangerouslyDisableSandbox: true</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>account discover ethereum</code></button>
-<button class="quiz-choice" data-value="B">B) <code>receive --account ethereum-1</code> (default <code>--verify=true</code>)</button>
-<button class="quiz-choice" data-value="C">C) <code>balances --account ethereum-1 --output json</code></button>
-<button class="quiz-choice" data-value="D">D) <code>send --to 0x… --amount '0.001 ETH'</code></button>
-</div>
-<p class="quiz-explanation">The SKILL.md sandbox rule: device-touching commands (<code>account discover</code>, <code>receive</code> with verify, <code>send</code>) need the sandbox bypass. <code>balances</code>, <code>operations</code>, and <code>send --dry-run true</code> work in the sandbox because they hit network only.</p>
+<p class="quiz-explanation">The <code>ensureTokenApproval</code> helper passes <code>minAmount × 1.2</code> as a slippage buffer, not infinity. Determinism (same screens every run) is the testing reason; infinite-approval drainer attacks (BadgerDAO 2021 etc.) are the broader security context.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> What is the difference between <code>defineCommand</code> and <code>defineGroup</code> in Bunli?</p>
+<p><strong>Q5.</strong> The Ledger device's clear-sign behaviour for <code>approve(spender, N)</code> depends on…</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>defineCommand</code> is for sync commands and <code>defineGroup</code> is for async</button>
-<button class="quiz-choice" data-value="B">B) <code>defineCommand</code> declares a leaf command with a handler; <code>defineGroup</code> declares a parent that composes child commands under a shared name (e.g. <code>account discover</code>, <code>account fresh-address</code>)</button>
-<button class="quiz-choice" data-value="C">C) <code>defineGroup</code> is the legacy API and <code>defineCommand</code> replaces it</button>
-<button class="quiz-choice" data-value="D">D) They're aliases — Bunli accepts either form interchangeably</button>
+<button class="quiz-choice" data-value="A">A) Nothing — every contract call shows the generic "Contract Data — Are you sure?" warning</button>
+<button class="quiz-choice" data-value="B">B) The firmware recognising the selector <code>0x095ea7b3</code> and decoding the calldata into token / amount / spender fields, displaying a structured Approve / Revoke screen instead of the generic warning</button>
+<button class="quiz-choice" data-value="C">C) The CLI passing a <code>--clear-sign</code> flag</button>
+<button class="quiz-choice" data-value="D">D) Speculos special-casing the screen on the host side</button>
 </div>
-<p class="quiz-explanation"><code>account/index.ts</code> exports <code>defineGroup({ name: "account", commands: [DiscoverCommand, FreshAddressCommand] })</code>, which is what makes <code>wallet-cli account discover</code> and <code>wallet-cli account fresh-address</code> dispatch correctly. Leaf commands are <code>defineCommand</code>; groups compose them.</p>
+<p class="quiz-explanation">Clear-sign is a firmware feature: the ERC-20 plugin recognises selectors like <code>0x095ea7b3</code> and decodes the args into structured fields. The CLI doesn't pass a clear-sign flag and Speculos doesn't special-case it — Speculos just renders whatever the firmware outputs.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
 ---
-
-<div class="chapter-outro">
-<strong>Bun and Bunli installed.</strong> You've placed wallet-cli in the monorepo, distinguished it from the legacy <code>apps/cli</code>, learned why the CLI exists as test-data infrastructure (the QAA-615 origin story), and absorbed the eight footguns that bite people in week one. You've also learned the runtime (Bun) and the command framework (Bunli), read the canonical command shape in <code>balances.ts</code>, and run your first invocation. <strong>Next: Chapter 5.3 — Device Management Kit Primer</strong>. The DMK is the layer between wallet-cli and the physical Ledger over USB. It replaces the older <code>hw-transport-*</code> stack with a typed, signer-aware, reconnection-resilient transport. We'll walk the builder, the singleton lifecycle (and why it has to be a singleton), the <code>ConnectAppDeviceAction</code> wrapper, the error mapper that produces the messages you saw on stderr, and finally the <code>MockDeviceManagementKit</code> seam that makes every CLI integration test hermetic.
-</div>
-## Device Management Kit Primer
+## Manual Revoke Tools — revoke.cash and Etherscan
 
 <div class="chapter-intro">
-The Device Management Kit (DMK) is the library that sits between any client (Ledger Live Desktop, Ledger Live Mobile, the wallet-cli, third-party wallets) and the physical Ledger signer. It owns transport selection, session lifecycle, APDU framing, ERC-7730 metadata fetch, signer abstraction, and the fallback to blind signing. For QA, the DMK is the layer where "the device behaves" or "the device errors" — and where the wallet-cli plugs into the same stack the desktop and mobile apps already use. This chapter maps what DMK replaces, how its session model differs from the older hw-transport family, how the wallet-cli wires DMK over USB, and where the moving parts live in source.
+The CLI is the QAA's first tool, but it is not the only one. When local Speculos breaks, when CI revoke fails and you need on-chain truth, when you want to audit a real test seed without spinning up the harness — you reach for browser-based tools. revoke.cash and Etherscan together cover every operational need a QAA has when the automation is unavailable or untrustworthy. This chapter is short, practical, and ends with a hygiene checklist you should internalise before touching the shared QAA test seed.
 </div>
 
-### 5.3.1 What DMK replaces
+### 5.3.1 Why Manual Tools Exist Alongside the CLI
 
-Before DMK there was **LedgerJS** — the `@ledgerhq/hw-transport-*` family. The wallet (any wallet, ours or a third party's) imported a transport package per environment:
+The CLI hook revokes allowances during nightly runs. So why bother with manual tools at all?
 
-- `@ledgerhq/hw-transport-node-hid` — Node desktop, USB HID
-- `@ledgerhq/hw-transport-webusb` — browser, WebUSB
-- `@ledgerhq/hw-transport-webhid` — browser, WebHID
-- `@ledgerhq/hw-transport-web-ble` — browser, Bluetooth
-- `@ledgerhq/hw-transport-http` — HTTP-Speculos for tests
+Four scenarios force the question.
 
-…and on top of that a per-app helper: `@ledgerhq/hw-app-eth`, `@ledgerhq/hw-app-btc`, `@ledgerhq/hw-app-solana`, etc. Each helper exposed methods like `signTransaction(path, rawTx)` that wrote raw APDUs to the transport. The wallet itself was responsible for: opening the transport, opening the right embedded app on the device, recovering when the user pressed a button, dealing with disconnect, and packaging clear-sign metadata if any.
+**1. Local Speculos broke mid-test.** You ran a swap spec by hand on a feature branch. Speculos crashed halfway through the device dance. The CLI never reached the broadcast step, but the previous test already left a non-zero allowance on-chain. Now your local seed is dirty, the Speculos container is in a bad state, and re-running the harness keeps failing on setup. You need a way to clean the on-chain state without restarting the entire e2e suite.
 
-The DMK consolidates all of that. From the **LedgerJS vs DMK Benchmark & Comparison** page (Confluence WXP/6995411067), three operational tiers:
+**2. You need to audit a real seed.** Someone hands you a Sepolia address and asks "what's this seed approving?" You don't want to write a one-off script. You want a UI that lists every active allowance in two seconds.
 
-| Tier | Surface | Clear Signing | Transaction Checks |
-|---|---|---|---|
-| LedgerJS | `hw-transport-*` + `hw-app-*` | None — blind signing only | None |
-| DMK without origin token | `@ledgerhq/device-management-kit` + `device-signer-kit-*` | Gated, basic experience | None |
-| DMK + commercial agreement | DMK + origin token | Full ERC-7730 clear signing | Blockaid / Cyvers / ENS |
+**3. CI revoke failed, and you want to see on-chain truth.** A nightly run failed. Allure shows the revoke step threw an error. You don't trust the test logs — they could be wrong about which spender was approved or how much. You go to the block explorer and read the allowance directly from the contract.
 
-Internal data on the same page reports a **>10× reduction in connectivity errors** after migrating to DMK. That number is for the desktop/mobile wallet, not the CLI specifically — but the wallet-cli rides the same code path (see 5.3.4) so it inherits the same connectivity gains.
+**4. You're verifying after the hook ran.** The CI logs say "revoke succeeded." You want to confirm the on-chain state matches the log claim before you tell the team the test seed is clean.
 
-The signer kits replace the per-app helpers:
+In each case, the manual tool is the ground-truth oracle. The CLI is part of the system under test; revoke.cash and Etherscan are not. They read the same blockchain the CLI writes to, but through a completely independent code path. That independence is what makes them useful for debugging.
 
-- `@ledgerhq/device-signer-kit-ethereum`
-- `@ledgerhq/device-signer-kit-solana`
-- `@ledgerhq/device-signer-kit-bitcoin`
-- `@ledgerhq/device-signer-kit-hyperliquid`
-- `@ledgerhq/device-signer-kit-cosmos`
-- `@ledgerhq/device-signer-kit-aleo`
-- `@ledgerhq/device-signer-kit-zcash`
+### 5.3.2 revoke.cash
 
-> **Verify:** the wallet-cli pulls the Ethereum signer kit transitively through `@ledgerhq/live-common`'s `DmkSignerEth` rather than depending on it directly. Bitcoin and Solana paths follow the same pattern. The exact dependency tree is whatever `pnpm why @ledgerhq/device-signer-kit-ethereum` reports inside `apps/wallet-cli` at the time of writing.
+`revoke.cash` is the canonical manual revoke tool. Open-source, run by Rosco Kalis, hosted at `https://revoke.cash`. Source on GitHub at `RevokeCash/revoke.cash`. Multi-chain: Ethereum, Polygon, Arbitrum, Optimism, BSC, Avalanche, plus most testnets including Sepolia and Holesky.
 
-### 5.3.2 The session model
+#### Connect modes
 
-The single biggest mental shift moving from `hw-transport` to DMK is the **session**.
+Three ways to point revoke.cash at an address.
 
-`hw-transport` was almost stateless. Each transport was a thin wrapper around a USB / HID / BLE handle. The wallet code wrote APDUs to it and read APDUs back. If the device was locked, the wallet found out by getting back a `0x6982 SECURITY_STATUS_NOT_SATISFIED` from a probing APDU. If the device disconnected, the wallet got a USB error on the next exchange. There was no concept of "device state" in the transport itself — the wallet had to maintain a state machine on top of every command.
+**WalletConnect.** You scan a QR code with a wallet on your phone (Ledger Live, MetaMask Mobile, Rabby, etc.). The wallet exposes its current address; revoke.cash reads allowances for that address.
 
-DMK flips that. A DMK instance opens a **session** to a discovered device, and the session **tracks state** for you. The session emits an `Observable<DeviceSessionState>` that can be in states like `CONNECTED`, `LOCKED`, `BUSY`. The session has a refresher that periodically pings the device so reads stay fresh. APDU exchanges happen via `dmk.sendApdu({ sessionId, apdu })` — note the `sessionId`, not a transport handle. Higher-level **device actions** (XState machines under the hood) wrap multi-APDU sequences like "open this app, unlock if needed, return when ready" into a single observable.
+**MetaMask (or other browser wallet).** Click "Connect Wallet." MetaMask pops up. You pick the account. revoke.cash now sees that address.
 
-The wallet-cli leans on this. From `register-dmk-transport.ts`:
+**Paste-an-address (read-only).** The most useful mode for QAA work. Drop any address into the search bar and revoke.cash will list its allowances without any wallet connection at all. You can audit a seed without proving you own it. Obviously, with a paste-only connection, you cannot click "Revoke" — that requires a signing wallet — but the audit view is what you need 80 percent of the time.
 
-```ts
-const sessionId = await dmk.connect({ device });
+#### What it lists
 
-const sessionState = await firstValueFrom(dmk.getDeviceSessionState({ sessionId })).catch(
-  () => null,
-);
-const status =
-  sessionState && typeof sessionState === "object" && "deviceStatus" in sessionState
-    ? sessionState.deviceStatus
-    : null;
+For a connected (or pasted) address, revoke.cash queries on-chain allowance state across the chains it supports and renders:
 
-if (status === DeviceStatus.BUSY) {
-  await dmk.disconnect({ sessionId }).catch(() => {});
-  throw new Error(
-    "[wallet-cli] The Ledger device did not respond to the initial ping. " +
-      "Please run the command again — the retry usually succeeds.",
-  );
-}
-```
+- **ERC-20 allowances** — every spender with a non-zero `allowance(you, spender)` on every token the address has ever interacted with. Each row shows token name, spender (with a label if the spender is a known router or aggregator — Uniswap, 1inch, LiFi, ParaSwap, etc.), and the current allowance amount (decoded into the token's display units, with a "unlimited" badge when the value is `2^256 - 1`).
+- **ERC-721 approvals** — both per-token approvals (`approve(spender, tokenId)`) and operator-level approvals (`setApprovalForAll(operator, true)`).
+- **ERC-1155 approvals** — operator approvals only (ERC-1155 doesn't have per-id approval).
 
-Two things worth noticing for QA:
+Each row has a "Revoke" button. If you connected with a signing wallet, clicking it builds an `approve(spender, 0)` (or `setApprovalForAll(operator, false)` for NFTs) and asks the wallet to sign. After signing, the wallet broadcasts the tx; revoke.cash polls until the allowance reads zero, then strikes the row out.
 
-1. **The CLI checks session state immediately after `connect`.** If the device responds `BUSY`, the CLI disconnects and asks the user to retry. This is a wallet-cli policy, not a DMK default — the DMK would happily keep the session in `BUSY` and let you wait.
-2. **The session refresher is left enabled** (the comment in source: *"matching the DMK sample app behaviour"*). That means session state stays accurate without the CLI having to poll.
+#### Cost
 
-### 5.3.3 Transports under DMK
+Gas only. revoke.cash takes no fee, no commission, no premium. Each revoke is one ERC-20 `approve` call (~46 000 gas typical, less if the storage slot was already touched in this block) per spender per token. On mainnet at 30 gwei that's around $3 per revoke; on testnets it's free if you have faucet ETH.
 
-The DMK exposes **one API at the top** and lets you plug in different transports underneath. The four shipping transports are:
+#### What the UI looks like
 
-| Transport | Where it runs | Used by |
-|---|---|---|
-| WebUSB / node-WebUSB | Browser + Node | Ledger Live Desktop (Node), wallet-cli (Node), web wallets |
-| WebHID | Browser only | Some web wallets |
-| Bluetooth (BLE) | Mobile (RN) + browser | Ledger Live Mobile, browser wallets that support BLE |
-| HTTP-Speculos | Node + browser | Tests, CI, anywhere a real device isn't available |
+Picture a tabular list. Each row carries a token logo, the token symbol, the spender address (often pretty-printed: "Uniswap V3 Router"), the current allowance, the chain badge, the date of the last interaction, and a red "Revoke" button on the right edge. A search bar at the top filters by token name or spender address. A chain selector at the top right switches between Ethereum, Sepolia, Polygon, etc. — the address stays connected; only the chain changes.
 
-A DMK instance is constructed with one or more transport factories, then the same `dmk.connect`, `dmk.sendApdu`, `dmk.executeDeviceAction` API is used regardless of which transport accepts the device. The wallet-cli registers exactly one factory: `nodeWebUsbTransportFactory` (see 5.3.4). The mobile app registers BLE. Tests register a mock (see 5.3.6) or HTTP-Speculos.
+If you arrive with a paste-only connection, the "Revoke" buttons are greyed out and a banner at the top says "connect a wallet to revoke." All other inspection capabilities work.
 
-> **Verify:** the wallet-cli today does not register an HTTP-Speculos transport. We confirm that explicitly in 5.3.10 and treat it as a current limitation.
+### 5.3.3 Etherscan Read Contract Tab
 
-### 5.3.4 wallet-cli's DMK wiring
+`https://etherscan.io/token/<contract>#readContract`
 
-Four files own the wallet-cli's DMK wiring, all under `apps/wallet-cli/src/device/`:
+This is the read-only inspection path. No wallet, no JavaScript wallet handshake, no risk. You arrive at the contract page on Etherscan, click the "Contract" tab, then "Read Contract." A list of every public read function the contract exposes appears.
 
-- `dmk.ts` — the DMK builder (~20 lines)
-- `register-dmk-transport.ts` — the process-wide DMK lifecycle manager (~172 lines)
-- `wallet-cli-dmk-transport.ts` — the `hw-transport` shim that exposes the DMK to legacy live-common code (~38 lines)
-- `connect-ledger-app.ts` — the `ConnectAppDeviceAction` wrapper (~201 lines)
+For ERC-20 you care about `allowance(owner, spender)`. Type the owner address (your seed) and the spender address (the router you're auditing). Click "Query." Etherscan does an `eth_call` to a public node and returns the raw `uint256`.
 
-#### `dmk.ts` — the builder
+The number is in the token's smallest unit — you must divide by `10^decimals` to get the human-readable amount. For USDC (6 decimals) a return of `1000000000` means 1000 USDC. For DAI (18 decimals) the same hex value would be a tiny fraction. Always check the `decimals()` view (right above `allowance` in most ERC-20 contracts) before you interpret the number.
 
-```ts
-import {
-  DeviceManagementKit,
-  DeviceManagementKitBuilder,
-  LogLevel,
-} from "@ledgerhq/device-management-kit";
-import { nodeWebUsbTransportFactory } from "./node-webusb";
-import { LedgerLiveLogger } from "@ledgerhq/live-dmk-shared/services/LedgerLiveLogger";
-import { UserHashService } from "@ledgerhq/live-dmk-shared/services/UserHashService";
-import { getEnv } from "@ledgerhq/live-env";
-
-export function createDeviceManagementKit(): DeviceManagementKit {
-  const userId = getEnv("USER_ID") || "wallet-cli";
-  const firmwareDistributionSalt = UserHashService.compute(userId).firmwareSalt;
-
-  return new DeviceManagementKitBuilder()
-    .addTransport(nodeWebUsbTransportFactory)
-    .addLogger(new LedgerLiveLogger(LogLevel.Warning))
-    .addConfig({ firmwareDistributionSalt })
-    .build();
-}
-```
-
-What this gives us:
-
-- A single Node-WebUSB transport. The wallet-cli is **USB-only** today.
-- The shared `LedgerLiveLogger` at `Warning` level — same logger Ledger Live uses, so DMK warnings are routed through the same channel.
-- A `firmwareDistributionSalt` derived from the `USER_ID` env (or `"wallet-cli"` default). This salt is part of how Ledger phases firmware rollouts; for QA work it does not matter, but it must be present.
-
-The builder pattern (`DeviceManagementKitBuilder`) is the public DMK API. You can chain `.addTransport()`, `.addLogger()`, `.addConfig()` — each returns the builder. You finalize with `.build()`.
-
-#### `register-dmk-transport.ts` — the lifecycle manager
-
-The most consequential file in this directory. The headline pattern is the **persistent DMK instance**. Here is the comment from source, verbatim:
-
-```ts
-let singleton: Singleton | null = null;
-/** One DMK per CLI process: each `createDeviceManagementKit()` adds node-usb hotplug listeners; closing + recreating stacks listeners and breaks the 3rd+ in-process connect (same pattern as the former node-hid kit). */
-let persistentDmk: DeviceManagementKit | null = null;
-let exitHooksRegistered = false;
-```
-
-The trap, in plain language: **`createDeviceManagementKit()` is not free**. Each call attaches new USB hotplug listeners (via `node-usb`, the underlying library). If the CLI naively closed and recreated the DMK between commands, listeners would stack. The third in-process connect would deadlock or silently fail.
-
-So the wallet-cli keeps **one DMK alive for the life of the process**. Sessions come and go inside that one DMK. There are three lifecycle helpers:
-
-```ts
-function getOrCreatePersistentDmk(): DeviceManagementKit {
-  if (!persistentDmk) {
-    persistentDmk = createDeviceManagementKit();
-  }
-  return persistentDmk;
-}
-
-export async function ensureWalletCliDmkTransport(): Promise<WalletCliDmkTransport> {
-  if (_testTransport) {
-    singleton ??= { dmk: _testTransport.dmk, transport: _testTransport };
-    return singleton.transport;
-  }
-
-  if (singleton) {
-    return singleton.transport;
-  }
-
-  const dmk = getOrCreatePersistentDmk();
-  const sessionId = await connectFirstUsbDevice(dmk);
-  const transport = new WalletCliDmkTransport(dmk, sessionId);
-  singleton = { dmk, transport };
-  return transport;
-}
-```
-
-Read the singleton check carefully. `singleton` holds *the active session*. `persistentDmk` holds *the DMK itself*. Resetting the session does **not** tear down the DMK:
-
-```ts
-export async function resetWalletCliDmkSession(): Promise<void> {
-  const held = singleton;
-  if (!held) {
-    return;
-  }
-  singleton = null;
-  await held.dmk.disconnect({ sessionId: held.transport.sessionId }).catch(() => {});
-}
-```
-
-Only on process exit do we close the kit fully:
-
-```ts
-export async function disposeWalletCliDmkTransportFully(): Promise<void> {
-  await resetWalletCliDmkSession();
-  if (persistentDmk) {
-    closeDmkQuietly(persistentDmk);
-    persistentDmk = null;
-  }
-}
-```
-
-…and that runs in two places: the SIGINT/SIGTERM handlers (registered once) and `cli.ts` after `cli.run()` returns. Process exit is the only legitimate trigger for `dmk.close()`.
-
-##### Why this matters for QA
-
-If you write an E2E hook that spawns multiple wallet-cli commands in quick succession — `revoke`, then `send`, then `operations` — each command is a **separate `wallet-cli` process**. Each process gets its own DMK. The hotplug-listener-stacking problem does not apply across processes. Inside a single process (e.g. when the CLI offers an interactive REPL, which it does not today, or when bun-tests reuse the binary), the singleton matters.
-
-#### Discovering the device
-
-`connectFirstUsbDevice` is where the `Observable<DiscoveredDevice[]>` model becomes visible:
-
-```ts
-const discovered = await firstValueFrom(
-  dmk.listenToAvailableDevices({}).pipe(
-    filter((list: DiscoveredDevice[]) => list.length > 0),
-    timeout(CONNECT_TIMEOUT_MS),
-  ),
-);
-const device = discovered[0];
-if (!device) {
-  throw new Error("No Ledger device found. Unlock the device and try again.");
-}
-const sessionId = await dmk.connect({ device });
-```
-
-`listenToAvailableDevices` returns a hot observable of *currently visible* devices. The CLI takes the first emission with at least one device, then `dmk.connect({ device })` opens a session against that one. `CONNECT_TIMEOUT_MS = 60_000`: the user has 60 seconds to plug in and unlock.
-
-#### `wallet-cli-dmk-transport.ts` — the shim
-
-Live-common still consumes a classic `hw-transport`-shaped object in many places (the bridges, especially). To keep the wallet-cli from rewriting all of live-common, the wallet-cli wraps the DMK in an `hw-transport`-compatible class:
-
-```ts
-export class WalletCliDmkTransport extends TransportClass {
-  readonly dmk: DeviceManagementKit;
-  sessionId: string;
-
-  constructor(dmk: DeviceManagementKit, sessionId: string) {
-    super();
-    this.dmk = dmk;
-    this.sessionId = sessionId;
-  }
-
-  async exchange(
-    apdu: Buffer,
-    { abortTimeoutMs }: { abortTimeoutMs?: number } = {},
-  ): Promise<Buffer> {
-    const { data, statusCode } = await this.dmk.sendApdu({
-      sessionId: this.sessionId,
-      apdu: new Uint8Array(apdu.buffer, apdu.byteOffset, apdu.byteLength),
-      abortTimeout: abortTimeoutMs ?? WALLET_CLI_DEFAULT_APDU_ABORT_MS,
-    });
-    return Buffer.from([...data, ...statusCode]);
-  }
-
-  close(): Promise<void> {
-    return Promise.resolve();
-  }
-}
-```
-
-This is the gluing class. It exposes `.dmk` and `.sessionId` so live-common's `isDmkTransport(transport)` returns true and code that *can* use DMK directly (e.g. `DmkSignerEth`) bypasses the legacy APDU path. For code that *can't* yet, the inherited `exchange()` route still works — it's just APDU in, APDU out.
-
-The `WALLET_CLI_DEFAULT_APDU_ABORT_MS = 120_000` is a 2-minute hard ceiling so a stuck USB exchange cannot block the CLI indefinitely. This is the wallet-cli's policy on top of the DMK's `abortTimeout` parameter.
-
-#### Registering the transport with live-common
-
-At the end of `register-dmk-transport.ts`:
-
-```ts
-export function registerWalletCliDmkTransport(): void {
-  if (registered) {
-    return;
-  }
-  registered = true;
-
-  registerWalletCliDmkProcessExitHooks();
-
-  registerTransportModule({
-    id: MODULE_ID,
-    open: (id, _timeoutMs, _context, _matchDeviceByName) => {
-      if (id !== WALLET_CLI_DMK_DEVICE_ID) {
-        return undefined;
-      }
-      return ensureWalletCliDmkTransport();
-    },
-    disconnect: id => {
-      if (id !== WALLET_CLI_DMK_DEVICE_ID) {
-        return null;
-      }
-      return resetWalletCliDmkSession();
-    },
-  });
-}
-```
-
-This is the bridge to live-common's `withDevice(...)` API. Anywhere in live-common code where a bridge does:
-
-```ts
-withDevice("wallet-cli-dmk")(transport => /* … */ )
-```
-
-…live-common asks every registered transport module whether it owns that id. The wallet-cli's module says yes for `"wallet-cli-dmk"` and returns the singleton transport. Live-common is none the wiser that USB is going through DMK.
-
-#### `connect-ledger-app.ts` — opening the embedded app
-
-The last piece. Before signing an Ethereum transaction we need the Ethereum app to be open on the device. DMK ships a device action for that: `ConnectAppDeviceAction`. The wallet-cli's wrapper adds a few QA-grade hardenings:
-
-- A **positive unlock timeout** (`CONNECT_APP_UNLOCK_TIMEOUT_MS = 60_000`). Live's wallet uses 0 (instant fail if locked); the CLI gives the user a minute to enter their PIN.
-- A **silence watchdog** (`CONNECT_APP_SILENCE_TIMEOUT_MS = unlockTimeout + 60_000`). `RxJS timeout()` alone does not fire when DMK/USB blocks without scheduling a timer; the wrapper adds a wall-clock `setTimeout` and calls `cancel()` from the executeDeviceAction return value.
-- **Retry on transport framing errors** (up to 5 attempts, 3-second delay). Comment from source:
-
-```ts
-/**
- * When the device is locked inside an app (e.g. Ethereum), the DMK's `waitForDeviceUnlock` polling
- * may receive an unparseable APDU response (`ReceiverApduError`) instead of error code 5515.
- * The polling misidentifies this as "unlocked" and the action fails immediately.
- * We retry the whole device action so the user has time to unlock.
- */
-const MAX_TRANSPORT_ERROR_RETRIES = 5;
-const TRANSPORT_ERROR_RETRY_DELAY_MS = 3_000;
-```
-
-> **Verify:** this retry behaviour is a workaround for what looks like a race in DMK's `waitForDeviceUnlock` polling. The condition (`ReceiverApduError` vs the expected `0x5515` LOCKED_DEVICE) is documented in source but not in any Confluence page I found. Treat the comment as the canonical explanation.
-
-The progress messages — *"[~] Waiting: Ledger detected but locked. Enter your PIN on the device."* and *"[i] Opening Ethereum app… ACTION REQUIRED: Confirm on device screen."* — match the canonical terminal prompts in the wallet-cli PRD (VAUL/6907625515 §4) almost word-for-word.
-
-### 5.3.5 Device errors
-
-`apps/wallet-cli/src/device/wallet-cli-device-error.ts` is the error-mapping policy in 86 lines. It takes anything thrown by DMK or live-common and maps it to a wallet-cli-flavoured `Error` with a user-facing message. The shape is a single function:
-
-```ts
-export function toWalletCliDeviceError(error: unknown): Error {
-  if (error instanceof ManagerDeviceLockedError || error instanceof LockedDeviceError) {
-    return new Error(
-      "[wallet-cli] Device is locked. Unlock your Ledger with your PIN and try again.",
-      { cause: error },
-    );
-  }
-
-  if (error instanceof TransportStatusError) {
-    const { statusCode } = error;
-    if (statusCode === StatusCodes.LOCKED_DEVICE) { /* … */ }
-    if (statusCode === StatusCodes.SECURITY_STATUS_NOT_SATISFIED) { /* … */ }
-    if (statusCode === StatusCodes.CONDITIONS_OF_USE_NOT_SATISFIED) {
-      return new Error("[x] Transaction Cancelled: Rejected on device. No funds moved.", {
-        cause: error,
-      });
-    }
-    if (
-      statusCode === StatusCodes.CLA_NOT_SUPPORTED ||
-      statusCode === StatusCodes.INS_NOT_SUPPORTED
-    ) { /* … */ }
-  }
-
-  if (error instanceof SendApduTimeoutError || isSendApduTimeoutTagged(error)) { /* … */ }
-  if (isTransportFramingError(error)) { /* … */ }
-
-  if (error instanceof Error) {
-    return error;
-  }
-
-  return new Error(String(error));
-}
-```
-
-For QA, this function is the **error catalogue**. Five distinct error categories the CLI surfaces:
-
-| Trigger | What QA sees |
-|---|---|
-| `LockedDeviceError` / `ManagerDeviceLockedError` / status `0x5515` | `[wallet-cli] Device is locked. Unlock your Ledger with your PIN and try again.` |
-| status `0x6982` (`SECURITY_STATUS_NOT_SATISFIED`) | `[wallet-cli] The device reported a security error… Unlock the device and try again.` |
-| status `0x6985` (`CONDITIONS_OF_USE_NOT_SATISFIED`) — user rejected | `[x] Transaction Cancelled: Rejected on device. No funds moved.` |
-| status `0x6E00` / `0x6D00` (CLA / INS not supported) | `[wallet-cli] Could not execute the command on the app. Unlock the Ledger, open the correct app for this currency, and try again.` |
-| `SendApduTimeoutError` (DMK class or `_tag`) | `[wallet-cli] Timed out talking to the Ledger over USB. The device may be waiting for your PIN, locked, or busy. Retry the command, check the cable, and make sure no other app is using the device.` |
-| `ReceiverApduError` / `UnknownDeviceExchangeError` (transport framing) | `[wallet-cli] Could not communicate with the device (garbled APDU). The device may be locked or busy. Unlock it and try again.` |
-
-Two subtleties worth filing away:
-
-1. **The function passes through unrelated errors.** If DMK throws something that isn't in the catalog, `toWalletCliDeviceError` returns it unchanged (or wraps `String(error)` if it isn't even an Error). That is a deliberate "don't swallow what we don't understand" stance.
-2. **`cause` is set on every wrapped error.** Stack traces survive the rewrite. When you debug a CLI failure, `err.cause` is the original DMK / hw-transport error; the wrapper message is for the user.
-
-The `[x]` and `[~]` and `[i]` prefixes are the wallet-cli's plain-text equivalents of the PRD's `[✖]` / `[⧖]` / `[ℹ]` glyphs (PRD §4). Same semantics, terminal-safe.
-
-### 5.3.6 Mock DMK
-
-`apps/wallet-cli/src/device/mock-dmk.ts` is the wallet-cli's **Speculos analog for unit tests**. It replaces the real `DeviceManagementKit` with a class that returns canned results from `executeDeviceAction` and `sendApdu`, without ever talking to USB. From the file's own docstring:
-
-```ts
-/**
- * Minimal mock of DeviceManagementKit for integration tests.
- *
- * Mocks at the executeDeviceAction level — the XState machine and InternalApi
- * are bypassed entirely. E2E tests with real hardware cover the layers omitted here.
- *
- *  - ConnectAppDeviceAction (input.application) → Completed immediately
- *  - CallTaskInAppDeviceAction (input.task, input.appName) → Completed with appResults[appName]
- *
- * Device state is controlled via `initialState`.
- * Coin-specific task results are provided via `appResults`.
- */
-export class MockDeviceManagementKit {
-  private readonly _state: MockDeviceState;
-  private readonly _appResults: MockAppResults;
-  // …
-}
-```
-
-The `_state` is `"connected"` or `"locked"`. The `_appResults` is a per-app map: tests inject what `CallTaskInAppDeviceAction` should return for each `appName`:
-
-```ts
-export type MockAppResults = Record<string, Record<string, unknown>>;
-// Example for Ethereum: { "Ethereum": { publicKey: "...", address: "0x..." } }
-// Example for Solana:   { "Solana": { address: Buffer.from("...") } }
-// Example for Bitcoin:  { "Bitcoin": { publicKey: "...", bitcoinAddress: "..." } }
-```
-
-The discovery side returns a single fake device:
-
-```ts
-const FAKE_DEVICE: DiscoveredDevice = {
-  id: "mock-device-id",
-  name: "Ledger Nano S Plus (mock)",
-  deviceModel: new DeviceModel({
-    id: "mock-device-id",
-    model: DeviceModelId.NANO_SP,
-    name: "Ledger Nano S Plus",
-  }),
-  transport: "mock-transport",
-};
-
-listenToAvailableDevices(_args: unknown): Observable<DiscoveredDevice[]> {
-  return new BehaviorSubject([FAKE_DEVICE]).asObservable();
-}
-```
-
-…and the locked path emits a `DeviceActionStatus.Error` with `_tag: "LockedDevice"`:
-
-```ts
-private _lockedAction<Output, Error, IntermediateValue>(): ExecuteDeviceActionReturnType<
-  Output, Error, IntermediateValue
-> {
-  const observable = new Observable<DeviceActionState<Output, Error, IntermediateValue>>(
-    subscriber => {
-      subscriber.next({
-        status: DeviceActionStatus.Error,
-        // Note: DmkSignerEth._mapError will produce new Error(undefined) = empty message.
-        // A future improvement would emit a proper DmkError with errorCode "5515".
-        error: { _tag: "LockedDevice" } as unknown as Error,
-      });
-      subscriber.complete();
-    },
-  );
-  return { observable, cancel: () => {} };
-}
-```
-
-The mock is installed via the test seam in `register-dmk-transport.ts`:
-
-```ts
-let _testTransport: WalletCliDmkTransport | null = null;
-
-/** @internal Test seam — install before the CLI starts (e.g. from dmk-intercept.ts) to bypass USB discovery. */
-export function _setTestDmkTransport(t: WalletCliDmkTransport | null): void {
-  _testTransport = t;
-  singleton = null;
-}
-```
-
-The test helper `apps/wallet-cli/src/test/helpers/dmk-intercept.ts` constructs a `WalletCliDmkTransport` over a `MockDeviceManagementKit` and calls `_setTestDmkTransport`. Subsequent `ensureWalletCliDmkTransport()` calls return the mock instead of trying to discover real hardware.
-
-We will walk this end-to-end in **Chapter 5.6 — Testing the wallet-cli**, where the mock-DMK + http-intercept + mock-server triad is the wallet-cli's full Speculos analog.
-
-### 5.3.7 USB native binding
-
-`apps/wallet-cli/src/embed-usb-native.ts` exists for one reason: **standalone-binary distribution**. The full file:
-
-```ts
-/**
- * Force Bun to embed the `usb` N-API native addon into the standalone binary.
- *
- * `usb` loads its native binding via node-gyp-build which uses dynamic path
- * resolution (fs.readdirSync) that Bun's bundler cannot detect at compile time.
- * A direct require() makes Bun embed the .node file into the executable, and
- * storing it on globalThis lets the patched usb/dist/usb/bindings.js skip
- * node-gyp-build entirely (see patches/usb@2.9.0.patch).
- *
- * With `minify: true`, Bun evaluates process.platform / process.arch as
- * compile-time constants for each --target, so only the matching prebuilt
- * ends up in each platform binary.
- *
- * @see https://bun.sh/docs/bundler/executables#embed-n-api-addons
- */
-
-if (process.platform === "darwin") {
-  (globalThis as Record<string, unknown>).__usbNativeAddon =
-    require("../node_modules/usb/prebuilds/darwin-x64+arm64/node.napi.node");
-} else if (process.platform === "linux" && process.arch === "x64") {
-  (globalThis as Record<string, unknown>).__usbNativeAddon =
-    require("../node_modules/usb/prebuilds/linux-x64/node.napi.glibc.node");
-} else if (process.platform === "linux" && process.arch === "arm64") {
-  (globalThis as Record<string, unknown>).__usbNativeAddon =
-    require("../node_modules/usb/prebuilds/linux-arm64/node.napi.armv8.node");
-} else if (process.platform === "win32") {
-  (globalThis as Record<string, unknown>).__usbNativeAddon =
-    require("../node_modules/usb/prebuilds/win32-x64/node.napi.node");
-}
-```
-
-In plain language:
-
-- `usb` is the npm package `node-usb` — the native code that talks to the OS USB stack on macOS / Linux / Windows.
-- It normally loads its binding via `node-gyp-build`, which scans `prebuilds/` at runtime to pick the right `.node` file.
-- Bun's bundler can't see that scan, so a vanilla `bun build --compile` would produce a binary missing the binding.
-- The fix: explicitly `require()` the prebuilt for each `(platform, arch)` and stash the addon on `globalThis.__usbNativeAddon`. A patched `usb/dist/usb/bindings.js` (`patches/usb@2.9.0.patch` in the workspace) then reads from `globalThis` instead of `node-gyp-build`.
-- With `minify: true` in `bunli.config.ts`, Bun sees `process.platform === "darwin"` as a compile-time constant per `--target`. Only the matching branch survives in each platform binary; the other prebuilts get tree-shaken.
-
-For QA work this file is **invisible** — you'll never edit it — but it's load-bearing for the standalone binary release path (LIVE-29308 and LIVE-29310, both in flight). If a release build ever ships and silently can't find a Ledger over USB on one platform, this is the first file to look at.
-
-### 5.3.8 Signing flows
-
-A signed transaction in the wallet-cli is the composition of:
-
-1. A **descriptor** (account: family + xpub or address + derivation path).
-2. A **transaction intent** (family-specific shape: bitcoin / evm / solana).
-3. A **device session** opened via `withCurrencyDeviceSession`.
-4. A **bridge `signOperation`** call that streams events as the device works.
-5. A **bridge `broadcast`** call that returns a signed `Operation` with an on-chain hash.
-
-The canonical entry point is `commands/send.ts`. Inside the handler, after building and validating the intent:
-
-```ts
-const spin = out.spin(`Connect device and open ${colors.bold(descriptor.currencyId)} app…`);
-await withCurrencyDeviceSession(descriptor.currencyId, async () => {
-  spin?.success("Device session established");
-  out.spin(`Preparing ${colors.bold(descriptor.currencyId)} transaction…`);
-
-  await lastValueFrom(
-    wallet
-      .send(descriptor, intent, WALLET_CLI_DMK_DEVICE_ID, dryRun)
-      .pipe(tap(event => out.sendEvent(event))),
-  );
-
-  out.sendComplete();
-});
-```
-
-Three things to read carefully:
-
-1. **`withCurrencyDeviceSession(currencyId, …)`** is what opens the DMK session **and** opens the right embedded app on the device. It's implemented in `apps/wallet-cli/src/session/bridge-device-session.ts`, which calls `ensureWalletCliDmkTransport()` then `connectLedgerApp(dmk, sessionId, managerAppName)`. Inside the `try { return await fn() } finally { resetWalletCliDmkSession() }`, the session is dropped after each command so the device is free for the next one.
-2. **`wallet.send(descriptor, intent, WALLET_CLI_DMK_DEVICE_ID, dryRun)`** is `WalletAdapter.send(...)`. It returns an `Observable<SendEvent>` — events of type `device-streaming`, `device-signature-requested`, `device-signature-granted`, `signed`, `broadcast`. Each event hits `out.sendEvent(event)` and updates the spinner / accumulates JSON.
-3. **The signing path stays on legacy live-common bridges.** `WalletAdapter.send` delegates to `BridgeAdapter.send`, which calls `bridge.signOperation(...)`. The bridge internally drives `DmkSignerEth` (for EVM) or the equivalent signer kit, which uses DMK's `executeDeviceAction` to run `signTransaction` on the embedded app. The wallet-cli does **not** call `signEthereumTransaction` directly anywhere — it goes through the bridge so it gets free gas/nonce/EIP-1559 estimation, free clear-sign metadata, and free broadcast.
-
-ETH-app APDU specifics (the exact INS values, the chunked payload framing for big transactions, the ERC-7730 metadata streaming) are out of scope for this primer — the signer kit owns all of that. The wallet-cli's job ends at "I sent an `Observable<SendEvent>` to the user".
-
-### 5.3.9 Clear-sign and the ETH plugin
-
-When the wallet-cli sends an EVM transaction with non-empty calldata, the device tries to **clear-sign** it. Clear signing means: the embedded Ethereum app decodes the calldata, recognises a known function selector, and renders human-readable fields on the device screen ("Type: Approve / Amount: 0 USDT / Address: 0x58df…1cf") instead of asking the user to verify a raw hex blob.
-
-The decoder is selector-driven. The wallet-cli does not need to do anything special to trigger it — it just sends a normal EVM transaction whose `data` field starts with a recognised 4-byte selector. The Ethereum app does the rest, with help from ERC-7730 metadata that DMK packages alongside the transaction.
-
-The most relevant selector for QA-615 is **`0x095ea7b3`**, the ERC-20 `approve(address spender, uint256 amount)` function. The Ethereum app's plugin system recognises it and produces:
-
-- `Type: Approve` (or `Revoke` when `amount == 0`)
-- `Amount: <human-readable>` (e.g. `0 USDT`, or `Unlimited` for `2**256 - 1`)
-- `Address: <spender>` (with ENS / trusted-name resolution if available)
-
-That happens whether the wallet-cli emits the transaction via a future `wallet-cli revoke` command or via the existing `wallet-cli send … --data 0x095ea7b3…`. The path through DMK is identical; only the user-facing CLI surface differs.
-
-What the wallet-cli **does not** do today: ship its own clear-sign tier upgrade. From the LedgerJS-vs-DMK tier model (5.3.1), full clear signing requires a **commercial origin token**. Ledger's first-party CLI inherits Ledger's own token transitively through the DMK builder (the `firmwareDistributionSalt` config in `dmk.ts`).
-
-> **Verify:** the exact mechanism by which the wallet-cli's first-party status flows into DMK's tier decision is not documented in `apps/wallet-cli/src/`. It is plausibly handled inside `@ledgerhq/live-dmk-shared` or downstream. The PRD says *"Embed Clear Signing token in CLI packaging so users can Clear Sign operations in swap that require Clear Signing and get Transaction Check simulation results"* (VAUL/6907625515 §3 enablers) — note "Embed", suggesting the token is bundled into the binary at build time.
-
-We walk a full approve-then-revoke clear-sign session, screen by screen, in **Chapter 5.8 — Clear-sign walkthrough**.
-
-### 5.3.10 DMK on Speculos
-
-A current limitation, important to flag:
-
-**The wallet-cli is USB-only today.** `dmk.ts` registers `nodeWebUsbTransportFactory` and nothing else. There is no HTTP-Speculos transport in the DMK builder, no `--speculos-port` flag in any command, no `withSpeculos(...)` helper.
-
-This means:
-
-- All `wallet-cli` commands that touch the device (`account discover`, `receive`, `send`, the future `revoke`) require **a real Ledger plugged into USB**.
-- The wallet-cli's unit tests use the **mock DMK** (5.3.6), not Speculos.
-- Speculos-based emulator testing — the bedrock of desktop and mobile E2E — has **no equivalent in wallet-cli today**.
-
-The legacy `apps/cli` did support Speculos (commands like `bot`, `botPortfolio`, `cleanSpeculos`, `speculosList`, per the AI Agent architecture study TA/6951665759). The wallet-cli rewrite has not surfaced an equivalent.
-
-What that means for QA hooks: a CI step that wants to exercise the wallet-cli (e.g. `wallet-cli revoke` between regression runs of the swap suite) **must run on an agent with a real Ledger attached**, or the suite must mock at a higher level (the CLI's stdout). This is currently an open question for the QAA-919 family of regression-automation tickets.
-
-> **Verify:** there is no Confluence page that confirms Speculos support is on the wallet-cli roadmap. The wallet-cli PRD (VAUL/6907625515) does not mention Speculos. LIVE-28269 ("Connect transport layer to DMK") references the silent-app-open behaviour but not an emulator transport. Treat "USB-only" as a true current limitation, not a temporary one.
-
-A possible future shape: the DMK builder gains an `.addTransport(httpSpeculosTransportFactory)` line guarded by an env flag, and `connectFirstUsbDevice` learns to prefer the Speculos transport when `SPECULOS_API_PORT` is set. That is plausible architecturally — the DMK API is identical at the top — but it has to be built. **Today it does not exist.**
-
-### 5.3.11 Resources
-
-Confluence:
-
-- **Device Management Kit (overview)** — https://ledgerhq.atlassian.net/wiki/spaces/CS/pages/7014678571/Device+Management+Kit — the canonical one-pager. DMK's five responsibilities (metadata resolution, payload construction, transport management, signer abstraction, fallback) and the Client → DMK → Signer diagram.
-- **LedgerJS vs DMK — Benchmark & Comparison** — https://ledgerhq.atlassian.net/wiki/spaces/WXP/pages/6995411067/LedgerJS+vs+DMK+Benchmark+Comparison — the tier model (LedgerJS / DMK no token / DMK + token), the supported signer kits list, and the >10× connectivity-error reduction.
-- **DMK Internal testing phase** — https://ledgerhq.atlassian.net/wiki/spaces/WXP/pages/5549588557/Device+Management+Kit+Internal+testing+phase — Gherkin-style scenarios for DMK transport behaviour ("Allow Ledger Manager event" and similar). Useful when writing QA test cases for DMK-backed flows.
-- **Discovery and connection logic study** — https://ledgerhq.atlassian.net/wiki/spaces/WXP/pages/7045516602/Discovery+and+connection+logic+study — `libs/live-dmk-mobile` wraps DMK for React Native; the wrapping pattern is the precedent for `apps/wallet-cli/src/device/`.
-- **How to :: Mock DMK** — https://ledgerhq.atlassian.net/wiki/spaces/CIP/pages/6551306298/How+to+Mock+DMK — coin-integration playbook for using `@ledgerhq/device-management-kit` directly when a Signer Kit doesn't exist yet.
-- **FIRST PROMPT [DXP] DMK 26' Migration Strat** — https://ledgerhq.atlassian.net/wiki/spaces/WXP/pages/6594658575/FIRST+PROMPT+DXP+DMK+26+Migration+Strat — 2026 migration plan; useful for "where is DMK going" context.
-
-Tickets:
-
-- **LIVE-28652** — *Create a DMK Singleton + Shared Provider in `live-dmk-shared`*. The wallet-cli's `persistentDmk` pattern is the CLI-shaped sibling of this one-DMK-per-app rule.
-- **LIVE-28269** — *Connect transport layer to DMK*. Source ticket for the silent ConnectApp pattern that `connect-ledger-app.ts` implements.
-- **LIVE-22746** — *Verify all errors are remapped in `connectAppEventMapper`*. Cross-reference for `wallet-cli-device-error.ts` parity with live-common.
-
-Source:
-
-- `apps/wallet-cli/src/device/dmk.ts`
-- `apps/wallet-cli/src/device/register-dmk-transport.ts`
-- `apps/wallet-cli/src/device/wallet-cli-dmk-transport.ts`
-- `apps/wallet-cli/src/device/connect-ledger-app.ts`
-- `apps/wallet-cli/src/device/wallet-cli-device-error.ts`
-- `apps/wallet-cli/src/device/mock-dmk.ts`
-- `apps/wallet-cli/src/embed-usb-native.ts`
-- `apps/wallet-cli/src/session/bridge-device-session.ts`
+This is the cheapest possible audit. No wallet connect, no transaction, no gas, no JavaScript trust assumption. You're just reading public state via Etherscan's hosted RPC.
+
+The same UI works on every Etherscan-family explorer:
+
+- `sepolia.etherscan.io` — Sepolia testnet
+- `holesky.etherscan.io` — Holesky testnet
+- `polygonscan.com` — Polygon
+- `arbiscan.io` — Arbitrum
+- `optimistic.etherscan.io` — Optimism
+- `bscscan.com` — BSC
+- `snowtrace.io` — Avalanche
+
+The path is always `/token/<contract>#readContract`. Layout differs cosmetically; the function list and "Query" button are the same.
+
+### 5.3.4 Etherscan Write Contract Tab
+
+`https://etherscan.io/token/<contract>#writeContract`
+
+This is the manual write path. Same contract page, different tab — "Write Contract" instead of "Read Contract." The list of public write functions appears, including `approve(spender, amount)`.
+
+Click "Connect to Web3." MetaMask (or another supported wallet) pops up. Pick the account that holds the allowance you want to change. Etherscan shows your address as connected.
+
+Click `approve`. Two fields: `_spender` and `_value`. Enter the spender address and `0` for the value. Click "Write." MetaMask asks for signature. Confirm. Etherscan returns a tx hash and links to the explorer view of the pending tx.
+
+Once mined, the allowance is zero. Verify by going back to the Read tab and querying `allowance(owner, spender)`.
+
+#### When you reach for this instead of revoke.cash
+
+revoke.cash covers 99 percent of cases. The 1 percent where Etherscan Write wins:
+
+- **Weird testnet tokens** that revoke.cash doesn't index (its scanner pulls from a few public APIs; obscure testnet deployments slip through).
+- **Custom or vanity ERC-20s** deployed for QA-only purposes and never registered with token lists.
+- **Forked or modified `approve` semantics** — some non-standard tokens have weird `approve` (e.g., revert if `from != 0 && to != 0`, the old USDT footgun). Etherscan Write lets you call any function exposed by the contract ABI, so you can work around the ones revoke.cash assumes. For example, on legacy USDT-style tokens you may need two calls: first `approve(spender, 0)`, then verify, then call `approve(spender, newValue)` if you wanted to lower without zeroing first.
+- **Non-standard token contracts that expose extra revoke-like methods** (`decreaseAllowance`, `permit`, custom admin functions). Pick the right method from the function list directly.
+
+The Write tab is also the right tool when you need to read the raw calldata Etherscan generates — you can copy it before signing and paste it into a calldata decoder to confirm the bytes match what you expect.
+
+### 5.3.5 Other Tools
+
+Two adjacent tools come up in QAA conversation; neither replaces revoke.cash for this workflow, but both deserve a one-paragraph mention.
+
+**DeBank** (`debank.com`) — a portfolio aggregator that, among many other features, has an "Approvals" page per address. The list overlaps with revoke.cash. DeBank also shows DeFi positions and token balances, so QAA sometimes uses it to sanity-check what's actually held on a seed before testing a swap. It can revoke too, with a connected wallet, the same way revoke.cash does. revoke.cash is the more focused tool for this exact job.
+
+**Zapper Smart Wallet** (`zapper.xyz`) — similar story: portfolio dashboard with an approvals view. Not actively recommended for QAA work because the allowance list is sometimes stale (cached) compared to revoke.cash's near-real-time read. Useful for one-glance overviews of a seed's overall DeFi exposure but not for clean-up sessions.
+
+For block explorers across other chains, the pattern is identical to Etherscan:
+
+- Sepolia → `sepolia.etherscan.io`
+- Polygon → `polygonscan.com`
+- Arbitrum → `arbiscan.io`
+- Optimism → `optimistic.etherscan.io`
+- BSC → `bscscan.com`
+- Avalanche → `snowtrace.io`
+
+Same Read Contract / Write Contract tabs, same `allowance(owner, spender)` and `approve(spender, value)` functions. Once you've used Etherscan, you've used all of them.
+
+### 5.3.6 A Worked Debug Walk-Through
+
+Concrete picture. Nightly run on the QAA seed `0xBEEF...0001` (Sepolia). Allure shows the swap test failed at the post-condition assertion `expect(allowance).toBe(0)`. The CLI revoke step in the logs reads "exit code 0" — i.e. the subprocess succeeded.
+
+Three possible explanations:
+
+1. **The on-chain state is correctly zero**, and the test's post-condition reader is broken (parsing wrong, reading the wrong contract, reading the wrong owner).
+2. **The on-chain state is non-zero**, the CLI subprocess succeeded but the broadcast was disabled (env var not flipped, or `--disable-broadcast` was set somewhere upstream).
+3. **The on-chain state is non-zero**, the CLI broadcast happened but the transaction reverted (out of gas, contract guard, weird non-standard token).
+
+You diagnose with two manual tabs.
+
+**Tab 1: revoke.cash, paste-only.** Drop `0xBEEF...0001`, switch to Sepolia. If the row for the failing token/spender pair shows up with a non-zero allowance, the on-chain state is genuinely dirty — eliminate explanation 1. If the row does not show up (or shows zero), the on-chain state is clean and your test's assertion logic is the bug — that's explanation 1, look in the spec, not in the CLI.
+
+**Tab 2: Etherscan Read.** Same address pair, query `allowance(0xBEEF...0001, <spenderAddress>)` on the token contract. Cross-check what revoke.cash showed. If they agree on non-zero, you're in explanation 2 or 3.
+
+**Distinguishing 2 from 3.** Open the CLI log for the failing run. Look for the broadcast line — the live-common send command logs `broadcasted txHash: 0x...` when broadcast happened. If you see the line, broadcast happened; the tx is on-chain. Look it up in the explorer's transaction view: did it succeed, or did it revert? A reverted approve tx looks confusingly successful at the receipt level (status 0 vs 1 is the only difference). If status is 0, that's explanation 3 — token contract rejected the call. Time to look at the contract's `approve` source for non-standard guards.
+
+If the `broadcasted txHash` line is missing from the log, broadcast was skipped — that's explanation 2. Search the test code for `setDisableTransactionBroadcastEnv` or `DISABLE_TRANSACTION_BROADCAST` and find where it was set to `"1"` and not restored. The next chapter (5.6) covers the discipline that prevents this.
+
+The whole investigation takes about three minutes once you know the playbook. Without manual tools, you would be re-running the test with extra logging — a 30-minute round trip per data point.
+
+### 5.3.7 When QAA Reaches for Manual Tools
+
+A short list of the operational moments when you stop typing CLI commands and open a browser tab:
+
+- **Cleanup after manual testing.** You ran a swap by hand, didn't run the cleanup hook, the test seed is dirty. Open revoke.cash, paste the seed address, click Revoke on each non-zero row. Done in a minute.
+- **One-off audits.** "What's currently approved on the QAA test seed?" Paste the address into revoke.cash. Read the list. No need to write or run a script.
+- **CI revoke debug.** Nightly failed at the revoke step. You go to revoke.cash, see the row still showing a non-zero allowance, confirm the CI hook genuinely didn't land. Or you see the row already at zero — meaning the CI revoke succeeded but the test's post-condition assertion is wrong.
+- **Post-hook verification.** CI just finished, claims success. Five-second sanity check on revoke.cash before you announce the seed is clean.
+- **Auditing a senior's branch.** Reviewing a PR that adds a new revoke flow? Run the e2e against a sandbox seed, then check on revoke.cash that the post-test state matches what the test asserted.
+- **Onboarding a new test seed.** Generated a fresh QA seed for a new project? Check revoke.cash on that address right after first use to confirm the baseline is empty before any tests run.
+
+### 5.3.8 Hygiene Rules
+
+The QAA test seed is shared infrastructure. Multiple engineers across desktop and mobile use the same testnet seeds for swap, send, earn, and delegate specs. Treat it like a shared dev database: clean up after yourself, never assume someone else did.
+
+A short discipline:
+
+- **Never connect someone else's wallet.** If a colleague hands you a seed-phrase, do not import it into your MetaMask just to revoke. Use the paste-only audit mode of revoke.cash, identify what needs to be cleaned, and ask them to clean it themselves with their wallet. The principle: only your wallet talks to your wallet.
+- **Prefer testnets.** All QA work should target Sepolia, Holesky, or another testnet. If a test is touching mainnet, that's a flag — talk to the senior. Mainnet allowances cost real gas to revoke.
+- **Clean up after manual sessions.** If you ran a flow by hand, end the session by checking revoke.cash and reverting any non-zero allowances you created. Don't leave the seed dirty for the next engineer.
+- **Verify before announcing.** Don't tell the team "the test seed is clean" until you've checked it on a block explorer or revoke.cash. Test logs lie when assertions are weak; on-chain state is the ground truth.
+- **Document non-obvious approvals.** If a test deliberately creates and leaves an approval (rare, but it happens — for example a regression test for "what does the UI do when an approval already exists"), add a comment in the spec and a note in the team doc so the next person doesn't try to clean it.
+- **Never paste your personal address into a test slot.** The QAA test seed is the QAA test seed. Don't substitute your own seed because the QAA seed ran out of test ETH. Top up the QAA seed from the faucet instead.
+
+### 5.3.9 Past Incidents — Why This Tooling Matters
+
+Infinite ERC-20 approvals were the attack vector in several major DeFi drains. The pattern: a user clicks "approve unlimited" once on a dapp, the dapp (or its compromised contract) later calls `transferFrom(user, attacker, all_tokens)`, the user's tokens leave their wallet without any second user signature. The allowance is the standing authorisation; the attacker just needs to find a way to trigger the transfer.
+
+**BadgerDAO, December 2021.** Frontend compromise injected malicious approval prompts. Users who had previously approved the legitimate Badger contracts had nothing to fear from old approvals — but the injected prompts asked for new, broader approvals on tokens like WBTC. Users approved, the attackers' contract drained around $120m worth of tokens. The takeaway: even users who knew about approvals were not protected if they were socially engineered into signing new ones. The mitigation was post-hoc — revoke any approval you don't actively need.
+
+**Multiple 2022 phishing campaigns.** Throughout 2022, dozens of phishing sites mimicking real dapps asked users to "claim an airdrop" or "verify their wallet," but the actual signature presented was an unlimited `approve(attackerContract, 2^256-1)` on the user's most valuable token. Once signed, the attacker drained at their leisure. Some campaigns ran for weeks before being fully shut down.
+
+The industry response had three parts:
+
+- **revoke.cash adoption.** The tool existed before these incidents but became standard wallet-hygiene practice afterwards. Many wallet UIs now link directly to revoke.cash from their settings page.
+- **Wallet UI warnings on infinite approvals.** Modern Ledger Live, MetaMask, and Rabby flag unlimited approvals at signing time, often with red banners and explicit "this gives the contract permission to spend any amount" wording. The clear-sign decoder on Ledger devices does the same — when you see `approve(spender, 0xff..ff)` on a Nano S Plus screen, the device labels it unambiguously.
+- **EIP-2612 permit.** Newer ERC-20 tokens implement `permit(owner, spender, value, deadline, v, r, s)` — a signature-based approval that doesn't write to allowance storage. Each `permit` is single-use and time-limited. No standing allowance to drain. USDC, DAI, and most major tokens deployed since 2021 implement this. Older tokens (USDT, WBTC) don't, which is why allowance hygiene still matters for those specifically.
+
+For QAA, the lesson is concrete: when you see an unlimited approval in test logs, that's almost always a test bug or a UX regression worth flagging. Tests should approve only the amount needed — `ensureTokenApproval` in `swap.page.ts` uses `1.2 × minAmount` for slippage, not infinity, deliberately. Anything that approves `2^256-1` in a test is suspicious and should be challenged in code review.
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> DMK replaces the LedgerJS <code>hw-transport</code> + <code>hw-app</code> stack with a session-aware, transport-agnostic, signer-kit-backed library. The wallet-cli wires DMK as a single persistent instance per process (to avoid stacking node-usb hotplug listeners), wraps it in an <code>hw-transport</code>-shaped shim so legacy live-common bridges keep working, and drives signing through those bridges so it inherits free clear-sign, free gas estimation, and free broadcast. The CLI is USB-only today; Speculos support would require a separate transport factory that does not yet exist.
+<strong>Key takeaway:</strong> revoke.cash is the daily driver. Etherscan Read is the audit oracle. Etherscan Write is the escape hatch when revoke.cash doesn't list a token. The shared QAA test seed is infrastructure — clean up after yourself, verify on-chain before you announce anything, and remember why allowance hygiene matters in the first place.
 </div>
 
-### 5.3.12 Chapter 5.3 Quiz
+### 5.3.10 Quiz
 
 <!-- ── Chapter 5.3 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<h3>Chapter 5.3 Quiz</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> What is the main reason the wallet-cli keeps a single persistent DMK instance for the life of the process, instead of creating a new one per command?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> Which manual revoke tool is open-source and run by Rosco Kalis?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) DMK construction is slow (several seconds), so caching is a performance win</button>
-<button class="quiz-choice" data-value="B">B) DMK requires a Ledger-issued license token that takes time to acquire</button>
-<button class="quiz-choice" data-value="C">C) Each <code>createDeviceManagementKit()</code> call attaches new node-usb hotplug listeners; closing and recreating the DMK stacks listeners and breaks the third in-process connect</button>
-<button class="quiz-choice" data-value="D">D) Bunli's command framework requires a singleton DMK to dispatch commands</button>
+<button class="quiz-choice" data-value="A">A) Etherscan Write Contract</button>
+<button class="quiz-choice" data-value="B">B) revoke.cash</button>
+<button class="quiz-choice" data-value="C">C) DeBank</button>
+<button class="quiz-choice" data-value="D">D) Zapper Smart Wallet</button>
 </div>
-<p class="quiz-explanation">From <code>register-dmk-transport.ts</code>: "One DMK per CLI process: each <code>createDeviceManagementKit()</code> adds node-usb hotplug listeners; closing + recreating stacks listeners and breaks the 3rd+ in-process connect." Sessions come and go inside the persistent DMK; only process exit triggers <code>dmk.close()</code>.</p>
+<p class="quiz-explanation">revoke.cash is the open-source, multi-chain canonical revoke tool. Source on GitHub at RevokeCash/revoke.cash. Etherscan is closed-source; DeBank and Zapper are commercial portfolio aggregators.</p>
 </div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> The biggest mental shift moving from <code>hw-transport</code> to DMK is:</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> When would you reach for Etherscan's Write Contract tab instead of revoke.cash?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) DMK uses synchronous APIs while <code>hw-transport</code> was async</button>
-<button class="quiz-choice" data-value="B">B) DMK opens a session and tracks device state (CONNECTED / LOCKED / BUSY); <code>hw-transport</code> was almost stateless and the wallet had to maintain a state machine on top</button>
-<button class="quiz-choice" data-value="C">C) DMK requires Bluetooth; <code>hw-transport</code> only supported USB</button>
-<button class="quiz-choice" data-value="D">D) DMK mandates TypeScript while <code>hw-transport</code> was JavaScript-only</button>
+<button class="quiz-choice" data-value="A">A) When you don't have a wallet connected at all</button>
+<button class="quiz-choice" data-value="B">B) When you only need to read the current allowance</button>
+<button class="quiz-choice" data-value="C">C) When revoke.cash doesn't list the token (weird testnet token, custom ABI, non-standard approve semantics)</button>
+<button class="quiz-choice" data-value="D">D) When you want to revoke for someone else's wallet</button>
 </div>
-<p class="quiz-explanation"><code>hw-transport</code> was a thin handle around USB/HID/BLE — the wallet probed for lock state via APDU error codes and detected disconnect from USB errors on the next exchange. DMK's session emits an <code>Observable&lt;DeviceSessionState&gt;</code> with a refresher that periodically pings the device, plus higher-level "device actions" (XState machines) that wrap multi-APDU sequences.</p>
+<p class="quiz-explanation">revoke.cash covers ~99% of cases. Etherscan Write is the escape hatch when revoke.cash's scanner doesn't index a token, or when you need to call a non-standard function (decreaseAllowance, permit, custom admin methods).</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> Why does <code>WalletCliDmkTransport</code> extend <code>HwTransport</code> instead of just exposing the DMK directly?</p>
+<p><strong>Q3.</strong> Calling <code>allowance(owner, spender)</code> on Etherscan's Read Contract tab returns:</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) live-common's bridges still consume an <code>hw-transport</code>-shaped object in many places; the shim exposes <code>.dmk</code> + <code>.sessionId</code> so <code>isDmkTransport(transport)</code> returns true while keeping the legacy <code>exchange()</code> path working for code that hasn't been ported yet</button>
-<button class="quiz-choice" data-value="B">B) DMK's API is unstable, so the team wraps it for forward compatibility</button>
-<button class="quiz-choice" data-value="C">C) <code>hw-transport</code> is required by Bun's bundler</button>
-<button class="quiz-choice" data-value="D">D) Performance reasons — <code>hw-transport</code> is faster than DMK</button>
+<button class="quiz-choice" data-value="A">A) A raw uint256 in the token's smallest unit — you must divide by 10^decimals to get the display amount</button>
+<button class="quiz-choice" data-value="B">B) A pre-formatted human-readable amount</button>
+<button class="quiz-choice" data-value="C">C) A boolean indicating whether an allowance exists</button>
+<button class="quiz-choice" data-value="D">D) The list of all spenders with non-zero allowances</button>
 </div>
-<p class="quiz-explanation">The shim is a compatibility layer. Code that can use DMK directly (e.g. <code>DmkSignerEth</code>) calls <code>transport.dmk.executeDeviceAction(...)</code>. Code that only knows the old API calls <code>transport.exchange(apdu)</code>, which the shim implements via <code>dmk.sendApdu</code>.</p>
+<p class="quiz-explanation">Solidity returns the raw uint256. USDC has 6 decimals, so a returned value of 1000000000 means 1000 USDC. DAI has 18 decimals, so the same hex would be a tiny fraction. Always check decimals() before interpreting.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> When <code>connect-ledger-app.ts</code> retries up to 5 times on a <code>ReceiverApduError</code> or <code>UnknownDeviceExchangeError</code>, what is the underlying problem it is working around?</p>
+<p><strong>Q4.</strong> Which is NOT a hygiene rule for the shared QAA test seed?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Bad USB cables that drop bytes</button>
-<button class="quiz-choice" data-value="B">B) Slow firmware on older Nano S devices</button>
-<button class="quiz-choice" data-value="C">C) Network errors when fetching ERC-7730 metadata</button>
-<button class="quiz-choice" data-value="D">D) When the device is locked inside an app, DMK's <code>waitForDeviceUnlock</code> polling can receive an unparseable APDU response instead of the expected <code>0x5515</code> LOCKED_DEVICE code, misidentify it as "unlocked", and fail the action immediately — so the wallet-cli retries to give the user time to actually unlock</button>
+<button class="quiz-choice" data-value="A">A) Clean up non-zero allowances after manual testing sessions</button>
+<button class="quiz-choice" data-value="B">B) Verify on-chain (revoke.cash or Etherscan Read) before announcing the seed is clean</button>
+<button class="quiz-choice" data-value="C">C) Prefer testnets for all QA work</button>
+<button class="quiz-choice" data-value="D">D) Import a colleague's seed phrase into your wallet so you can revoke on their behalf</button>
 </div>
-<p class="quiz-explanation">Verbatim from the source comment: "When the device is locked inside an app (e.g. Ethereum), the DMK's <code>waitForDeviceUnlock</code> polling may receive an unparseable APDU response (<code>ReceiverApduError</code>) instead of error code 5515. The polling misidentifies this as 'unlocked' and the action fails immediately. We retry the whole device action so the user has time to unlock."</p>
+<p class="quiz-explanation">Never import someone else's seed phrase. The principle is: only your wallet talks to your wallet. If a colleague's seed needs cleaning, ask them to do it. The other three are correct hygiene practices.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What is the wallet-cli's strategy for emulator-based testing without a real Ledger?</p>
+<p><strong>Q5.</strong> Why was EIP-2612 permit introduced as a response to allowance-vector incidents?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It registers an HTTP-Speculos transport in <code>dmk.ts</code> alongside the USB factory</button>
-<button class="quiz-choice" data-value="B">B) Unit tests use the <code>MockDeviceManagementKit</code> (a mock at the <code>executeDeviceAction</code> level installed via the <code>_setTestDmkTransport</code> seam); there is no Speculos transport wired into the DMK today, so any hardware-touching command requires a real device</button>
-<button class="quiz-choice" data-value="C">C) The wallet-cli reuses the legacy <code>apps/cli</code> Speculos transport via shell invocation</button>
-<button class="quiz-choice" data-value="D">D) Tests run against the desktop app's Speculos integration over a Detox-style WebSocket bridge</button>
+<button class="quiz-choice" data-value="A">A) It cancels all existing on-chain allowances at once</button>
+<button class="quiz-choice" data-value="B">B) It replaces standing allowance storage with single-use, time-limited signed approvals — no standing approval for an attacker to drain</button>
+<button class="quiz-choice" data-value="C">C) It encrypts approval transactions so attackers can't see them</button>
+<button class="quiz-choice" data-value="D">D) It requires a Ledger device for every transfer</button>
 </div>
-<p class="quiz-explanation"><code>mock-dmk.ts</code> bypasses the XState machine and InternalApi, returning canned <code>executeDeviceAction</code> results. It is installed via <code>_setTestDmkTransport</code> from <code>test/helpers/dmk-intercept.ts</code>. The <code>dmk.ts</code> builder registers <code>nodeWebUsbTransportFactory</code> only — there is no HTTP-Speculos transport. This is a current limitation, not a temporary one (5.3.10).</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q6.</strong> When the wallet-cli sends an EVM transaction whose calldata starts with <code>0x095ea7b3</code> (ERC-20 <code>approve</code>), what produces the human-readable "Type: Approve / Amount: 0 USDT / Address: 0x..." screens on the device?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The wallet-cli formats the strings and pushes them to the device as text APDUs</button>
-<button class="quiz-choice" data-value="B">B) <code>connect-ledger-app.ts</code> intercepts the calldata and translates it before sending</button>
-<button class="quiz-choice" data-value="C">C) The Ethereum embedded app's clear-sign plugin recognises the selector and renders the fields on-device, with help from ERC-7730 metadata that DMK packages alongside the transaction; the wallet-cli does nothing special</button>
-<button class="quiz-choice" data-value="D">D) The DMK does the rendering on the host and streams a screenshot to the device</button>
-</div>
-<p class="quiz-explanation">Clear signing is selector-driven and lives on the device. DMK's job is to fetch the ERC-7730 metadata from the Metadata Service and package it into the APDU payload alongside the raw transaction. The Ethereum app decodes the selector, applies the metadata, and renders the screens. The wallet-cli stays on the legacy live-common bridge path and benefits from this transparently.</p>
-</div>
-
-</div>
-
-Up next: **Chapter 5.4 — Codebase Deep Dive** maps the rest of `apps/wallet-cli/` — the Bunli command framework, the wallet adapter, the session layer, the output abstraction, and the test harness — building on the device foundations laid in this chapter.
-## wallet-cli Codebase Deep Dive
-
-<div class="chapter-intro">
-This is your reference chapter for the CLI side. It catalogues every file in the <code>apps/wallet-cli/</code> workspace, shows the load-bearing ones verbatim, and explains how each piece connects to the rest of the binary. Keep this chapter open when you land in an unfamiliar wallet-cli source file — it will tell you what the file does, why it exists, and where to look next. The first half (5.4.1–5.4.6) covers the workspace layout, the top-level configs, the entry point, the live-common bootstrap, and every leaf command under <code>src/commands/</code>. The second half (5.4.7–5.4.15) covers the device layer, the wallet adapter, the session store, the test harness, and the recurring patterns you should copy when you add a new command.
-</div>
-
-### 5.4.1 The Workspace at the Repo Root
-
-`wallet-cli` lives at `apps/wallet-cli/` inside the Ledger Live monorepo, peer to `apps/ledger-live-desktop/` and `apps/ledger-live-mobile/`. Unlike the two GUI apps, it is a Bun-only workspace: a single ESM entry point compiled by Bunli into per-target standalone binaries. There is no React, no Electron, no Detox — just `@bunli/core`, `@ledgerhq/device-management-kit`, `@ledgerhq/live-common`, the `usb` N-API addon, and a thin set of helpers. Total source weight is roughly **5,860 lines** across `src/` (excluding generated and vendored code), so the entire codebase fits in your head.
-
-Here is the full layout to two or three levels:
-
-```
-apps/wallet-cli/
-├── package.json                  72 lines
-├── bunli.config.ts               20 lines
-├── bunfig.toml                    6 lines
-├── tsconfig.json                 12 lines
-├── project.json                  19 lines  (Nx target)
-├── README.md                     78 lines
-├── CHANGELOG.md                  ~13k bytes
-├── .oxlintrc.json   .oxfmtrc.json  .gitignore
-├── .bunli/
-│   └── commands.gen.ts          214 lines  (codegen — DO NOT EDIT)
-├── node_modules/                 (workspace-local, populated by pnpm)
-└── src/
-    ├── cli.ts                    20 lines  (entry — Bunli wiring)
-    ├── config.ts                 24 lines  (LiveConfig schema for wallet-cli)
-    ├── live-common-setup.ts      80 lines  (registers coin modules + DMK transport)
-    ├── embed-usb-native.ts       33 lines  (Bun --compile native addon embed)
-    ├── output.ts                338 lines  (CommandOutput abstraction — human/json)
-    │
-    ├── commands/
-    │   ├── inputs.ts             52 lines   (shared option helpers)
-    │   ├── inputs.test.ts        19 lines
-    │   ├── balances.ts           34 lines
-    │   ├── operations.ts         45 lines
-    │   ├── receive.ts            48 lines
-    │   ├── send.ts              158 lines
-    │   ├── account/
-    │   │   ├── index.ts           9 lines  (group definition)
-    │   │   ├── discover.ts       88 lines
-    │   │   └── fresh-address.ts  38 lines
-    │   └── session/
-    │       ├── index.ts           9 lines  (group definition)
-    │       ├── view.ts           20 lines
-    │       ├── view.test.ts      89 lines
-    │       ├── reset.ts          28 lines
-    │       └── reset.test.ts     98 lines
-    │
-    ├── device/
-    │   ├── register-dmk-transport.ts    172 lines
-    │   ├── wallet-cli-dmk-transport.ts   38 lines
-    │   ├── dmk.ts                        20 lines  (DMK builder)
-    │   ├── connect-ledger-app.ts        201 lines  (ConnectAppDeviceAction wrapper)
-    │   ├── connect-ledger-app.test.ts
-    │   ├── mock-dmk.ts                  191 lines  (test seam)
-    │   ├── wallet-cli-device-error.ts    85 lines  (error mapping)
-    │   ├── wallet-cli-device-error.test.ts
-    │   └── node-webusb/
-    │       ├── index.ts
-    │       ├── node-webusb-constants.ts
-    │       ├── NodeWebUsbApduSender.ts
-    │       └── NodeWebUsbTransport.ts
-    │
-    ├── session/
-    │   ├── session-store.ts            128 lines  (YAML persistence)
-    │   ├── session-store.test.ts       169 lines
-    │   └── bridge-device-session.ts     48 lines  (withCurrencyDeviceSession)
-    │
-    ├── shared/
-    │   ├── log.ts                       11 lines
-    │   ├── response.ts                  15 lines
-    │   ├── response.test.ts             34 lines
-    │   ├── ui.ts                        67 lines  (spinner, colors, isInteractive)
-    │   ├── ui.test.ts                   66 lines
-    │   └── accountDescriptor/
-    │       ├── README.md
-    │       ├── index.ts                 24 lines
-    │       ├── v0.ts                    10 lines
-    │       ├── v1.ts                   147 lines
-    │       ├── v1.test.ts              106 lines
-    │       ├── network.ts              131 lines
-    │       ├── network.test.ts         130 lines
-    │       ├── adapters.ts             212 lines
-    │       ├── adapters.test.ts        118 lines
-    │       └── test-fixtures.ts          4 lines
-    │
-    ├── wallet/
-    │   ├── README.md
-    │   ├── index.ts                     96 lines  (WalletAdapter — routing facade)
-    │   ├── models.ts                   107 lines  (Zod schemas, AccountDescriptor V0)
-    │   ├── models.test.ts               56 lines
-    │   ├── compatibility/
-    │   │   ├── bridge.ts               295 lines  (BridgeAdapter — live-common bridge)
-    │   │   └── alpaca.ts                90 lines  (AlpacaAdapter — direct API)
-    │   ├── intents/
-    │   │   ├── index.ts                 17 lines
-    │   │   ├── index.test.ts           189 lines
-    │   │   ├── parse-amount.ts          57 lines
-    │   │   ├── parse-amount.test.ts     68 lines
-    │   │   └── families/
-    │   │       ├── bitcoin.ts           21 lines
-    │   │       ├── evm.ts               12 lines
-    │   │       └── solana.ts            14 lines
-    │   └── formatter/
-    │       ├── index.ts                  3 lines
-    │       ├── human.ts                 96 lines
-    │       ├── human.test.ts           268 lines
-    │       └── json.ts                  58 lines
-    │
-    └── test/
-        ├── commands/
-        │   ├── README.md
-        │   ├── balances.test.ts         88 lines
-        │   ├── discover.test.ts         79 lines
-        │   ├── operations.test.ts      125 lines
-        │   ├── receive.test.ts          33 lines
-        │   ├── send.test.ts             72 lines
-        │   └── session.test.ts          77 lines
-        └── helpers/
-            ├── cli-runner.ts            52 lines
-            ├── constants.ts              8 lines
-            ├── dmk-intercept.ts         29 lines
-            ├── http-intercept.ts       146 lines
-            ├── eth-sync-routes.ts       37 lines
-            ├── mock-server.ts           58 lines
-            ├── session-fixture.ts       27 lines
-            ├── wrapper.ts                8 lines
-            └── wrapper-local.ts          3 lines
-```
-
-A few things worth pointing out before we start poking at individual files:
-
-- **Tests live next to the code they exercise.** Pure unit tests (Zod schemas, parsers, formatters, `inputs.ts`, the session store) sit beside their implementation under `src/` as `*.test.ts`. The integration tests — the ones that spawn the compiled CLI as a subprocess and assert on stdout JSON — live under `src/test/commands/`. Both kinds are picked up by the same `bun test src/` run; the split is by **scope**, not by location.
-- **`node_modules/` is workspace-local.** pnpm installs wallet-cli's own copy of `@bunli/core`, `usb`, `yocto-spinner`, etc. directly under `apps/wallet-cli/node_modules/`. The `usb` prebuilt `.node` files referenced by `embed-usb-native.ts` resolve there at compile time, not against the monorepo's hoisted root.
-- **There is no `src/index.ts`.** The package's `bin` entry (`./src/cli.ts`) is the only public entry point. Everything else under `src/` is internal.
-- **No `dist/` is committed.** `bunli build` produces `dist/wallet-cli-darwin-arm64`, `dist/wallet-cli-linux-x64`, etc. on demand. The compiled binaries are the deliverables; the source tree is the workspace.
-
-### 5.4.2 Top-level Configs
-
-Six files at the repo root of `apps/wallet-cli/` configure the build, the test runner, the type-checker, the Nx graph, and Bunli itself. We walk them in the order Bunli reads them.
-
-#### `package.json` — workspace identity, scripts, dependencies
-
-```json
-{
-  "name": "@ledgerhq/wallet-cli",
-  "version": "0.1.1",
-  "private": true,
-  "description": "Ledger Wallet CLI using Device Management Kit (USB)",
-  "bin": {
-    "wallet-cli": "./src/cli.ts"
-  },
-  "type": "module",
-  "scripts": {
-    "start": "bun run ./src/cli.ts",
-    "dev": "bunli dev",
-    "generate": "bunli generate",
-    "generate:check": "bunli generate && git diff --exit-code -- .bunli/commands.gen.ts",
-    "build": "bunli build",
-    "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "bun test src/",
-    "coverage": "bun test src/ --coverage",
-    "lint": "oxlint src bunli.config.ts",
-    "lint:ci": "oxlint src bunli.config.ts --quiet",
-    "lint:fix": "oxfmt -c ../../.oxfmtrc.json src bunli.config.ts && oxlint src bunli.config.ts --fix --quiet",
-    "format": "oxfmt -c ../../.oxfmtrc.json src bunli.config.ts",
-    "format:check": "oxfmt -c ../../.oxfmtrc.json src bunli.config.ts --check"
-  }
-}
-```
-
-The scripts table is the single most important table in the workspace. Memorise the columns or pin this page:
-
-| Script | Command | When you run it |
-|---|---|---|
-| `start` | `bun run ./src/cli.ts` | Day-to-day: runs the CLI from source against your USB Ledger. This is what `pnpm wallet-cli <args>` ends up calling. |
-| `dev` | `bunli dev` | Hot-reload dev mode. Same handler, faster edit loop. |
-| `generate` | `bunli generate` | Regenerate `.bunli/commands.gen.ts` from `src/commands/*`. **Run this every time you add or rename a command file.** |
-| `generate:check` | `bunli generate && git diff --exit-code -- .bunli/commands.gen.ts` | The CI gate. Fails the PR if you forgot to commit a regeneration. |
-| `build` | `bunli build` | Produce the four standalone binaries listed in `bunli.config.ts → build.targets`. |
-| `typecheck` | `tsc --noEmit -p tsconfig.json` | Type-only pass. No emit, no bundle. Tests are typechecked here too. |
-| `test` | `bun test src/` | Run every `*.test.ts` under `src/` — unit and integration. Bun's runner, not Jest. |
-| `coverage` | `bun test src/ --coverage` | Same with lcov reporter (configured in `bunfig.toml`). |
-| `lint` / `lint:ci` / `lint:fix` | `oxlint` ± `oxfmt` | Rust-based lint/format toolchain. Same toolchain the desktop and mobile workspaces use. |
-| `format` / `format:check` | `oxfmt` against the shared `../../.oxfmtrc.json` | Format only. |
-
-A few dependency highlights, by category:
-
-- **Bunli runtime:** `@bunli/core@0.9.1`, `@bunli/utils@0.6.0`, `bunli@0.9.1` (dev). Bunli is a Bun-native command framework: `defineCommand` + `defineGroup`, Zod-validated flags, codegen for compiled-mode dispatch.
-- **Device stack:** `@ledgerhq/device-management-kit` (catalog version), `@ledgerhq/live-dmk-shared`, `@ledgerhq/hw-transport`. The DMK is the same one Live LDK uses; we wire it to the vendored node-WebUSB transport under `src/device/node-webusb/`.
-- **Coin families:** `@ledgerhq/coin-bitcoin`, `@ledgerhq/coin-evm`, `@ledgerhq/coin-solana`. Only these three are wired in `live-common-setup.ts` (see 5.4.5). Adding a new family is a config change there, not a workspace change.
-- **Live-common surface:** `@ledgerhq/live-common`, `@ledgerhq/live-config`, `@ledgerhq/live-env`, `@ledgerhq/live-wallet`, `@ledgerhq/cryptoassets`, `@ledgerhq/types-live`, `@ledgerhq/types-cryptoassets`, `@ledgerhq/errors`, `@ledgerhq/logs`, `@ledgerhq/coin-module-framework`, `@ledgerhq/ledger-wallet-framework`. The CLI is a real consumer of live-common; it is **not** a parallel implementation.
-- **Native USB:** `usb@2.17.0`. The N-API addon embedded by `embed-usb-native.ts`.
-- **Misc:** `bignumber.js`, `purify-ts`, `rxjs`, `yocto-spinner`, `zod`, `debug`. `react` is a transitive peer of live-common but not used by the CLI itself.
-- **Engines:** `"bun": ">=1.1.0"`. There is no Node fallback; `bun` is required.
-
-#### `bunli.config.ts` — verbatim
-
-```ts
-import { defineConfig } from "@bunli/core";
-
-export default defineConfig({
-  name: "wallet-cli",
-  version: "0.1.0",
-  description: "Ledger Wallet CLI",
-  commands: {
-    directory: "./src/commands",
-  },
-  // Entry is cli only — *.test.ts under src/ are typechecked but not compiled into the binary.
-  build: {
-    entry: "./src/cli.ts",
-    outdir: "./dist",
-    minify: true,
-    targets: ["darwin-arm64", "linux-arm64", "linux-x64", "windows-x64"],
-    // The `usb` native addon is embedded via a direct require() in src/embed-usb-native.ts.
-    // node-gyp-build uses dynamic resolution that Bun can't detect; the explicit require() fixes that.
-    // With minify, process.platform branches are dead-code-eliminated per target.
-  },
-});
-```
-
-Two halves to read here:
-
-1. **`commands.directory: "./src/commands"`** is the input to `bunli generate`. Bunli walks that tree, finds every `defineCommand` / `defineGroup` default export, and emits `.bunli/commands.gen.ts` (5.4.2 below). If you put a command file anywhere else, Bunli will not see it.
-2. **`build.targets`** is the matrix of standalone binaries `bunli build` produces. Four targets: `darwin-arm64`, `linux-arm64`, `linux-x64`, `windows-x64`. Each one gets its own `dist/<target>/wallet-cli` executable, with the right `usb` prebuilt embedded. Note there is no `darwin-x64` target — the assumption is that intel Macs run the Linux binary inside a container or use Rosetta on the arm64 binary.
-
-The `minify: true` flag is what makes `embed-usb-native.ts` work correctly: with minification on, Bun evaluates `process.platform` and `process.arch` as compile-time constants for each `--target`, so each binary contains only its matching `.node` prebuilt, not all four. The `// With minify, process.platform branches are dead-code-eliminated per target.` comment in the file is making that promise explicit.
-
-#### `bunfig.toml` — verbatim
-
-```toml
-# Bun runtime configuration for wallet-cli.
-
-[test]
-coverageReporter = ["lcov"]
-coverageDir = "coverage"
-```
-
-That is the entire file. Two settings, both for `bun test`:
-
-- `coverageReporter = ["lcov"]` makes `bun test --coverage` write `coverage/lcov.info` instead of the default text reporter. CI then uploads that file to Codecov.
-- `coverageDir = "coverage"` is where the report lives. The Nx target `coverage` (in `project.json`) declares `{projectRoot}/coverage/**` as its output, so Nx caches it.
-
-There is **no `[install]` or `[run]` section here** — nothing changes how Bun resolves modules at runtime, nothing rewrites jsxImportSource. The CLI is intentionally vanilla Bun.
-
-#### `tsconfig.json` — verbatim
-
-```json
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "noEmit": true,
-    "rootDir": ".",
-    "types": ["node", "bun-types", "w3c-web-usb"],
-    "customConditions": ["import", "types", "default"],
-    "moduleResolution": "Bundler",
-    "module": "ESNext"
-  },
-  "include": ["src/**/*.ts", "bunli.config.ts"]
-}
-```
-
-Twelve lines, but they encode three important decisions:
-
-- **`extends: "../../tsconfig.base.json"`** picks up the monorepo's strict settings (strict mode on, `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, all the usual safety nets). The CLI does not weaken them.
-- **`types: ["node", "bun-types", "w3c-web-usb"]`** says "this binary runs on Bun, talks to USB, and uses Node-shaped APIs". `bun-types` is the Bun runtime types package. `w3c-web-usb` is the WebUSB interface DMK consumes via the vendored node-WebUSB transport.
-- **`moduleResolution: "Bundler"` + `customConditions: ["import", "types", "default"]`** is the modern resolution mode. It lets TS read `package.json` `exports` maps the same way Bun does at runtime, so `import "@ledgerhq/live-common/families/evm/setup"` resolves to the same file in both worlds. The `customConditions` order is deliberate — `import` first means we always prefer the ESM build of any dual-published package; `default` is the fallback.
-
-`noEmit: true` is the giveaway that this `tsc` invocation is a type-checker only. Bun handles bundling at build time; at dev time, Bun strips types on the fly.
-
-#### `project.json` — Nx targets
-
-```json
-{
-  "name": "@ledgerhq/wallet-cli",
-  "$schema": "../../node_modules/nx/schemas/project-schema.json",
-  "projectType": "application",
-  "targets": {
-    "coverage": {
-      "outputs": ["{projectRoot}/coverage/**"]
-    },
-    "generate": {
-      "outputs": ["{projectRoot}/.bunli/commands.gen.ts"]
-    },
-    "generate:check": {
-      "cache": false
-    },
-    "build": {
-      "cache": false
-    }
-  }
-}
-```
-
-Nineteen lines, only declaring **outputs** and **cacheability** — Nx infers the rest from `package.json` scripts. Three takeaways:
-
-- **`coverage` and `generate` are cached**, with explicit outputs so Nx knows what to restore on a hit. A re-run of `nx run @ledgerhq/wallet-cli:generate` after a no-op edit returns instantly.
-- **`generate:check` is `cache: false`** because it is a verification step, not a build step. We always want it to actually run `git diff --exit-code` against the working tree; cached "yes it passed last time" is meaningless.
-- **`build` is `cache: false`** too. The default Bun build produces four standalone binaries with embedded native addons; Nx's normal output-hashing does not cleanly cover the per-platform binary contents, so we let `bunli build` re-run every time and trust its own incremental layer.
-
-You will most often invoke these via `pnpm --filter @ledgerhq/wallet-cli <script>` or `pnpm wallet-cli <script>` from the repo root.
-
-#### `.bunli/commands.gen.ts` — codegen output
-
-The file at `apps/wallet-cli/.bunli/commands.gen.ts` is **214 lines, generated, and committed**. Its first two lines explain themselves:
-
-```ts
-// This file was automatically generated by Bunli.
-// You should NOT make any changes in this file as it will be overwritten.
-```
-
-What `bunli generate` does is walk `src/commands/`, find every default export that is a `defineCommand(...)` or `defineGroup(...)` value, and emit:
-
-1. **A static import for every command module:**
-
-   ```ts
-   import Account from '../src/commands/account/index.js'
-   import Balances from '../src/commands/balances.js'
-   import Discover from '../src/commands/account/discover.js'
-   import FreshAddress from '../src/commands/account/fresh-address.js'
-   import Operations from '../src/commands/operations.js'
-   import Receive from '../src/commands/receive.js'
-   import Reset from '../src/commands/session/reset.js'
-   import Send from '../src/commands/send.js'
-   import Session from '../src/commands/session/index.js'
-   import View from '../src/commands/session/view.js'
-   ```
-
-2. **A `names` tuple and a `modules` map** — the "narrow list of command names to avoid typeof-cycles in types":
-
-   ```ts
-   const names = [
-     'account', 'balances', 'discover', 'fresh-address',
-     'operations', 'receive', 'reset', 'send', 'session', 'view'
-   ] as const
-   ```
-
-3. **A `metadata` map** that mirrors every `option(...)` declaration as plain data (Zod method, default, description, short flag, regex pattern). A single send-command entry looks like:
-
-   ```ts
-   'data': {
-     type: 'z.string.regex.optional', required: false, hasDefault: false,
-     description: 'EVM calldata as 0x-prefixed hex (e.g. 0xd0e30db0)',
-     pattern: '^0x([0-9a-fA-F]{2})*$',
-     schema: { type: 'zod', method: 'optional', args: [] },
-     validator: '(val) => true'
-   }
-   ```
-
-   This metadata is what Bunli renders into `--help` text and uses to build the JSON schema for tooling that introspects the binary.
-
-4. **A single side-effect call**, registering everything into the global Bunli store:
-
-   ```ts
-   export const generated = registerGeneratedStore(createGeneratedHelpers(modules, metadata))
-   ```
-
-The reason this file exists at all is the comment near the top of `cli.ts`: `createCLI()` normally tries to dynamically `import('file:///…/.bunli/commands.gen.ts')` from `process.cwd()`, but that dynamic import hangs when Bun's `--compile` flag has produced a single-file binary. Our patched `@bunli/core` removes the dynamic import; `cli.ts` does the static `import "../.bunli/commands.gen"` instead. So the file is part of the **shipped binary**, not just a tooling artefact.
-
-The two related scripts:
-
-- **`pnpm generate`** — regenerate the file. Run this every time you add a new command file, rename one, change the option set, or alter a `defineCommand` description.
-- **`pnpm generate:check`** — `bunli generate && git diff --exit-code -- .bunli/commands.gen.ts`. The CI gate. If you forgot to regenerate, this script fails with a diff and the PR is blocked.
-
-> **Note:** R1 reports 215 lines, the on-disk file is 214 lines; the discrepancy is a trailing newline. Treat both as accurate.
-
-The 10 names emitted here account for **8 leaf commands** (`balances`, `operations`, `receive`, `send`, `discover`, `fresh-address`, `view`, `reset`) plus **2 groups** (`account`, `session`). That is the full surface of the CLI.
-
-### 5.4.3 Entry Point — `src/cli.ts`
-
-The entry point is 20 lines. It is short on purpose, because every line that does real work is a side-effect import:
-
-```ts
-#!/usr/bin/env bun
-import "./embed-usb-native";
-import { createCLI } from "@bunli/core";
-import "./live-common-setup";
-// createCLI() normally tries to import .bunli/commands.gen.ts from process.cwd() via a file:// URL.
-// Our @bunli/core patch removes that dynamic import entirely because it can hang in Bun standalone
-// mode, this static import registers commands instead.
-// This side-effect import registers commands in the standalone binary.
-import "../.bunli/commands.gen";
-import bunliConfig from "../bunli.config";
-import { disposeWalletCliDmkTransportFully } from "./device/register-dmk-transport";
-
-// Pass config explicitly so the compiled binary does not depend on cwd for bunli.config.* discovery.
-const cli = await createCLI(bunliConfig as unknown as Parameters<typeof createCLI>[0]);
-await cli.run();
-
-// Release the process-wide DMK + node-usb hotplug listeners (see persistentDmk in register-dmk-transport).
-// Error paths already call process.exit(1) inside bunli, so this only runs on success.
-await disposeWalletCliDmkTransportFully();
-process.exit(0);
-```
-
-Read it as six steps in order, because **the order matters**:
-
-1. **`#!/usr/bin/env bun`** — the shebang. The compiled binary embeds Bun, so this only matters when running the source file directly via `bun run ./src/cli.ts` or `pnpm wallet-cli <args>`. In compiled mode the binary's startup is Bun's own.
-
-2. **`import "./embed-usb-native";`** — must run **before any `usb` import**. This is the file (5.4.2 cross-reference: `src/embed-usb-native.ts`, 33 lines) that does a direct `require("../node_modules/usb/prebuilds/<target>/node.napi.node")` per platform. It stores the loaded N-API addon on `globalThis.__usbNativeAddon`. The patched `usb/dist/usb/bindings.js` (see `patches/usb@2.9.0.patch` in the monorepo root) reads `globalThis.__usbNativeAddon` and skips `node-gyp-build` entirely. If you re-order `cli.ts` so anything else imports `usb` first, the binary breaks.
-
-3. **`import { createCLI } from "@bunli/core";`** — pulls in the (patched) Bunli runtime.
-
-4. **`import "./live-common-setup";`** — registers the three coin modules (bitcoin/evm/solana), pins the supported currencies, registers the DMK transport module under the device id `"wallet-cli-dmk"`, and writes the `LiveConfig` schema. Side effects only; no exports are consumed. We dissect this file in 5.4.5.
-
-5. **`import "../.bunli/commands.gen";`** — the static-import workaround for compiled mode. Registers every command and group into the Bunli store. Without this line the CLI starts up fine but `wallet-cli --help` shows zero commands.
-
-6. **`import bunliConfig from "../bunli.config";`** — the config object. Passed explicitly to `createCLI(...)` so the compiled binary does not have to discover `bunli.config.*` from `process.cwd()`. (This is the second of the two compiled-mode workarounds; the first is the static commands-gen import.)
-
-After the imports:
-
-- `await createCLI(bunliConfig as unknown as Parameters<typeof createCLI>[0])` — instantiates the CLI. The `as unknown as` cast smooths over a type drift between the patched `@bunli/core` and the un-patched Bunli config types.
-- `await cli.run()` — Bunli parses `process.argv`, finds the matching command, validates flags via Zod, calls the handler. Errors thrown inside the handler are caught here; in human mode Bunli prints a stack and `process.exit(1)`s, in JSON mode our `JsonCommandOutput` (see 5.4.7 in the second half) writes a `{ ok: false, error: { … } }` envelope first.
-- `await disposeWalletCliDmkTransportFully()` — graceful teardown of the singleton DMK + node-usb hotplug listeners. **Only runs on the success path.** Error paths exit before reaching this line because Bunli's default error handler `process.exit(1)`s. SIGINT / SIGTERM hooks (registered inside `register-dmk-transport.ts`, see 5.4.8 in the second half) cover the cancellation path.
-- `process.exit(0)` — explicit success exit. Without this, the process would wait for the DMK's `setInterval` timers to drain.
-
-That is the entire bootstrap. There is no router, no middleware, no plugin pipeline. Every interesting decision lives one import away.
-
-### 5.4.4 Configuration — `src/config.ts`
-
-`config.ts` defines the LiveConfig schema for the CLI. It is 24 lines:
-
-```ts
-import type { ConfigSchema } from "@ledgerhq/live-config/LiveConfig";
-import { appConfig } from "@ledgerhq/live-common/apps/config";
-import { bitcoinConfig } from "@ledgerhq/live-common/families/bitcoin/config";
-import { evmConfig } from "@ledgerhq/live-common/families/evm/config";
-import { solanaConfig } from "@ledgerhq/live-common/families/solana/config";
-
-const countervaluesConfig: ConfigSchema = {
-  config_countervalues_refreshRate: {
-    type: "number",
-    default: 60 * 1000,
-  },
-  config_countervalues_marketCapBatchingAfterRank: {
-    type: "number",
-    default: 20,
-  },
-};
-
-export const walletCliConfig: ConfigSchema = {
-  ...countervaluesConfig,
-  ...appConfig,
-  ...bitcoinConfig,
-  ...evmConfig,
-  ...solanaConfig,
-};
-```
-
-What `LiveConfig` does inside live-common is hold a process-wide settings dictionary that bridges, sync code, and explorer endpoints all read from. Each family has its own slice of keys: `bitcoinConfig` brings in BIP44 lookahead defaults and explorer endpoints; `evmConfig` brings in chain-id-keyed RPC and indexer URLs (Alpaca, Etherscan-shaped explorers, gas oracles); `solanaConfig` brings in cluster RPC URLs and validator settings. `appConfig` brings in the Manager-app catalogue tunables.
-
-`countervaluesConfig` is two CLI-specific knobs the apps-config schema does not own:
-
-- `config_countervalues_refreshRate` — how often live-common refreshes fiat conversions. 60 seconds. We do not actually print countervalues from the CLI, but the bridge sync pulls them anyway, so we set a sane default.
-- `config_countervalues_marketCapBatchingAfterRank` — at what market-cap rank live-common switches to batched-by-id queries (cheaper, slightly less fresh). 20.
-
-The merged `walletCliConfig` is consumed twice in `live-common-setup.ts`, once on each of the **two** `LiveConfig.instance` singletons (5.4.5).
-
-**What this file does NOT contain:**
-
-- **No env-var reads.** wallet-cli does not have a "config from environment" pattern the way the desktop app does (`LEDGER_DEBUG=1`, `EXPERIMENTAL_PROVIDER_OVERRIDE`, etc.). The only env vars wallet-cli reads are:
-  - `USER_ID` — read in `live-common-setup.ts` to seed the DMK firmware-distribution salt; defaults to `"wallet-cli"` if unset.
-  - `WALLET_CLI_MOCK_DMK`, `WALLET_CLI_MOCK_DMK_STATE`, `WALLET_CLI_MOCK_APP_RESULTS` — read by `register-dmk-transport.ts` and `mock-dmk.ts` to install the test transport (see the second half of this chapter).
-  - `XDG_STATE_HOME` — read by `session-store.ts` to locate `session.yaml`.
-  - `DEBUG=wallet-cli` — read by the `debug` package, namespaced via `shared/log.ts`.
-- **No endpoint overrides.** The default endpoints come from each family's own config slice. To point wallet-cli at a custom explorer or RPC, you set the live-common env via `setEnv(...)` from `@ledgerhq/live-env` — the same way the desktop and mobile apps do — but wallet-cli does not currently expose a CLI flag for that.
-
-> **Verify:** if you find yourself wanting "wallet-cli --rpc-url=…", the right place to add it is a top-level Bunli option in a future `cli-globals.ts`, not here in `config.ts`. R1 does not document a planned design here.
-
-### 5.4.5 live-common Setup — `src/live-common-setup.ts`
-
-This is the file that turns a vanilla Bun process into a process that speaks live-common. It is 80 lines and worth reading in full because the comments document non-obvious bundler interactions:
-
-```ts
-import { setupCalClientStore } from "@ledgerhq/cryptoassets/cal-client";
-import { setSupportedCurrencies } from "@ledgerhq/live-common/currencies/index";
-import { walletCliConfig } from "./config";
-import { registerCoinModules } from "@ledgerhq/live-common/coin-modules/registry";
-import type { CoinModuleLoader } from "@ledgerhq/live-common/coin-modules/types";
-import { setWalletAPIVersion } from "@ledgerhq/live-common/wallet-api/version";
-import { WALLET_API_VERSION } from "@ledgerhq/live-common/wallet-api/constants";
-import { LiveConfig } from "@ledgerhq/live-config/LiveConfig";
-import { setEnv } from "@ledgerhq/live-env";
-import { registerWalletCliDmkTransport } from "./device/register-dmk-transport";
-
-/**
- * Ensure USER_ID is set so DMK firmware distribution salt is stable for this CLI.
- */
-if (!process.env.USER_ID) {
-  process.env.USER_ID = "wallet-cli";
-}
-
-/**
- * Wallet-cli-specific coin-module loaders (bitcoin, evm, solana only).
- *
- * We define these inline instead of importing the shared coinModuleLoaders from live-common
- * because Bun's --compile bundler statically resolves all require() calls — even lazy ones
- * inside arrow functions — which would pull in every coin family's dependency tree (including
- * packages like @walletconnect/sign-client that break CJS/ESM interop under Bun).
- */
-/* eslint-disable @typescript-eslint/no-require-imports */
-const walletCliLoaders: CoinModuleLoader[] = [
-  {
-    family: "bitcoin",
-    loadSetup: () => require("@ledgerhq/live-common/families/bitcoin/setup"),
-    loadTransaction: () => require("@ledgerhq/coin-bitcoin/transaction").default,
-    loadDeviceTxConfig: () => require("@ledgerhq/coin-bitcoin/deviceTransactionConfig").default,
-    loadWalletApiAdapter: () =>
-      require("@ledgerhq/live-common/families/bitcoin/walletApiAdapter").default,
-    loadPlatformAdapter: () =>
-      require("@ledgerhq/live-common/families/bitcoin/platformAdapter").default,
-    loadAccount: () => require("@ledgerhq/coin-bitcoin/account").default,
-  },
-  {
-    family: "evm",
-    loadSetup: () => require("@ledgerhq/live-common/families/evm/setup"),
-    loadTransaction: () => require("@ledgerhq/coin-evm/transaction").default,
-    loadDeviceTxConfig: () => require("@ledgerhq/coin-evm/deviceTransactionConfig").default,
-    loadWalletApiAdapter: () =>
-      require("@ledgerhq/live-common/families/evm/walletApiAdapter").default,
-    loadPlatformAdapter: () =>
-      require("@ledgerhq/live-common/families/evm/platformAdapter").default,
-    loadValidateAddress: () => require("@ledgerhq/coin-evm/logic/validateAddress").validateAddress,
-  },
-  {
-    family: "solana",
-    loadSetup: () => require("@ledgerhq/live-common/families/solana/setup"),
-    loadTransaction: () => require("@ledgerhq/coin-solana/transaction").default,
-    loadDeviceTxConfig: () => require("@ledgerhq/coin-solana/deviceTransactionConfig").default,
-    loadWalletApiAdapter: () =>
-      require("@ledgerhq/live-common/families/solana/walletApiAdapter").default,
-  },
-];
-
-setWalletAPIVersion(WALLET_API_VERSION);
-registerCoinModules(walletCliLoaders);
-setSupportedCurrencies(["bitcoin", "ethereum", "solana"]);
-// Set config on the ESM singleton (used by alpacaized families like EVM whose
-// bridge code is reached through ESM imports).
-LiveConfig.setConfig(walletCliConfig);
-// Also set on the CJS singleton — Bun's bundler resolves ESM imports to lib-es/
-// and require() to lib/, creating separate LiveConfig.instance singletons.
-// Non-alpacaized families (solana, bitcoin) load their bridge via require() in
-// the lazy loaders above, so they read from the CJS instance.
-require("@ledgerhq/live-config/LiveConfig").LiveConfig.setConfig(walletCliConfig);
-// TODO: wallet-cli should own its Redux store setup (createRtkCryptoAssetsStore + RTK middleware)
-// instead of relying on setupCalClientStore from @ledgerhq/cryptoassets/cal-client (test-helpers).
-setupCalClientStore();
-// Also require() — the ESM import would set the flag on a different module instance
-// than the CJS setup.ts loaded by the lazy loaders above.
-require("@ledgerhq/live-common/families/solana/setup").setSolanaLdmkEnabled(true);
-registerWalletCliDmkTransport();
-
-setEnv("LEDGER_CLIENT_VERSION", "wallet-cli/0.1.0");
-```
-
-Six things to call out, because at least three of them are surprising on first read:
-
-1. **`USER_ID` defaulting.** DMK derives a "firmware distribution salt" from `UserHashService.compute(userId)` (see `src/device/dmk.ts`). If two users run wallet-cli with the same `USER_ID`, they get the same salt, and Ledger's firmware-rollout server treats them as the same install for canary purposes. Defaulting to `"wallet-cli"` makes the CLI's identity stable across machines, which is what we want for QA: deterministic firmware-rollout buckets, not per-developer randomness.
-
-2. **Inline `walletCliLoaders` instead of importing the shared catalog.** The comment is the rationale: live-common's shared `coinModuleLoaders` includes every family the monorepo supports, and Bun's `--compile` bundler statically resolves every `require()` it sees — even ones inside arrow functions — pulling in things like `@walletconnect/sign-client` that have CJS/ESM interop bugs under Bun. By defining the loaders inline with only the three families wallet-cli needs, the binary stays small and avoids the broken transitive deps. **If you ever need to support a new family** (e.g. Aptos, Cardano), you add a fourth entry here, not in live-common.
-
-3. **The dual `LiveConfig.setConfig` call.** This is the most counter-intuitive line in the file. Live-common is published with both ESM (`lib-es/`) and CJS (`lib/`) builds. Bun's bundler resolves `import { LiveConfig } from "@ledgerhq/live-config/LiveConfig"` to the ESM build, but our coin-module loaders use `require(...)` which resolves to the CJS build. Both builds have a `class LiveConfig { static instance: …; static setConfig(...) }`, and **the ESM and CJS modules are different module instances with separate static fields**. So `LiveConfig.setConfig(walletCliConfig)` only writes to one of them. We do it twice — once on the ESM import and once via `require("@ledgerhq/live-config/LiveConfig").LiveConfig.setConfig(...)` — to guarantee both instances see the config. Without this, EVM (alpacaized, ESM path) sees the config but Bitcoin and Solana (CJS path) do not.
-
-4. **`setSolanaLdmkEnabled(true)` via `require`.** Same root cause: the Solana setup module loaded by the lazy CJS loader is a different instance from the ESM-imported one. We force-enable the LDMK signing path on the CJS instance because that is the one the bridge actually consumes when signing.
-
-5. **`setupCalClientStore()`** is acknowledged as a wart by the inline TODO. CAL ("Crypto Asset Library") is the live-common store that holds token metadata. The `cal-client` helper sets up a minimal Redux store for it; it lives in `@ledgerhq/cryptoassets/cal-client` because that is where the test helpers live. The TODO says wallet-cli should own its CAL store setup directly via `createRtkCryptoAssetsStore` instead of borrowing the test-helper. For now, we borrow.
-
-6. **`setEnv("LEDGER_CLIENT_VERSION", "wallet-cli/0.1.0")`** stamps every outgoing live-common HTTP request with a `User-Agent`-style identifier. This is how Ledger's explorers and indexers recognise wallet-cli traffic in their logs, and is the one place in the bootstrap where the CLI announces itself.
-
-After all of that, **`registerWalletCliDmkTransport()`** registers a live-common transport module under the device id `"wallet-cli-dmk"` (the constant `WALLET_CLI_DMK_DEVICE_ID` exported from `register-dmk-transport.ts`). Anywhere in live-common code that does `withDevice("wallet-cli-dmk")(observable)` ends up using DMK over node-WebUSB. We dissect that wiring in 5.4.8 in the second half.
-
-### 5.4.6 The Commands Directory
-
-`src/commands/` is the surface area of the CLI. Eight leaf commands and two groups, all picked up by `bunli generate` and exposed at the top of `wallet-cli --help`. Before walking each one, two cross-cutting helpers matter for every command file in the tree.
-
-#### `commands/inputs.ts` — the shared option helpers (52 lines)
-
-Every leaf command imports from this file. It owns the canonical `--account` flag, the canonical `--output` flag, and the function that turns a session label into a real account descriptor:
-
-```ts
-import { option } from "@bunli/core";
-import { z } from "zod";
-import { OutputFormatSchema, parseAccountDescriptor } from "../wallet/models";
-import type { AccountDescriptor } from "../wallet/models";
-import { parseV1 } from "../shared/accountDescriptor";
-import type { AccountDescriptorV1 } from "../shared/accountDescriptor";
-import { Session } from "../session/session-store";
-
-export const accountOption = option(z.string().min(1).optional(), {
-  description: "Account descriptor or session label (e.g. ethereum-1). Can also be the first positional arg.",
-  short: "a",
-});
-
-export const outputOption = option(OutputFormatSchema.default("human"), {
-  description: "Output format: human (default) or json",
-});
-
-export function resolveAccountArg(
-  account: string | undefined,
-  positional: readonly string[],
-): string {
-  const arg = account ?? positional[0];
-  if (!arg) {
-    throw new Error(
-      "Missing account: use --account <descriptor-or-label> or pass it as the first positional argument.",
-    );
-  }
-  return arg;
-}
-
-// Contains ":" → descriptor passthrough; no ":" → session label lookup.
-export async function resolveAccountInput(input: string): Promise<string> {
-  if (input.includes(":")) return input;
-  const session = await Session.read();
-  const entry = session.accounts.find(e => e.label === input);
-  if (!entry) {
-    throw new Error(
-      `No account labeled "${input}" in session. Run \`account discover\` first or pass a full descriptor.`,
-    );
-  }
-  return entry.descriptor;
-}
-
-/** Resolve to a V0 AccountDescriptor. Accepts V1 string, V0 string, or session label. */
-export async function resolveAccountDescriptor(input: string): Promise<AccountDescriptor> {
-  return parseAccountDescriptor(await resolveAccountInput(input));
-}
-
-/** Resolve to a V1 AccountDescriptorV1. Accepts V1 string or session label. */
-export async function resolveAccountDescriptorV1(input: string): Promise<AccountDescriptorV1> {
-  return parseV1(await resolveAccountInput(input));
-}
-```
-
-Three helpers, one rule each:
-
-- **`accountOption` / `outputOption`** are the standard flags every command uses. Defining them once means every command has the same `--account/-a` short alias and the same `--output human|json` semantics. Drift is impossible.
-- **`resolveAccountArg(flags.account, positional)`** lets users pass the account either as `--account ethereum-1` or as the first positional: `wallet-cli balances ethereum-1`. Both work everywhere.
-- **`resolveAccountInput(input)`** is the **session label resolver**. The rule is mechanical: if the string contains a colon (`:`) it is a full descriptor (V0 `js:2:…` or V1 `account:1:…`) and we pass it through unchanged. Otherwise it is a label like `ethereum-1` or `bitcoin-native-1`, and we look it up in `session.yaml`. If we cannot find it, the error message points the user at `account discover` — the only command that populates the session.
-
-> **R1 reports this file as 53 lines; the on-disk count is 52 (no trailing-newline difference between the snapshot taken at research time and now). Treat both as accurate to within one line.**
-
-The leaf commands all follow the same shape: a `defineCommand({ name, description, options, handler })` default export, options keyed by flag name, and a handler that builds a `ctx` object, creates a `CommandOutput`, runs `out.run(async () => …)`, and dispatches to `WalletAdapter`. We walk each one in turn.
-
-#### Command 1 — `balances` (top-level, no device)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/balances.ts` |
-| Lines | 34 |
-| Group | (top-level) |
-| Flags | `--account/-a <descriptor-or-label>`, `--output human\|json` |
-| Device | **No** |
-| Handler signature | `async ({ flags, positional }) => void` |
-| Dispatches to | `WalletAdapter.getAccountBalances(descriptor)` |
-| Output shape | `{ balances: [{ asset, amount, accountId }, …] }` envelope |
-
-This is the simplest device-free command — and the canonical model for any new "fetch some data" command. Verbatim:
-
-```ts
-import { defineCommand } from "@bunli/core";
-import { WalletAdapter } from "../wallet";
-import { networkStringFromCurrencyId } from "../shared/accountDescriptor";
-import { walletCliDebug } from "../shared/log";
-import { createCommandOutput } from "../output";
-import { accountOption, outputOption, resolveAccountArg, resolveAccountDescriptor } from "./inputs";
-
-export default defineCommand({
-  name: "balances",
-  description: "Fetch native and token balances for an account descriptor (no device required)",
-  options: {
-    account: accountOption,
-    output: outputOption,
-  },
-  handler: async ({ flags, positional }) => {
-    const ctx = { command: "balances", network: "", account: "" };
-    const out = createCommandOutput(flags.output, ctx);
-
-    await out.run(async () => {
-      const descriptor = await resolveAccountDescriptor(resolveAccountArg(flags.account, positional));
-      ctx.network = networkStringFromCurrencyId(descriptor.currencyId);
-      ctx.account = descriptor.id;
-      walletCliDebug(`balances: account=${descriptor.id}, output=${flags.output}`);
-      const wallet = new WalletAdapter();
-
-      const balances = await out.withActivity(
-        `Fetching balances for ${ctx.network}…`,
-        "Balances fetched",
-        () => wallet.getAccountBalances(descriptor),
-      );
-      await out.balances(balances);
-    });
-  },
-});
-```
-
-The shape to internalise:
-
-- The `ctx` object is mutable on purpose: `network` and `account` are filled in **after** descriptor resolution, so that any error envelope thrown later carries them.
-- `out.run(fn)` is the unified error-catching wrapper. In human mode it re-throws (Bunli prints the stack); in JSON mode it catches, writes the error envelope, and `process.exit(1)`s.
-- `out.withActivity(start, success, fn)` is the spinner wrapper. In human mode it shows `⠋ Fetching balances for ethereum:main…` on stderr while the bridge sync runs, then flips to `✓ Balances fetched` on success. In JSON mode it is a no-op around `await fn()`.
-- `WalletAdapter.getAccountBalances` routes to Alpaca for EVM and to the live-common bridge for everything else (5.4.10 in the second half).
-
-Sample real invocation:
-
-```bash
-$ wallet-cli balances ethereum-1 --output json
-{"status":"success","command":"balances","network":"ethereum:main","account":"js:2:ethereum:0x…:","balances":[{"asset":"ethereum","amount":"0.124 ETH","accountId":"account:1:address:ethereum:main:0x…:m/44h/60h/0h/0/0"}],"timestamp":"2026-04-27T09:03:11.044Z"}
-```
-
-#### Command 2 — `operations` (top-level, no device)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/operations.ts` |
-| Lines | 45 |
-| Group | (top-level) |
-| Flags | `--account/-a`, `--limit/-l <int≥1>`, `--cursor <str>`, `--output` |
-| Device | **No** |
-| Handler signature | `async ({ flags, positional }) => void` |
-| Dispatches to | `WalletAdapter.getAccountOperations(descriptor, { limit, cursor })` |
-| Output shape | `{ operations: […], nextCursor: string\|null }` envelope |
-
-Verbatim handler:
-
-```ts
-handler: async ({ flags, positional }) => {
-  const ctx = { command: "operations", network: "", account: "" };
-  const out = createCommandOutput(flags.output, ctx);
-  const wallet = new WalletAdapter();
-
-  await out.run(async () => {
-    const descriptor = await resolveAccountDescriptor(resolveAccountArg(flags.account, positional));
-    ctx.network = networkStringFromCurrencyId(descriptor.currencyId);
-    // accountId remapped to V1 descriptor — internal live-common id is intentionally dropped
-    ctx.account = serializeV1(toV1(descriptor));
-    walletCliDebug(
-      `operations: account=${descriptor.id}, limit=${flags.limit ?? "default"}, output=${flags.output}`,
-    );
-    const page = await out.withActivity(
-      `Fetching operations for ${ctx.network}…`,
-      "Operations fetched",
-      () => wallet.getAccountOperations(descriptor, { limit: flags.limit, cursor: flags.cursor }),
-    );
-    await out.operations(page.operations, descriptor.currencyId, page.nextCursor);
-  });
-},
-```
-
-Two things worth knowing:
-
-- **The `ctx.account` for operations is the V1 descriptor**, not live-common's internal id. Every other command uses `descriptor.id` (the V0 internal id); operations specifically remaps to V1 because the operation list it returns also exposes V1-shaped account ids, and we want the envelope's `account` field consistent with the rows.
-- **`--limit` and `--cursor` are documented "Alpaca families only".** R1 reports that today the `WalletAdapter.getAccountOperations` path always falls back to a full bridge sync (the Alpaca operations path is bypassed because of correctness issues with internal ops and pagination). So `--cursor` is currently inert and `--limit` is a slice of the full bridge result. The flags are kept on the surface so callers can rely on them once the Alpaca path is re-enabled.
-
-The output includes **internal operations** (EVM contract-call traces, marked with `parentId`) and **token operations** from sub-accounts (ERC-20 movements on EVM). That is a deliberate design choice — the CLI is a research and triage tool, not a Live wallet UI; surfacing internal ops is useful when you are debugging a contract interaction.
-
-#### Command 3 — `receive` (top-level, device unless `--verify=false`)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/receive.ts` |
-| Lines | 48 |
-| Group | (top-level) |
-| Flags | `--account/-a`, `--verify/-v <bool, default true>`, `--output` |
-| Device | **Required when `--verify=true` (default)**, no device when `--verify=false` |
-| Handler signature | `async ({ flags, positional }) => void` |
-| Dispatches to | `WalletAdapter.verifyAddress(descriptor, deviceId)` (verify path) or `WalletAdapter.getFreshAddress(descriptor)` (no-verify path) |
-| Output shape | `{ address: "0x…" }` envelope |
-
-Verbatim handler, with the device-vs-no-device split visible in the `if (flags.verify)` branch:
-
-```ts
-handler: async ({ flags, positional }) => {
-  const ctx = { command: "receive", network: "", account: "" };
-  const out = createCommandOutput(flags.output, ctx);
-  const wallet = new WalletAdapter();
-
-
-  await out.run(async () => {
-    const descriptor = await resolveAccountDescriptor(resolveAccountArg(flags.account, positional));
-    ctx.network = networkStringFromCurrencyId(descriptor.currencyId);
-    ctx.account = descriptor.id;
-    if (flags.verify) {
-      const spin = out.spin(`Connect device and open ${colors.bold(descriptor.currencyId)} app…`);
-      await withCurrencyDeviceSession(descriptor.currencyId, async () => {
-        spin?.success("Device session established");
-        const verifySpin = out.spin("Confirm address on your Ledger device…");
-        const address = await wallet.verifyAddress(descriptor, WALLET_CLI_DMK_DEVICE_ID);
-        verifySpin?.success("Address confirmed on device");
-        out.address(address);
-      });
-    } else {
-      out.address(await wallet.getFreshAddress(descriptor));
-    }
-  });
-},
-```
-
-This is the first command in the tour that opens a device session, so the pattern is worth fixing in your head:
-
-1. **`out.spin(text)`** is the device-prompt spinner. In an interactive TTY it shows `⠋ Connect device and open ethereum app…` on stderr until you plug in your Ledger and unlock it. In a non-interactive context (CI, test harness, AI agent shell) `out.spin()` returns `undefined` and the conditional `spin?.success(…)` calls are no-ops.
-2. **`withCurrencyDeviceSession(currencyId, fn)`** is the device-session boundary, defined in `src/session/bridge-device-session.ts`. It opens a DMK USB session, asks the device to open the right Manager app for the currency (Ethereum app for `ethereum`, Bitcoin app for `bitcoin`, Solana app for `solana`), runs your callback, and tears down the session in a `finally`. Errors out of the callback are mapped to user-friendly messages by `toWalletCliDeviceError(...)`.
-3. **`WALLET_CLI_DMK_DEVICE_ID = "wallet-cli-dmk"`** is the constant the live-common bridge consumes when it does `withDevice(deviceId)`. The transport module registered in 5.4.5 is the one that responds to that id.
-
-`--verify=false` skips all of that and just returns the next unused fresh address from the bridge. For EVM and Solana this is a no-op (the address is in the descriptor); for Bitcoin it triggers a bridge sync to find the next unused receive address. This is exactly the same logic as `account fresh-address`, just exposed under a friendlier flag.
-
-#### Command 4 — `send` (top-level, device unless `--dry-run`)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/send.ts` |
-| Lines | 158 |
-| Group | (top-level) |
-| Flags | see the table below |
-| Device | **Required unless `--dry-run`** |
-| Handler signature | `async ({ flags, positional }) => void` |
-| Dispatches to | `WalletAdapter.prepareSend(descriptor, intent)` (dry-run) or `WalletAdapter.send(descriptor, intent, deviceId, dryRun)` (Observable<SendEvent>) |
-| Output shape | `{ events: [SendEvent, …], txHash: string }` envelope (collected from the Observable) |
-
-`send` is the largest leaf command and the one you will edit most often, so here is the full flag set verbatim from the source (names, schemas, descriptions, required flags):
-
-| Flag | Schema | Required | Description |
-|---|---|---|---|
-| `--account/-a <str>` | `z.string().min(1).optional()` | optional | Account descriptor or session label |
-| `--to/-t <addr>` | `z.string().min(1, "Recipient address is required (--to <address>)")` | **yes** | Recipient address |
-| `--amount <"V TICKER">` | `z.string().min(1, "Amount is required (--amount '<value> <TICKER>', e.g. '0.01 ETH')")` | **yes** | Amount including ticker (e.g. `0.001 BTC`, `0.01 ETH`, `0.4 USDT`). The ticker drives asset resolution. |
-| `--fee-per-byte <sat>` | `z.string().min(1).optional()` | bitcoin | Fee per byte in satoshis |
-| `--rbf` | `z.boolean().optional()` | bitcoin | Enable Replace-By-Fee |
-| `--mode <m>` | `z.string().min(1).optional()` | solana | `send`, `stake.createAccount`, `stake.delegate`, `stake.undelegate`, `stake.withdraw` |
-| `--validator <addr>` | `z.string().min(1).optional()` | solana | Validator address (staking only) |
-| `--stake-account <addr>` | `z.string().min(1).optional()` | solana | Stake account address (staking only) |
-| `--memo <text>` | `z.string().min(1).optional()` | solana | Memo / tag |
-| `--data <0x…>` | `z.string().regex(/^0x([0-9a-fA-F]{2})*$/).optional()` | **evm** | EVM calldata as 0x-prefixed hex (e.g. `0xd0e30db0`) |
-| `--dry-run` | `z.boolean().default(false)` | optional | Prepare and validate transaction but do not sign or broadcast |
-| `--output` | `OutputFormatSchema.default("human")` | optional | Output format |
-
-The handler builds a per-family `TransactionIntent`, validates it with Zod, and then either calls `wallet.prepareSend` (dry-run) or subscribes to the `wallet.send` Observable inside a `withCurrencyDeviceSession`:
-
-```ts
-const INTENT_BUILDERS: Record<string, IntentBuilder> = {
-  bitcoin: flags => ({
-    family: "bitcoin",
-    recipient: flags.to,
-    amount: flags.amount,
-    feePerByte: flags["fee-per-byte"],
-    rbf: flags.rbf,
-  }),
-  evm: flags => ({
-    family: "evm",
-    recipient: flags.to,
-    amount: flags.amount,
-    data: flags.data,
-  }),
-  solana: flags => ({
-    family: "solana",
-    recipient: flags.to,
-    amount: flags.amount,
-    mode: flags.mode,
-    validator: flags.validator,
-    stakeAccount: flags["stake-account"],
-    memo: flags.memo,
-  }),
-};
-```
-
-Three things to internalise:
-
-- **The intent is a discriminated union on `family`.** `TransactionIntentSchema` (in `src/wallet/intents/index.ts`) is `z.discriminatedUnion("family", [BitcoinIntent, EvmIntent, SolanaIntent])`. The Zod parse on line `TransactionIntentSchema.parse(intentData)` is a real validation gate — if you pass `--data 0xZZZ` to a Bitcoin send it fails right there with a typed Zod error.
-- **The `--data` flag already exists for EVM.** This is the load-bearing detail for the QAA-615 token-revoke spike (covered in 5.4.13/5.4.14 in the second half): a `revoke` command can be a thin wrapper that builds `--data 0x095ea7b3${spender_pad32}${zeros_pad32}` and calls `send` against the token contract with `--amount '0 <TICKER>'`. No new device or APDU code, no new bridge plumbing — just intent-building.
-- **The `wallet.send(...)` return type is `Observable<SendEvent>`.** The handler subscribes via `lastValueFrom(observable.pipe(tap(event => out.sendEvent(event))))`. Every event hits `out.sendEvent` synchronously: in human mode each one updates the spinner; in JSON mode they are buffered and emitted as a single `events` array on completion.
-
-The `SendEvent` discriminated union (`wallet/models.ts`):
-
-```ts
-type SendEvent =
-  | { type: "prepared"; recipient: string; amount: string; fees: string }
-  | { type: "device-streaming"; progress: number; index: number; total: number }
-  | { type: "device-signature-requested" }
-  | { type: "device-signature-granted" }
-  | { type: "dry-run" }
-  | { type: "broadcasted"; txHash: string };
-```
-
-Sample dry-run invocation:
-
-```bash
-$ wallet-cli send ethereum-1 --to 0xRecipient… --amount '0.001 ETH' --dry-run --output json
-{"status":"success","command":"send","network":"ethereum:main","account":"js:2:ethereum:0x…:","prepared":{"recipient":"0xRecipient…","amount":"0.001 ETH","fees":"0.000042 ETH"},"timestamp":"2026-04-27T…"}
-```
-
-#### Command 5 — `account discover` (group `account`, device required)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/account/discover.ts` |
-| Lines | 88 |
-| Group | `account` |
-| Flags | `--network/-n <string>`, `--output` |
-| Positional | First arg used as network if `--network` absent |
-| Device | **Required** (USB) |
-| Handler signature | `async ({ flags, positional }) => void` |
-| Dispatches to | `WalletAdapter.discoverAccounts(network, deviceId): Observable<DiscoveredAccount>` |
-| Output shape | `{ accounts: [V1-descriptor-string, …] }` envelope; also persists labels to `session.yaml` |
-
-Discover is the "front door" — every workflow starts here, because it is the only command that populates the session label store. The handler:
-
-```ts
-handler: async ({ flags, positional }) => {
-  const networkArg = flags.network ?? positional[0];
-  if (!networkArg) {
-    throw new Error(
-      'Missing network: use --network <name> or -n <name>, e.g. "bitcoin", "ethereum:goerli".',
-    );
-  }
-
-  const network = parseNetworkArg(networkArg);
-  const currencyId = currencyIdFromNetwork(network);
-  const networkStr = `${network.name}:${network.env}`;
-  walletCliDebug(`account discover: network=${networkStr}, output=${flags.output}`);
-
-  const out = createCommandOutput(flags.output, {
-    command: "account discover",
-    network: networkStr,
-  });
-
-  await out.run(async () => {
-    const spin = out.spin(`Connect device and open ${colors.bold(network.name)} app…`);
-    const discoveredDescriptors: AccountDescriptorV1[] = [];
-
-    await withCurrencyDeviceSession(currencyId, async () => {
-      spin?.success("Device session established");
-
-      const wallet = new WalletAdapter();
-      const scanSpin = out.spin(`Scanning for ${colors.bold(network.name)} accounts…`);
-      let count = 0;
-
-      await new Promise<void>((resolve, reject) => {
-        wallet.discoverAccounts(network, WALLET_CLI_DMK_DEVICE_ID).subscribe({
-          next: d => {
-            out.discoveredAccount(d);
-            discoveredDescriptors.push(d.descriptor);
-            count++;
-            if (scanSpin) scanSpin.text = `Scanning… (${count} found so far)`;
-          },
-          error: err => {
-            scanSpin?.error("Scan failed");
-            reject(err);
-          },
-          complete: () => {
-            scanSpin?.success(`Found ${count} account${count === 1 ? "" : "s"}`);
-            resolve();
-          },
-        });
-      });
-
-      out.flushDiscovery();
-
-      let added = 0;
-      try {
-        const session = await Session.read();
-        added = session.addDescriptors(discoveredDescriptors);
-        if (added > 0) await session.write();
-      } catch {
-        // Session persistence failure is non-fatal; discovery output is already flushed
-      }
-
-      if (added > 0) out.sessionSaved(added);
-    });
-  });
-},
-```
-
-What to internalise:
-
-1. **Network parsing.** `parseNetworkArg("ethereum")` → `{ name: "ethereum", env: "main" }`; `parseNetworkArg("ethereum:goerli")` → `{ name: "ethereum", env: "goerli" }`. The alias `mainnet → main` is applied here. `currencyIdFromNetwork({name, env})` is the inverse of `networkFromCurrencyId(currencyId)` from the descriptor module (5.4.7 in the second half).
-2. **Two spinners.** The first one prompts the user to connect-and-unlock the device. The second one updates live with the running discovered-count. In JSON mode both are no-ops.
-3. **The Observable subscribe pattern is wrapped in a Promise** because `withCurrencyDeviceSession` expects a Promise-returning callback. The `next` handler streams each discovered account to `out.discoveredAccount(d)` for the human/JSON formatter, and accumulates `d.descriptor` (V1) into `discoveredDescriptors` for the session-save step.
-4. **Session persistence is wrapped in `try { … } catch { /* non-fatal */ }`.** Discovery output has already been printed by `out.flushDiscovery()`; if YAML write fails, the user still got their accounts. They just have to re-run discovery before using labels.
-5. **`session.addDescriptors(...)` dedupes by serialized V1**, so re-running discovery on the same device after adding a new account on it surfaces `Added N accounts` only for the genuinely new ones.
-
-JSON output envelope:
-
-```json
-{
-  "status": "success",
-  "command": "account discover",
-  "network": "ethereum:main",
-  "accounts": [
-    "account:1:address:ethereum:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44h/60h/0h/0/0",
-    "account:1:address:ethereum:main:0x…:m/44h/60h/0h/0/1"
-  ],
-  "timestamp": "2026-04-27T…"
-}
-```
-
-Sample real invocation:
-
-```bash
-$ wallet-cli account discover ethereum
-[~] Waiting: Ledger detected but locked. Enter your PIN on the device.
-[i] Opening Ethereum app on your Ledger... ACTION REQUIRED: Confirm on device screen.
-✓ Device session established
-✓ Found 3 accounts
-[+] Saved 3 new accounts to session as: ethereum-1, ethereum-2, ethereum-3
-```
-
-#### Command 6 — `account fresh-address` (group `account`, no device)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/account/fresh-address.ts` |
-| Lines | 38 |
-| Group | `account` |
-| Flags | `--account/-a <descriptor-or-label>`, `--output` |
-| Device | **No** |
-| Handler signature | `async ({ flags, positional }) => void` |
-| Dispatches to | `WalletAdapter.getFreshAddress(toV0(v1))` for utxo descriptors; reads `v1.address` directly for address descriptors |
-| Output shape | `{ address: "…" }` envelope |
-
-The handler is the cleanest example of the V1-descriptor branching:
-
-```ts
-handler: async ({ flags, positional }) => {
-  const ctx = { command: "account fresh-address", network: "", account: "" };
-  const out = createCommandOutput(flags.output, ctx);
-  const wallet = new WalletAdapter();
-
-
-  await out.run(async () => {
-    const v1 = await resolveAccountDescriptorV1(resolveAccountArg(flags.account, positional));
-    ctx.network = serializeNetwork(v1.network);
-    ctx.account = serializeV1(v1);
-
-    // address-based (EVM, Solana…): no sync needed, address is in the descriptor
-    // utxo (Bitcoin…): next unused address requires a blockchain scan
-    const address =
-      v1.type === "address"
-        ? v1.address
-        : await out.withActivity(
-            `Scanning ${v1.network.name} blockchain for fresh address…`,
-            "Fresh address resolved",
-            () => wallet.getFreshAddress(toV0(v1)),
-          );
-    out.address(address);
-  });
-},
-```
-
-Two flavours:
-
-- **`v1.type === "address"`** (EVM, Solana, anything where the descriptor carries the address): no I/O at all. The address is `v1.address`. The command returns instantly.
-- **`v1.type === "utxo"`** (Bitcoin and other UTXO chains): the descriptor only carries the xpub, not the next-unused address. We have to call `wallet.getFreshAddress(toV0(v1))`, which kicks off a bridge sync to scan the chain for unused output indices.
-
-This is the only leaf command that resolves to a V1 descriptor (`resolveAccountDescriptorV1`) instead of the V0 descriptor (`resolveAccountDescriptor`), because the V1/V0 type discriminator is exactly what lets us decide whether a sync is needed.
-
-#### Command 7 — `session view` (group `session`, no device)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/session/view.ts` |
-| Lines | 20 |
-| Group | `session` |
-| Flags | `--output` |
-| Device | **No** |
-| Handler signature | `async ({ flags }) => void` |
-| Dispatches to | `Session.read()` |
-| Output shape | `{ accounts: [{ label, descriptor }, …] }` envelope |
-
-The simplest leaf command, verbatim:
-
-```ts
-export default defineCommand({
-  name: "view",
-  description: "Display all accounts stored in the current session",
-  options: {
-    output: outputOption,
-  },
-  handler: async ({ flags }) => {
-    const out = createCommandOutput(flags.output, { command: "session view", network: "all" });
-
-    await out.run(async () => {
-      const { accounts } = await Session.read();
-      out.sessionView(accounts);
-    });
-  },
-});
-```
-
-Note `network: "all"` in the context — the session is currency-agnostic, so no single network applies. `out.sessionView(accounts)` renders an aligned `label  descriptor` table in human mode, or a `[{ label, descriptor }, …]` array in JSON mode.
-
-Sample invocation:
-
-```bash
-$ wallet-cli session view
-ethereum-1        account:1:address:ethereum:main:0x71C…:m/44h/60h/0h/0/0
-ethereum-2        account:1:address:ethereum:main:0x9aF…:m/44h/60h/0h/0/1
-bitcoin-native-1  account:1:utxo:bitcoin:main:xpub6BosfCn…:m/84h/0h/0h
-```
-
-#### Command 8 — `session reset` (group `session`, no device)
-
-| Field | Value |
-|---|---|
-| File | `src/commands/session/reset.ts` |
-| Lines | 28 |
-| Group | `session` |
-| Flags | `--output` |
-| Device | **No** |
-| Handler signature | `async ({ flags }) => void` |
-| Dispatches to | `Session.read()` (with corrupt-file fallback to `Session.from([])`), `session.clear()`, `session.write()` |
-| Output shape | `{ cleared: <count> }` envelope |
-
-Verbatim:
-
-```ts
-handler: async ({ flags }) => {
-  const out = createCommandOutput(flags.output, { command: "session reset", network: "all" });
-
-  await out.run(async () => {
-    let session: Session;
-    try {
-      session = await Session.read();
-    } catch {
-      // Corrupt session file — treat as empty and overwrite below
-      session = Session.from([]);
-    }
-    const count = session.clear();
-    await session.write(); // always write: fixes corrupt files too
-    out.sessionReset(count);
-  });
-},
-```
-
-The interesting bit is the `try/catch` around `Session.read()`. The session store's `read()` throws on YAML parse errors with a message that points the user at `session reset`. So `session reset` itself has to handle the parse-failure case: it falls back to an empty session via `Session.from([])`, then writes — overwriting the corrupt file with a valid empty document. After `session reset`, `session view` always succeeds.
-
-Sample invocation:
-
-```bash
-$ wallet-cli session reset --output json
-{"status":"success","command":"session reset","network":"all","cleared":5,"timestamp":"2026-04-27T…"}
-```
-
-#### The two groups — `account` and `session`
-
-The remaining two entries in the `commands.gen.ts` `names` tuple are **groups**, not leaves. They exist to give the help text a tree shape:
-
-```ts
-// src/commands/account/index.ts  (9 lines)
-import { defineGroup } from "@bunli/core";
-import DiscoverCommand from "./discover";
-import FreshAddressCommand from "./fresh-address";
-
-export default defineGroup({
-  name: "account",
-  description: "Account management commands",
-  commands: [DiscoverCommand, FreshAddressCommand],
-});
-```
-
-```ts
-// src/commands/session/index.ts  (9 lines)
-import { defineGroup } from "@bunli/core";
-import ViewCommand from "./view";
-import ResetCommand from "./reset";
-
-export default defineGroup({
-  name: "session",
-  description: "Session management commands",
-  commands: [ViewCommand, ResetCommand],
-});
-```
-
-`defineGroup` does not have a `handler` — it just collects subcommands. Running `wallet-cli account` with no subcommand prints the group help; running `wallet-cli account discover` resolves through this index file to `discover.ts`. Bunli's codegen records both the group entry (with `commands: [...]`) and the leaf entries (each with their own metadata) in `commands.gen.ts`, which is why the `names` tuple has 10 entries for 8 leaves.
-
-> **R1 vs SKILL.md:** R1 says "10 commands"; an older SKILL.md draft said "5 commands". R1 is fresher (April 2026 snapshot) and is correct for the current tree. The mismatch is the original 5-command shape (`balances`, `operations`, `receive`, `send`, plus one device check) before the `account` and `session` groups were added.
-
-That covers every entry under `src/commands/`. The second half of this chapter picks up the device layer, the wallet adapter, the session store, the test harness, and the recurring patterns you should copy when you add a new command of your own.
-
-<!-- continued in _part5_ch5_4_part2.md -->
-### 5.4.7 The wallet directory
-
-`src/wallet/` is the only place in the codebase that knows what an "account" is. Everything below it (DMK, transports, USB) deals in bytes; everything above it (commands, output formatting) deals in string envelopes. The wallet layer is the bridge between the two, and it is deliberately small.
-
-Three files carry the load:
-
-- `src/wallet/index.ts` — `WalletAdapter`, the routing class.
-- `src/wallet/models.ts` — Zod schemas for the wire types (`AccountDescriptor`, `Balance`, `Operation`, `SendEvent`).
-- `src/wallet/intents/` — the family-specific schemas the command layer hands down.
-
-Two compatibility adapters live below it: `src/wallet/compatibility/bridge.ts` (the legacy live-common `AccountBridge` driver) and `src/wallet/compatibility/alpaca.ts` (a direct API client used today only for `getAccountBalances` on EVM). The `WalletAdapter` picks one of the two per call:
-
-```ts
-// apps/wallet-cli/src/wallet/index.ts
-export class WalletAdapter {
-  private static readonly alpacaFamilies = new Set(["evm"]);
-  private readonly bridge = new BridgeAdapter();
-  private readonly alpaca = new AlpacaAdapter();
-
-  async getAccountBalances(descriptor: AccountDescriptor): Promise<Balance[]> {
-    const { family } = getCryptoCurrencyById(descriptor.currencyId);
-    if (WalletAdapter.alpacaFamilies.has(family)) return this.alpaca.getBalances(descriptor);
-    return this.bridge.getBalances(descriptor);
-  }
-  // …
-}
-```
-
-The routing rule is one-line and the rest of the class is dispatch:
-
-| Method | Adapter used | Notes |
-|---|---|---|
-| `discoverAccounts` | bridge | Always — Alpaca has no discover API |
-| `getAccountBalances` | alpaca for `evm`, bridge otherwise | Fast path, no full sync |
-| `getAccountOperations` | bridge | Alpaca temporarily disabled, see comment in `index.ts` |
-| `getFreshAddress` / `verifyAddress` | bridge | Always |
-| `prepareSend` / `send` | bridge | Always — Alpaca cannot sign |
-
-Read `src/wallet/index.ts` end-to-end before writing a new command. It is 96 lines. The `prepareSend` / `send` split is what lets `--dry-run` skip the device entirely — `prepareSend` returns `{ amount, fees, recipient }` synchronously after a sync, while `send` returns an `Observable<SendEvent>` that drives the device through the bridge's `signOperation` → `broadcast` pipeline.
-
-#### models.ts — the wire shape
-
-`models.ts` defines what the rest of the binary may pass around. Three rules:
-
-1. No `BigNumber`, no `Date`, no circular refs. Everything is JSON-serialisable.
-2. `AccountDescriptor` is the legacy V0 (live-common) shape: `{ id, currencyId, freshAddress, seedIdentifier, derivationMode, index }`. The CLI exposes V1 (ADR) descriptors in its UI but converts to V0 at the boundary — see `5.4.8`.
-3. `SendEvent` is a discriminated union with six variants: `prepared`, `device-streaming`, `device-signature-requested`, `device-signature-granted`, `dry-run`, `broadcasted`. Both formatters (human and JSON) switch on `event.type`.
-
-The `Operation` schema carries a `parentId` field "set on internal operations (e.g. ETH contract calls): the id of the parent operation". The `operations` command's human formatter indents children below their parent (`writeStdout(op.parentId ? `  ${line}` : line)` in `output.ts:134`). That is the only place the `parentId` is used today.
-
-#### Intents — the only extensibility hook for the send pipeline
-
-The intents directory (`src/wallet/intents/`) is the API the `send` command speaks to the wallet layer. It is also — per R5 — the **only** place to extend the send pipeline without touching live-common. Memorise this; it returns in 5.8 (QAA-615).
-
-```ts
-// apps/wallet-cli/src/wallet/intents/index.ts
-export const TransactionIntentSchema = z.discriminatedUnion("family", [
-  BitcoinTransactionIntentSchema,
-  EvmTransactionIntentSchema,
-  SolanaTransactionIntentSchema,
-]);
-export type TransactionIntent = z.infer<typeof TransactionIntentSchema>;
-```
-
-A discriminated union on `family`. Three families today: bitcoin, evm, solana. Adding a fourth means a new file in `families/` and a new entry in this array — nothing else changes at this level.
-
-The EVM family schema is the smallest of the three and the most consequential for QAA-615:
-
-```ts
-// apps/wallet-cli/src/wallet/intents/families/evm.ts
-import { z } from "zod";
-import { AmountWithTickerSchema } from "./bitcoin";
-
-export const EvmTransactionIntentSchema = z.object({
-  family: z.literal("evm"),
-  recipient: z.string(),
-  amount: AmountWithTickerSchema,
-  data: z
-    .string()
-    .regex(/^0x([0-9a-fA-F]{2})*$/, "data must be 0x-prefixed hex with an even number of digits")
-    .optional(),
-});
-```
-
-Four fields. The `data` field is the load-bearing one: any 0x-prefixed even-length hex string is accepted, which means `send` already accepts arbitrary EVM calldata. Bitcoin's schema adds `feePerByte` and `rbf`; Solana's adds a `mode` enum (`send`, `stake.createAccount`, `stake.delegate`, `stake.undelegate`, `stake.withdraw`), `validator`, `stakeAccount`, and `memo`. They do not have a `data` field — the device-side primitives are different.
-
-#### How `--data 0x…` flows from `send` to the device
-
-Trace a single command-line invocation:
-
-```bash
-wallet-cli send ethereum-1 \
-  --to 0xdAC17F958D2ee523a2206206994597C13D831ec7 \
-  --amount '0 ETH' \
-  --data 0x095ea7b3000000000000000000000000<spender>0000000000000000000000000000000000000000000000000000000000000000
-```
-
-1. **`send.ts:32-55`** — `INTENT_BUILDERS["evm"]` maps the flags object to:
-   ```ts
-   { family: "evm", recipient: flags.to, amount: flags.amount, data: flags.data }
-   ```
-2. **`send.ts:132`** — `TransactionIntentSchema.parse(intentData)` validates the shape. The `data` regex rejects malformed hex before any device work happens.
-3. **`send.ts:148-152`** — `wallet.send(descriptor, intent, WALLET_CLI_DMK_DEVICE_ID, dryRun)` returns an Observable; each `SendEvent` is piped through `out.sendEvent(event)` for formatting.
-4. **`WalletAdapter.send`** — delegates straight to `BridgeAdapter.send`.
-5. **`BridgeAdapter.send`** — calls `buildTxExtras(family, intent)`, which for `"evm"` strips the `0x` and converts the hex into a `Buffer` that is patched onto the live-common `Transaction` (per R5 / R2: `bridge.ts:194-198`). From there the bridge owns the rest: `signOperation` (DMK signer) → `broadcast` (explorer POST).
-
-The pedagogical point: by the time you reach the bridge, you are inside live-common; the wallet-cli itself does not call `signEthereumTransaction` directly anywhere. The intents schema is the *only* surface area you have to think about when extending `send`. It is also why `5.8` will turn out to be a small ticket and not a refactor.
-
-> **Verify:** the `buildTxExtras` snippet (`bridge.ts:194-198`) is quoted from R2's appendix; the file lives at `apps/wallet-cli/src/wallet/compatibility/bridge.ts` and is 295 lines. If you are reading this on a checkout where the line numbers have drifted, search for the literal `case "evm":` block.
-
-The `wallet/formatter/` subdirectory holds the two output renderers that `output.ts` orchestrates: `human.ts` (~96 lines) prints colored, indented text; `json.ts` (~58 lines) returns plain objects that `JsonCommandOutput` wraps in `makeEnvelope`. They are stateless — they take a `Balance` / `Operation` / `DiscoveredAccount` and return a string or object. The state (active spinner, accumulated send result) lives in `output.ts`.
-
----
-
-### 5.4.8 Account Descriptors V1
-
-Every command that targets an account ultimately resolves to a string of the form `account:1:…`. The format is specified in an ADR ("ADR — Account descriptor", linked from the v1.ts header) and lives in `src/shared/accountDescriptor/v1.ts`. Spend ten minutes on this section — descriptors are how you talk to the CLI in scripts, in tests, and in the QAA-613 hooks the rest of Part 5 leans on.
-
-#### Grammar
-
-A V1 descriptor is a colon-separated string with two shapes, distinguished by the third segment:
-
-```
-UTXO:    account:1:utxo:<network_name>:<network_env>:<xpub>:<hardened_path>
-ADDRESS: account:1:address:<network_name>:<network_env>:<address>:<bip44_path>
-```
-
-Field by field:
-
-| Position | Field | Meaning |
-|---|---|---|
-| 0 | `account` | Purpose discriminator. Always literal `account`. |
-| 1 | `1` | Schema version. Today only `1` exists. V0 (`js:2:…`) is parsed by a separate path — see below. |
-| 2 | `utxo` \| `address` | Account type. `utxo` for UTXO-based families (Bitcoin), `address` for account-based families (EVM, Solana). |
-| 3 | network name | Lowercase blockchain name. e.g. `bitcoin`, `ethereum`, `base`, `solana`. |
-| 4 | network env | `main` for mainnets. Otherwise the testnet/devnet suffix from the live-common currencyId — `testnet`, `goerli`, `sepolia`, `devnet`. The user-facing alias `mainnet` is normalised to `main` by `parseNetworkArg` in `network.ts:33`. |
-| 5 | xpub or address | UTXO: the extended public key (`xpub`/`ypub`/`zpub`). Address: the derived address (0x… for EVM, base58 for Solana). |
-| 6 | path | UTXO: hardened-only BIP32 path (regex enforced). Address: full BIP44 derivation path including non-hardened change/index. |
-
-The two type-specific Zod schemas are in `v1.ts`:
-
-```ts
-// apps/wallet-cli/src/shared/accountDescriptor/v1.ts
-export const UtxoAccountDescriptorV1Schema = z.object({
-  purpose: z.literal("account"),
-  version: z.literal("1"),
-  type: z.literal("utxo"),
-  network: NetworkSchema,
-  xpub: z.string().min(1),
-  path: z
-    .string()
-    .regex(/^m(\/\d+[h'])+$/, "UTXO path must only contain hardened segments, e.g. m/84h/0h/0h"),
-});
-
-export const AccountBasedDescriptorV1Schema = z.object({
-  purpose: z.literal("account"),
-  version: z.literal("1"),
-  type: z.literal("address"),
-  network: NetworkSchema,
-  address: z.string().min(1),
-  path: z.string().min(1),
-});
-```
-
-The UTXO `path` regex is the only structural rule beyond "right number of colons". Address paths are accepted without a regex — `m/44h/60h/0h/0/0` is the convention but the schema only requires non-empty.
-
-#### Hardened path notation: `h` vs `'`
-
-A real subtlety. BIP32 traditionally writes hardened segments with an apostrophe — `m/84'/0'/0'`. That apostrophe is shell-hostile (it breaks every `bash`/`zsh` quoting rule the moment you try to paste a descriptor into a command line). The ADR-specified canonical form uses **`h`** instead — `m/84h/0h/0h` — and the regex `/^m(\/\d+[h'])+$/` accepts either character. `serializeV1` always emits `h`; `parseV1` will accept either on input.
-
-> **Always emit `h` when generating descriptors yourself** (in test fixtures, in CI scripts, in pasted snippets). Apostrophe-form descriptors parse correctly today but make piping the output of `account discover` into a shell command much more painful than it needs to be.
-
-#### Worked examples — all four supported families
-
-The README and per-family schemas confirm wallet-cli ships with four families wired today: bitcoin, ethereum, base (also EVM), and solana. Per R1 the current binary's command surface supports them all. Below is one canonical descriptor for each.
-
-```
-# Bitcoin mainnet, native segwit (BIP84). UTXO descriptor.
-account:1:utxo:bitcoin:main:xpub6BosfCnifzxcFwrSzQiqu2DBVTshkCXacvNsWGYJVVhhawA7d4R5WSE1S2G4UrqdKFNvJx3bR7MNfYTc4FXnAFzBVNMcJYHx5ENKnG9WNzh:m/84h/0h/0h
-
-# Bitcoin testnet, native segwit. Note env suffix maps to currencyId bitcoin_testnet.
-account:1:utxo:bitcoin:testnet:tpubD8L6U...:m/84h/1h/0h
-
-# Ethereum mainnet, BIP44. Address descriptor.
-account:1:address:ethereum:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44h/60h/0h/0/0
-
-# Base mainnet (EVM L2). Identical shape to Ethereum.
-account:1:address:base:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44h/60h/0h/0/0
-
-# Solana mainnet, full hardened path. Address descriptor (Solana is account-based).
-account:1:address:solana:main:7xCU4XQfL8589X6vVt8q5F7J3Z9T1z6W6X6X6X6X6X:m/44h/501h/0h/0h
-```
-
-A few observations:
-
-- The `network env` suffix is **not** the live-common currencyId. `bitcoin_testnet` (the live-common id) becomes `bitcoin:testnet` (the descriptor's `name:env`). The mapping is bidirectional and lives in `network.ts:95-130` (`networkFromCurrencyId` / `currencyIdFromNetwork`).
-- Base reuses the same `address` shape as Ethereum because it shares the EVM family (and the BIP44 path uses Ethereum's coin type 60). Adding a new EVM L2 to wallet-cli is a cryptoassets registration; it requires no descriptor changes here.
-- Solana's path is fully hardened (`m/44h/501h/0h/0h`) — the `address` schema accepts that because the regex is only enforced on `utxo`-type paths.
-
-#### Parsing flow
-
-The parser (`parseV1` in `v1.ts:91`) is a deliberate split-on-colon, not a regex. It tolerates xpubs / addresses that contain colons in some hypothetical future format by joining everything between segment 4 (env) and the last segment (path) back together:
-
-```ts
-const path = rest.at(-1)!;
-const xpubOrAddress = rest.slice(0, -1).join(SEP);
-```
-
-In practice no current address or xpub contains a colon, but the parser is robust to that future change. If you write a descriptor by hand, count the colons: 6 for a V1 descriptor (7 segments).
-
-#### V0 backward compatibility
-
-The legacy "WalletSync short form" still works as input. `wallet/models.ts:54-59` routes the input string through one of two parsers:
-
-```ts
-export function parseAccountDescriptor(input: string): AccountDescriptor {
-  if (input.startsWith("account:1:")) {
-    return toV0(parseV1(input));
-  }
-  return parseShortAccountDescriptor(input);
-}
-```
-
-The V0 short form is `<accountId>:<index>` where `accountId` is the live-common-encoded id — `js:2:bitcoin:xpub…:native_segwit:0`. So the full V0 string is something like `js:2:bitcoin:xpub6BosfC…:native_segwit:0:0` (note the trailing `:0` is the index, the rest is `decodeAccountId`-friendly). You will see V0 strings in fixtures (`test/helpers/constants.ts`) and in older `session.yaml` files. New work should always emit V1.
-
-#### Adapters: V0 ↔ V1
-
-The `compatibility` adapters in `src/shared/accountDescriptor/adapters.ts` (212 lines per R1) provide `toV0(v1)` and `toV1(v0)`. The wallet layer (`WalletAdapter`) speaks V0 because the live-common bridge expects V0; commands resolve V1 input from the user, then convert on the way down. `account discover` does the reverse on the way up: it gets V0 descriptors back from the bridge, runs `toV1`, and prints the V1 string in its output envelope. The `session.yaml` store (5.4.x in part 1) persists V1 strings.
-
-> **Verify:** `adapters.ts` is 212 lines per the R1 inventory; if your checkout drifts, the function names you want are `toV0` and `toV1`, exported from `src/shared/accountDescriptor/index.ts`.
-
----
-
-### 5.4.9 Shared utilities
-
-`src/shared/` is the small-utilities drawer. Three files matter outside of `accountDescriptor/`.
-
-**`src/shared/log.ts`** (11 lines). A thin wrapper over the `debug` package. One namespace, `wallet-cli`, exposed through `walletCliDebug(message, ...args)`. Set `DEBUG=wallet-cli` (or `DEBUG=wallet-cli:*`) to enable it; without it, calls are no-ops. Used most visibly in `bridge-device-session.ts` to trace device-session lifecycle ("Ensuring DMK transport…", "Resetting device session…"). When a command hangs in CI, this is the first variable you flip on.
-
-**`src/shared/response.ts`** (15 lines). One function, `makeEnvelope(command, network, data, account?)`. Builds the canonical JSON envelope used by every JSON-mode response:
-
-```ts
-export function makeEnvelope(
-  command: string,
-  network: string,
-  data: Record<string, unknown>,
-  account?: string,
-): Record<string, unknown> {
-  return {
-    status: "success",
-    command,
-    network,
-    ...(account == null ? {} : { account }),
-    ...data,
-    timestamp: new Date().toISOString(),
-  };
-}
-```
-
-That `status: "success"` and the trailing `timestamp` are the two fields every consumer can rely on — `JsonCommandOutput` uses this for all success outputs and writes a separate hand-built `{ ok: false, error: { … } }` shape for failures. So if you grep an automation script for "did this CLI invocation succeed", `.status === "success"` (or `.ok === false` for the error envelope) is the test.
-
-**`src/shared/ui.ts`** (67 lines). Three exports: `colors` (re-exported from `@bunli/utils`), `writeStdout` (re-exported from `@bunli/utils`), and the `spinner(text)` / `withSpinner(...)` helpers around `yocto-spinner`. The interesting bit is `isInteractive()`:
-
-```ts
-export function isInteractive(): boolean {
-  if (
-    process.env.CLAUDECODE ||
-    process.env.CLAUDE_CODE ||
-    process.env.CURSOR_AGENT ||
-    process.env.CODEX_ENABLED ||
-    process.env.GEMINI_CLI ||
-    process.env.OPENCODE ||
-    process.env.AMP_CURRENT_THREAD_ID ||
-    process.env.AGENT === "amp"
-  )
-    return false;
-  return process.stderr.isTTY === true;
-}
-```
-
-The spinner is suppressed when stderr is not a TTY **or** when one of seven AI-agent environment variables is set. The CLI test runner (`cli-runner.ts`) sets `CLAUDECODE=1` explicitly before spawning the binary so output is deterministic. If you are scripting wallet-cli yourself and your output looks "stripped of progress", that is intended — the spinner writes to stderr only in interactive mode, never to stdout.
-
----
-
-### 5.4.10 Session layer
-
-The file is `src/session/bridge-device-session.ts` (48 lines). The name is doing a lot of work and it is *not* what you might guess.
-
-> **Disambiguation.** This is **not** the WebSocket "bridge" from Part 4 (the mobile Detox bridge that ferries Redux messages between the Jest worker and the RN app). That was a network protocol. The "bridge" in `bridge-device-session.ts` is the live-common `AccountBridge` — the legacy account-driver abstraction the wallet layer talks to. Two unrelated namespaces, same English word.
-
-What the file actually does is wrap any block of code that needs the device in a **device session**. A "session" here means: ensure the DMK transport exists, drive the `ConnectAppDeviceAction` to open the right Manager-app on the device, run the user's function, then reset the DMK session on the way out. The whole thing lives in 30 lines:
-
-```ts
-// apps/wallet-cli/src/session/bridge-device-session.ts
-export async function withCurrencyDeviceSession<T>(
-  currencyId: string,
-  fn: () => Promise<T>,
-): Promise<T> {
-  const { managerAppName } = getCryptoCurrencyById(currencyId);
-  walletCliDebug("Ensuring DMK transport…");
-  try {
-    const transport = await ensureWalletCliDmkTransport();
-    walletCliDebug(`Connecting Ledger app (${managerAppName})…`);
-    await connectLedgerApp(transport.dmk, transport.sessionId, managerAppName);
-    walletCliDebug("Device session ready.");
-    try {
-      return await fn();
-    } finally {
-      walletCliDebug("Resetting device session…");
-      await resetWalletCliDmkSession();
-    }
-  } catch (e) {
-    throw toWalletCliDeviceError(e);
-  }
-}
-```
-
-The flow:
-
-1. Look up the canonical `managerAppName` for the currency (e.g. `"Ethereum"` for `ethereum`, `"Bitcoin"` for `bitcoin`).
-2. `ensureWalletCliDmkTransport()` — singleton DMK transport (USB) is created lazily and cached.
-3. `connectLedgerApp(...)` — runs DMK's `ConnectAppDeviceAction`, which navigates the device's Manager UI to the requested app and opens it. Returns once the device is in the app or throws.
-4. The user's `fn` runs *inside* the open app. This is the critical line: every send / verify / discover happens with the device already in the right app, so the bridge does not have to redo the dance.
-5. The `finally` always resets the session — the DMK abstraction wants a clean slate between currency changes.
-6. Any thrown error is funnelled through `toWalletCliDeviceError` (a mapper that turns DMK errors into user-friendly `WalletCliDeviceError` instances — see `device/wallet-cli-device-error.ts`).
-
-A second helper, `withBridgeDeviceSession(family, fn)`, is a thin family→currencyId mapper for older callers that still pass `"evm"` instead of `"ethereum"`. New code should use `withCurrencyDeviceSession` directly.
-
-`send`, `discover`, and `receive --verify=true` all wrap their critical section in this helper. `balances`, `operations`, and `fresh-address` (for non-UTXO families) do not — they are device-free.
-
----
-
-### 5.4.11 Output formatting
-
-`src/output.ts` (338 lines) is the one place that decides what shape `human` vs `json` mode emits. Every command handler builds *one* `CommandOutput` instance and calls semantic methods on it; the implementation handles the rest.
-
-```ts
-// apps/wallet-cli/src/output.ts
-export function createCommandOutput(format: "human" | "json", ctx: OutputContext): CommandOutput {
-  const humanFmt = new HumanFormatter(getCryptoAssetsStore());
-  if (format === "json") return new JsonCommandOutput(ctx, humanFmt);
-  return new HumanCommandOutput(humanFmt);
-}
-```
-
-The `CommandOutput` interface has two halves:
-
-- **Lifecycle:** `withActivity`, `spin`, `run`, `fail`. These wrap async work with a spinner (human) or no-op (json) and centralise error handling. `JsonCommandOutput.run` catches errors, writes a `{ ok: false, error: { command, message } }` envelope to stdout, and `process.exit(1)`s. `HumanCommandOutput.run` re-throws so Bunli's default error handler can render the failure.
-- **Data:** `balances`, `operations`, `address`, `discoveredAccount`, `flushDiscovery`, `sessionSaved`, `sessionReset`, `sessionView`, `sendDryRun`, `sendEvent`, `sendComplete`. One method per output shape.
-
-The send pipeline shows the split most clearly:
-
-```ts
-// HumanCommandOutput.sendEvent — drives the active spinner
-sendEvent(event: SendEvent): void {
-  const s = this._activeSpin;
-  switch (event.type) {
-    case "prepared":
-      s?.clear();
-      this._printTransactionLines(event);
-      if (s) s.text = "Confirm transaction on device…";
-      break;
-    case "device-streaming":
-      if (s) s.text = `Streaming to device… ${Math.round(event.progress * 100)}%`;
-      break;
-    case "device-signature-requested":
-      if (s) s.text = "Please confirm on device…";
-      break;
-    case "device-signature-granted":
-      if (s) s.text = "Signed, broadcasting…";
-      break;
-    case "dry-run":
-      s?.success("Dry run complete (transaction not broadcasted)");
-      break;
-    case "broadcasted":
-      s?.success(`Broadcasted  ${colors.dim(event.txHash)}`);
-      break;
-  }
-}
-
-// JsonCommandOutput.sendEvent — accumulates into _sendResult; nothing is written until sendComplete
-sendEvent(event: SendEvent): void {
-  if (event.type === "prepared") {
-    this._sendResult.recipient = event.recipient;
-    this._sendResult.amount = event.amount;
-    this._sendResult.fee = event.fees;
-  } else if (event.type === "broadcasted") {
-    this._sendResult.tx_hash = event.txHash;
-  } else if (event.type === "dry-run") {
-    this._sendResult.dry_run = true;
-  }
-}
-```
-
-Same Observable, two completely different rendering strategies: the human formatter mutates a single live spinner so the user sees a smooth narrative; the JSON formatter accumulates into a single envelope that is emitted once at `sendComplete()`. That guarantees scripts piping `--output json` see exactly one JSON document on stdout per command.
-
-One subtlety in `JsonCommandOutput.run`:
-
-```ts
-async run(fn: () => Promise<void>): Promise<void> {
-  try { await fn(); }
-  catch (e) {
-    // Bun.spawn on Linux does not reliably capture fd 2 (stderr) from subprocesses.
-    // writeSync(1, ...) is a synchronous POSIX syscall — immune to process.exit() buffer drain.
-    writeSync(1, this._errorEnvelope(e) + "\n");
-    process.exit(1);
-  }
-}
-```
-
-The error envelope is written *to stdout* (fd 1) using a synchronous `writeSync`, not through `console.error`. The comment explains why: `Bun.spawn` on Linux truncates fd 2 capture on `process.exit`. This matters for the test harness — `runCli` reads `proc.stdout`/`proc.stderr` and asserts on both. The lesson: in JSON mode, success and failure both come down stdout, distinguished by `.status === "success"` vs `.ok === false`.
-
----
-
-### 5.4.12 The test directory tour
-
-`src/test/` is where the Speculos-analog lives. Full deep dive in 5.6; here is the inventory so you know what each file is for when 5.6 cross-references it.
-
-**`src/test/commands/`** — black-box command tests. Each spec spawns the CLI as a subprocess (under Bun), with HTTP and DMK fully mocked, asserts on stdout/stderr/exit code.
-
-| File | Lines (per R1) | Covers |
-|---|---|---|
-| `balances.test.ts` | 88 | `balances` command |
-| `discover.test.ts` | 79 | `account discover` |
-| `operations.test.ts` | 125 | `operations` |
-| `receive.test.ts` | 33 | `receive` |
-| `send.test.ts` | 72 | `send` (dry-run + signed-with-mock-DMK paths) |
-| `session.test.ts` | 77 | `session view` and `session reset` |
-| `README.md` | 14 | The mock layer table — quoted in 5.4.9 |
-
-**`src/test/helpers/`** — the harness. Spend time on these in 5.6.
-
-| File | Lines | Role |
-|---|---|---|
-| `cli-runner.ts` | 52 | `runCli(args, env)` — `Bun.spawn` wrapper with `NO_COLOR=1`, `CLAUDECODE=1`, stdio piping. Used by every command test. |
-| `wrapper.ts` | 8 | The default entrypoint for spawned tests — installs HTTP intercept then imports `cli.ts`. |
-| `wrapper-local.ts` | 3 | Same idea, no HTTP intercept — for commands that make no network calls. |
-| `http-intercept.ts` | 146 | Patches `globalThis.fetch` and `node:http`/`node:https` so all outbound HTTP is routed to the mock server. Activated by `WALLET_CLI_MOCK_PORT`. |
-| `mock-server.ts` | 58 | `Bun.serve`-based route table. Routes are passed in by the test. |
-| `eth-sync-routes.ts` | 37 | The default ETH HTTP fixtures (balance, nonce, gas estimate, gastracker, sync routes) — re-used across ETH-flavoured tests. |
-| `dmk-intercept.ts` | 29 | Installs `MockDeviceManagementKit` when `WALLET_CLI_MOCK_DMK=1`. Coin-app results come from `WALLET_CLI_MOCK_APP_RESULTS` (JSON env var). |
-| `constants.ts` | 8 | ETH descriptors and other test fixtures. |
-| `session-fixture.ts` | 27 | Sets `XDG_STATE_HOME` to a fresh tmpdir so `session.yaml` is isolated per test. |
-
-The two environment variables you will see scattered across tests:
-
-- `WALLET_CLI_MOCK_PORT=<port>` — turns on `http-intercept` so all fetch/http traffic redirects to `localhost:<port>` where `mock-server.ts` is listening.
-- `WALLET_CLI_MOCK_DMK=1` (with `WALLET_CLI_MOCK_APP_RESULTS=<json>`) — turns on `dmk-intercept` so the DMK transport is replaced by a mock that returns the supplied app results without touching USB.
-
-These are the only two flags to know when reading a `*.test.ts` file. The rest is per-spec setup.
-
-> Forward reference: 5.6 is the deep dive — how `cli-runner` spawns the binary, how `http-intercept` patches fetch, how `mock-dmk` returns synthetic app results. For now you have the map.
-
----
-
-### 5.4.13 How a command actually executes
-
-To consolidate everything in 5.4 so far, here is the sequence diagram for one `pnpm wallet-cli start -- balances ethereum-1 --output json` invocation. ASCII; one swimlane per layer.
-
-```
-Shell           pnpm/Nx           Bun runtime         cli.ts                Bunli
------           -------           -----------         ------                -----
-$ pnpm wallet-cli start -- balances ethereum-1 --output json
-   |
-   |--filter--> @ledgerhq/wallet-cli
-                      |
-                      |--script "start"--> bun run ./src/cli.ts -- balances ethereum-1 --output json
-                                                  |
-                                                  |--shebang "#!/usr/bin/env bun"
-                                                  |--ESM resolver kicks in
-                                                  |
-                                                  |  side effect imports (in order):
-                                                  |   1. embed-usb-native     (require usb addon early)
-                                                  |   2. live-common-setup    (register coin modules + DMK transport)
-                                                  |   3. .bunli/commands.gen  (auto-register every command)
-                                                  |   4. bunli.config         (build-time metadata)
-                                                  |
-                                                  |--createCLI(bunliConfig)
-                                                  |          |
-                                                  |          |--read argv ["balances","ethereum-1","--output","json"]
-                                                  |          |--look up "balances" in registered commands
-                                                  |          |--Zod-parse flags + positional
-                                                  |          |
-                                                  |          v
-                                                  |   handler({ flags, positional })
-                                                  |          |
-                                                  |          |--resolveAccountArg → "ethereum-1"
-                                                  |          |--resolveAccountDescriptor("ethereum-1")
-                                                  |          |     |--Session.read() (XDG_STATE_HOME/ledger-wallet-cli/session.yaml)
-                                                  |          |     |--lookup label → V1 descriptor string
-                                                  |          |     `--parseV1 → { type:"address", network, address, path }
-                                                  |          |
-                                                  |          |--ctx = { command:"balances", network:"ethereum:main", account:<id> }
-                                                  |          |--out  = createCommandOutput("json", ctx)   → JsonCommandOutput
-                                                  |          |--wallet = new WalletAdapter()
-                                                  |          |
-                                                  |          |--out.run(async () => {
-                                                  |          |     wallet.getAccountBalances(descriptor)
-                                                  |          |        |
-                                                  |          |        |--family === "evm"  → AlpacaAdapter.getBalances
-                                                  |          |        |       |
-                                                  |          |        |       `--HTTP GET (alpaca API; balances command does NOT
-                                                  |          |        |          open a DMK session — no withCurrencyDeviceSession here)
-                                                  |          |        v
-                                                  |          |     [{ assetId, balance }, …]
-                                                  |          |     out.balances(items)
-                                                  |          |        |
-                                                  |          |        `--JsonCommandOutput.balances → writeStdout(envelope)
-                                                  |          |              |
-                                                  |          |              `--makeEnvelope("balances","ethereum:main",
-                                                  |          |                                { balances:[…] }, accountId)
-                                                  |          |                  → JSON.stringify → stdout
-                                                  |          })
-                                                  |
-                                                  |--disposeWalletCliDmkTransportFully()  (no-op here; no DMK was opened)
-                                                  `--process.exit(0)
-```
-
-Three things to notice:
-
-1. **DMK is not always engaged.** `balances` in EVM goes through Alpaca — no `withCurrencyDeviceSession`, no device prompt, no app-open. Compare that with `send`, where the swimlane gets a fourth lane (DMK) between Bunli and stdout, and the handler wraps its critical section in `withCurrencyDeviceSession` so DMK's `ConnectAppDeviceAction` runs first.
-2. **Command registration happens at import time.** By the time `createCLI` runs, every command is already in Bunli's store via the side-effect import of `.bunli/commands.gen`. The CLI is one giant statically-linked module — there is no dynamic discovery in compiled mode.
-3. **The output is one JSON document.** `JsonCommandOutput` accumulates and emits once. If you pipe to `jq` you do not need `--slurp` — it is already a single envelope.
-
----
-
-### 5.4.14 Cross-reference: comparing wallet-cli to mobile and desktop layouts
-
-The three workspaces solve different problems and are organised accordingly. A table is the fastest way to see the contrast — keep it in mind when you switch contexts.
-
-| Concern | `apps/wallet-cli/src/` | `e2e/mobile/` | `e2e/desktop/tests/` |
-|---|---|---|---|
-| **Workspace location** | `apps/wallet-cli/` (a real product, not a test workspace) | Peer to desktop, repo-root level | Peer to mobile, repo-root level |
-| **Runtime** | Bun (single binary, ESM) | Node + Detox (Jest worker) + RN runtime on simulator | Node + Playwright + Electron renderer |
-| **Test surface** | `src/test/commands/*.test.ts` (black-box subprocess) | `e2e/mobile/specs/*.spec.ts` (driver matrix) | `e2e/desktop/tests/specs/*.spec.ts` (Playwright specs) |
-| **Page Object Model** | None — there is no UI | Yes — `e2e/mobile/page/` (32-getter `Application` hub) | Yes — `e2e/desktop/tests/page-objects/` |
-| **Bridge concept** | "bridge" = live-common `AccountBridge`. No network. | "bridge" = WebSocket between Jest and RN. ACK protocol. | No equivalent (Playwright drives Electron directly) |
-| **Speculos analog** | `MockDeviceManagementKit` (no Docker, in-process) + mock HTTP | Real Speculos in Docker, talked to over USB-mock | Real Speculos in Docker, same approach as mobile |
-| **Output contract** | Stable: `human` (text) and `json` (envelope). The CLI **is** the contract. | Allure report + CSV artifacts + screenshots | Allure report + screenshots |
-| **Account model** | V1 descriptor strings (`account:1:…`) parsed by `accountDescriptor/v1.ts` | Live-common `Account`/`TokenAccount` enums (e.g. `Account.ETH_1`) | Same live-common enums as mobile |
-| **Configuration** | `bunli.config.ts` + `tsconfig.json`. No `detox.config.js`. | `detox.config.js` (multi-device matrix) + `jest.config.js` | `playwright.config.ts` |
-| **CI sharding** | One job (commands fast — ~seconds) | Sharded matrix (asymmetric iOS/Android caps) | Sharded matrix (homogeneous Linux runners) |
-| **Test runner** | `bun test src/` | `pnpm mobile e2e:test -c <device>` | `pnpm desktop e2e:test` |
-| **What you write to test** | Subprocess assertions on stdout/stderr/exit code | UI-level interactions and bridge messages | UI-level interactions |
-| **What you write to extend behaviour** | A new file under `src/commands/` + `bunli generate` | Almost always a new spec + page-object additions | Same as mobile |
-
-Two takeaways. **First**, the wallet-cli is a *product*, not a test artifact. Mobile and desktop test the apps; wallet-cli **is** an app — its users (the QAA-613 hooks, ad-hoc scripts) consume the JSON envelope as a contract. **Second**, the "bridge" terminology collision is permanent: in Part 4 it meant a WebSocket; here it means live-common's account-driver layer. Read the imports.
-
----
-
-### 5.4.15 Chapter 5.4 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — wallet-cli Codebase Deep Dive</h3>
-<p class="quiz-subtitle">6 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> The <code>src/</code> tree groups files by responsibility. Which one of these statements about the layout is correct?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>src/wallet/</code> contains DMK transport code; <code>src/device/</code> contains intent schemas</button>
-<button class="quiz-choice" data-value="B">B) <code>src/session/</code> persists YAML to <code>~/.config</code>; <code>src/shared/</code> holds the live-common bridge adapter</button>
-<button class="quiz-choice" data-value="C">C) <code>src/commands/</code> is leaf handlers; <code>src/wallet/</code> is the wallet+intents abstraction; <code>src/device/</code> is DMK + USB; <code>src/session/</code> holds the session store and the device-session helper; <code>src/shared/</code> holds account descriptors and tiny utilities</button>
-<button class="quiz-choice" data-value="D">D) <code>src/output.ts</code> sits inside <code>src/commands/</code> because every command uses it</button>
-</div>
-<p class="quiz-explanation">The directory layout is the architecture. Commands are leaves; wallet, device, session, and shared are the lower layers. <code>output.ts</code> is at the top level because both human and JSON formatters orchestrate <em>across</em> commands. Mixing these up is the most common reason new contributors put files in the wrong place.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> A teammate proposes adding a <code>--memo &lt;text&gt;</code> flag to <code>send</code> for EVM transactions, mirroring Solana. Where do they need to make the change so the schema validates the new field?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Only in <code>src/commands/send.ts</code> — the schema accepts unknown fields</button>
-<button class="quiz-choice" data-value="B">B) <code>src/wallet/intents/families/evm.ts</code> needs the new optional field added to <code>EvmTransactionIntentSchema</code>; the <code>INTENT_BUILDERS["evm"]</code> entry in <code>send.ts</code> needs to forward <code>flags.memo</code>; downstream <code>BridgeAdapter.send</code> must consume it</button>
-<button class="quiz-choice" data-value="C">C) Only in <code>src/wallet/intents/index.ts</code> — that file owns all family rules</button>
-<button class="quiz-choice" data-value="D">D) In <code>output.ts</code>, because the formatter renders memos</button>
-</div>
-<p class="quiz-explanation">Zod's <code>z.object</code> rejects unknown keys by default. The intent schema in <code>families/evm.ts</code> is the source of truth — adding a field anywhere else without updating the schema means <code>TransactionIntentSchema.parse</code> throws on the unknown key. The intents directory is the only extensibility hook for the send pipeline; the schema, the builder, and the bridge adapter all have to agree.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> Today's <code>send</code> command on EVM accepts a <code>--data 0x…</code> flag. What does it actually do, and what is its consequence for QAA-615 (the upcoming <code>revoke</code> spike)?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It is a no-op flag reserved for a future release</button>
-<button class="quiz-choice" data-value="B">B) It overrides the recipient address</button>
-<button class="quiz-choice" data-value="C">C) It signs the data as a personal message, not a transaction</button>
-<button class="quiz-choice" data-value="D">D) It is hex-validated by the EVM intent schema, then passed through <code>WalletAdapter.send</code> → <code>BridgeAdapter.send</code> → <code>buildTxExtras</code>, which strips <code>0x</code> and patches a <code>Buffer</code> onto the live-common <code>Transaction</code>. The wallet-cli already accepts arbitrary EVM calldata — a <code>revoke</code> command becomes a thin wrapper that builds the right calldata and reuses the existing pipeline</button>
-</div>
-<p class="quiz-explanation">The <code>data</code> field is end-to-end wired today: EVM intent schema validates the hex, the bridge adapter converts to <code>Buffer</code>, the live-common <code>Transaction</code> picks it up, and the device clear-signs against the calldata selector. That is why R2 estimates QAA-615 at ~150 LOC of production code — the plumbing is already there.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> Which of the following descriptors is well-formed and parsable by <code>parseV1</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>account:1:address:ethereum:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44h/60h/0h/0/0</code></button>
-<button class="quiz-choice" data-value="B">B) <code>account:2:address:ethereum:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44'/60'/0'/0/0</code></button>
-<button class="quiz-choice" data-value="C">C) <code>account:1:utxo:bitcoin:main:xpub6BosfC...:m/84/0/0</code></button>
-<button class="quiz-choice" data-value="D">D) <code>account:1:address:ethereum:mainnet:0x71...</code> (no path)</button>
-</div>
-<p class="quiz-explanation">A passes every check: purpose <code>account</code>, version <code>1</code>, type <code>address</code>, valid network <code>ethereum:main</code>, address, and a full BIP44 path with hardened-<code>h</code> notation. B fails on <code>version: "2"</code> (only "1" is accepted; the apostrophe form would otherwise be fine — <code>parseV1</code> accepts both <code>h</code> and <code>'</code>). C fails the UTXO-path regex (<code>m/84/0/0</code> has no hardened markers). D has only six segments — <code>parseV1</code> requires at least seven. The <code>mainnet</code> spelling in D would also be normalised to <code>main</code> by <code>parseNetworkArg</code>, but the missing path is the disqualifier here.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> Walking through the sequence diagram in 5.4.13, why does <code>balances ethereum-1 --output json</code> never invoke <code>withCurrencyDeviceSession</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because <code>--output json</code> disables device interactions</button>
-<button class="quiz-choice" data-value="B">B) Because the descriptor was resolved from the session store rather than the device</button>
-<button class="quiz-choice" data-value="C">C) Because <code>WalletAdapter.getAccountBalances</code> routes EVM balances through the Alpaca direct API, which is an HTTP call to the explorer — no signing, no app-open, no device session needed. <code>withCurrencyDeviceSession</code> is only wrapped around code that drives the device (send, discover, verify-address)</button>
-<button class="quiz-choice" data-value="D">D) Because <code>balances</code> is mocked in test mode</button>
-</div>
-<p class="quiz-explanation">The Alpaca path is read-only and stateless — it is a remote query, not a wallet operation. The CLI engages DMK only when it must (signing, discovery via on-device pubkey derivation, or address verification). Balances and operations are purely informational on EVM and do not need the device.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> Compared with <code>e2e/mobile/</code> and <code>e2e/desktop/tests/</code>, which statement most accurately captures what is structurally different about <code>apps/wallet-cli/src/</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) wallet-cli has its own POM hub; mobile and desktop do not</button>
-<button class="quiz-choice" data-value="B">B) wallet-cli is a real product (a Bun-compiled binary) whose <em>contract</em> is the JSON envelope on stdout. Mobile and desktop are test workspaces that drive a UI through Detox/Playwright. The "bridge" word means live-common's <code>AccountBridge</code> here, not the WebSocket bridge from Part 4</button>
-<button class="quiz-choice" data-value="C">C) wallet-cli is the only one that uses Speculos</button>
-<button class="quiz-choice" data-value="D">D) wallet-cli has no test directory</button>
-</div>
-<p class="quiz-explanation">wallet-cli sits under <code>apps/</code>, not <code>e2e/</code>, because it is shipped as a product. Its tests (<code>src/test/commands/</code>) are subprocess-level black-box tests, not UI specs. The "bridge" namespace collision — live-common <em>vs</em> mobile-WebSocket — is the most common source of confusion when crossing from Part 4 to Part 5.</p>
+<p class="quiz-explanation">EIP-2612 permit lets a user sign an approval off-chain that the spender then redeems in the same transaction as the transfer. Each permit is one-shot and time-bounded. There is no standing allowance in storage, so no allowance-drain attack vector. USDC and DAI implement permit; older tokens (USDT, WBTC) do not.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
-<div class="chapter-outro">
-<strong>Key takeaway.</strong> You now own the full <code>src/</code> map: <code>WalletAdapter</code> as the routing class with two compatibility adapters underneath, the four-family intent schemas (the only extensibility hook for <code>send</code>, with EVM's <code>data</code> field already wired end-to-end), Account Descriptors V1 with their colon grammar and shell-safe <code>h</code> notation, the small shared utilities, the <code>withCurrencyDeviceSession</code> helper that wraps every device-using command, the JSON envelope contract enforced by <code>output.ts</code>, and the test directory inventory you will revisit in 5.6. With the codebase mapped, <strong>Chapter 5.5</strong> moves to <em>using</em> the binary — running it with <code>pnpm wallet-cli start</code>, debugging it under Bun's inspector, and reading what <code>--debug</code> output actually means when a command hangs.
-</div>
-## Running and Debugging wallet-cli
+---
+
+## The Five-Layer Integration
 
 <div class="chapter-intro">
-Chapter 5.4 walked you through every file under <code>apps/wallet-cli/</code>: the Bunli command framework, the DMK transport layer, the wallet adapter, the V1 account descriptor module. You can read the codebase. Now you have to run it. This chapter turns that map into hands-on muscle memory: how to install once, how to invoke from two different cwds, when to plug in a device, what JSON envelope to expect on stdout, where the spinners go, and which errors mean what. By the end you should be able to discover an Ethereum account from a real Nano X on your laptop, capture the JSON envelope of <code>balances</code> into a shell pipeline, and recognise the four or five errors the device layer is going to throw at you on day one.
+The CLI does not stand alone. When a Playwright spec calls <code>app.swap.revokeTokenApproval(account, provider)</code>, the line of code you wrote in a page object reaches across <strong>five distinct layers</strong> before a Speculos-emulated Ledger device finally signs an ERC-20 <code>approve(spender, 0)</code> transaction and broadcasts it to a public testnet. Each layer absorbs a different concern: subprocess plumbing, typed wrappers, device-tap automation, Speculos lifecycle, test orchestration. Most QA work — by far — lives in the topmost layer (the page object methods you write per ticket). The four layers below it are infrastructure that already exists and rarely changes. This chapter catalogues those layers, shows the real code from the senior engineer's <code>support/qaa_add_revoke_token</code> branch, and traces the complete end-to-end call path. Keep this open when you land on a CLI integration ticket: it will tell you which layer to touch and which to leave alone.
 </div>
 
-<a id="running-and-debugging-wallet-cli"></a>
+### 5.4.1 Why Five Layers
 
-### 5.5.1 Prerequisites
+The CLI integration is not a tower of abstraction for its own sake. Each layer absorbs a concern that the layers above it should not see. If you collapsed the architecture into one big function — say, a page object method that called `child_process.spawn` directly and also drove Speculos — the result would be unreadable, untestable, and impossible to reuse across the desktop and mobile test workspaces. The five-layer split is the price the codebase pays for two properties:
 
-Before running a single command, three layers of toolchain must be in place. Unlike Detox (Chapter 4.4) or Playwright (Chapter 3.4) — where the runner manages its own browser or simulator — `wallet-cli` shells straight through to a USB device. Three things have to line up: the Bun runtime, the platform USB stack, and the device itself.
+1. **Reuse.** Both `e2e/desktop/` (Playwright) and `e2e/mobile/` (Detox/Jest) import the exact same `cliCommandsUtils` from `libs/ledger-live-common/src/e2e/`. There is no desktop CLI helper and a separate mobile CLI helper. The CLI integration is genuinely shared infrastructure, and that is only possible because the lower four layers know nothing about Playwright or Detox.
+2. **Locality of change.** When you add a new CLI helper for a ticket — say, "give me a typed wrapper for the new `tokenAllowance --json` output" — you touch one file (Layer 3). When you add a new POM method that uses an existing helper, you touch one file (Layer 5). The layer boundaries are designed so that the most common QA work touches the smallest surface area.
 
-**Bun runtime:**
-- Bun >= 1.1.0. The version is pinned in `apps/wallet-cli/package.json` under `engines.bun`. Local development currently tracks `bun-types@1.3.12` per the dev dependencies, but anything `>= 1.1.0` works.
-- Install with `curl -fsSL https://bun.sh/install | bash` if not present, or `brew install oven-sh/bun/bun` on macOS.
-- Verify with `bun --version`. The CLI will refuse to start under Node — its shebang is `#!/usr/bin/env bun` and the entry script `src/cli.ts` imports Bun-only globals like `Bun.spawn` indirectly through the test layer.
+Here is the layer table, with the path you would `cd` into to read the source:
 
-**Linux USB stack:**
+| # | Path | Role | Touch frequency for QA |
+|---|---|---|---|
+| 1 | `apps/cli/bin/index.js` (and `apps/cli/src/commands/blockchain/*`) | The legacy CLI binary — Node + Commander, package `@ledgerhq/live-cli`, bin name `ledger-live`. | **Rare.** Only when adding a brand-new CLI subcommand. |
+| 2 | `libs/ledger-live-common/src/e2e/runCli.ts` | The spawn engine. `child_process.spawn`, the `+` arg separator, retry policy, error envelope. | **Rare.** Engine extensions only. |
+| 3 | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | Typed TypeScript wrappers — the curried `liveDataCommand`, plus `approveTokenCommand`, `revokeTokenCommand`, `isTokenAllowanceSufficientCommand`, etc. | **Occasional.** New helper per new ticket family. |
+| 4 | `libs/ledger-live-common/src/e2e/families/evm.ts` | Speculos device-tap automation — `approveToken`, `approveTokenTouchDevices`, `approveTokenButtonDevice`, the screen primitives. | **Rare.** New device-tap pattern. |
+| 5 | `e2e/desktop/tests/page/swap.page.ts`, `e2e/mobile/page/trade/swap.page.ts`, and per-spec `*.spec.ts` files | The POM methods (`ensureTokenApproval`, `revokeTokenApproval`) and the specs that call them. | **Frequent.** This is where most of your tickets land. |
 
-```bash
-sudo apt-get update
-sudo apt-get install libudev-dev libusb-1.0-0-dev
-```
+The unwritten rule is: a layer-5 author should never have to read or edit anything in layers 1, 2, or 4. If a ticket forces you down that far, raise it as a question — the senior engineers will either point you at an existing helper or extend layer 3 for you. Layer 3 is the negotiated boundary between QA work and platform work.
 
-These two packages back the `usb` N-API native addon. Without them, the addon fails to load on first DMK call and you get an opaque dynamic-linker error on the very first `account discover`. The wallet-cli `README.md` lists this as the only Linux-specific prerequisite. On Debian/Ubuntu it is `libudev-dev` + `libusb-1.0-0-dev`; on Fedora/RHEL the equivalents are `libusbx-devel` + `systemd-devel`.
+### 5.4.2 Layer 1 — The Binary `apps/cli`
 
-**macOS USB stack:**
-- Install Xcode Command Line Tools (`xcode-select --install`). The `usb` addon ships prebuilt darwin binaries, but the dynamic linker still needs the system `libusb` provided by the CLT bundle.
-- No `brew install libusb` step is required for the prebuilt path. If you ever re-build the addon from source (`npm rebuild usb`), then `brew install libusb` becomes necessary.
-
-**Windows:**
-- The `bunli build` target list includes `windows-x64`, but development on Windows is not common in QA — most engineers SSH into a Linux box for device work, or use macOS directly.
-
-**Device-side prerequisites:**
-- A Ledger device on USB — Nano S Plus, Nano X, or Stax. Nano X works in USB mode (not Bluetooth — the CLI only knows the node-WebUSB transport).
-- The relevant coin app is open on the device for any device-required command. `account discover ethereum` needs the **Ethereum** app open. `account discover bitcoin` needs the **Bitcoin** app open. `account discover base` needs the Ethereum app open (Base uses the Ethereum app on device — see the `live-common-setup.ts` family mapping).
-- The device unlocked (PIN entered).
-
-> **Tip:** `connect-ledger-app.ts` in the device layer tries to open the right Manager app for you (it wraps DMK's `ConnectAppDeviceAction`). If the wrong app is open, the CLI will print `[i] Opening Ethereum app on your Ledger... ACTION REQUIRED: Confirm on device screen.` and wait. If the device is locked, you will see `[~] Waiting: Ledger detected but locked. Enter your PIN on the device.`. These two stderr lines are the canonical "device handshake" stage and are documented in the `connect-ledger-app.ts` source verbatim.
-
-### 5.5.2 Install once
-
-`wallet-cli` is a workspace inside the `ledger-live` monorepo. Its dependencies live alongside every other Live package, so a single `pnpm i` at the repo root sets it up:
-
-```bash
-cd /path/to/ledger-live
-pnpm i
-```
-
-You normally do not need a separate `bun install` inside `apps/wallet-cli/`. The `package.json` declares `engines.bun >= 1.1.0` but its dependencies are pulled by `pnpm` against the workspace lockfile, then **executed** by `bun` at run time. The two tools play different roles: `pnpm` resolves and links, `bun` runs the source.
-
-There is one exception. If you are iterating on `wallet-cli` standalone — outside the monorepo, in a copy of `apps/wallet-cli/` — you would need:
-
-```bash
-cd apps/wallet-cli
-bun install
-```
-
-But that is a rare flow. The common path is monorepo-rooted `pnpm i`, period.
-
-After install, sanity-check by running the `--help`:
-
-```bash
-pnpm --silent wallet-cli start --help
-```
-
-This prints the Bunli-generated top-level help — every group (`account`, `session`) and every leaf command (`balances`, `operations`, `receive`, `send`) with one-line descriptions. If you see this, your install is healthy.
-
-### 5.5.3 Two ways to invoke
-
-You can invoke the CLI from two cwds, and the syntax differs in exactly one respect: whether you cross a `pnpm` filter boundary.
-
-**Form A — from the repo root:**
-
-```bash
-pnpm --silent wallet-cli start -- <command> [flags]
-```
-
-This is the form quoted in `SKILL.md` and in the `wallet-cli/README.md`. The expansion is:
-
-1. `pnpm wallet-cli` runs the root-level passthrough script defined in the monorepo `package.json`. That script is just `pnpm --filter @ledgerhq/wallet-cli`.
-2. `start` is the script name in `apps/wallet-cli/package.json` (`bun run ./src/cli.ts`).
-3. The `--` separator is **required** — without it, `pnpm` consumes flags meant for the CLI as flags meant for itself. With it, everything to the right is forwarded verbatim.
-4. `--silent` is the pnpm flag, not a wallet-cli flag. It suppresses pnpm's own preamble (`> @ledgerhq/wallet-cli@0.1.0 start ...`). On a `--output json` run, that preamble would corrupt the JSON envelope on stdout. Always pass `--silent` when you intend to parse the output.
-
-**Form B — from inside `apps/wallet-cli/`:**
-
-```bash
-cd apps/wallet-cli
-pnpm start -- <command> [flags]
-```
-
-This is shorter. Now `pnpm start` resolves directly against this package's `package.json`, no filter needed. The `--` separator is still required for the same reason.
-
-Equivalent forms also work:
-
-```bash
-# from any cwd, use the workspace filter explicitly
-pnpm --filter @ledgerhq/wallet-cli start -- <command> [flags]
-
-# from apps/wallet-cli/, drive bun directly (skip pnpm entirely)
-bun run ./src/cli.ts <command> [flags]
-```
-
-The last form is what `pnpm start` ultimately runs. It's the lowest-level invocation and is useful when you want to skip pnpm completely (for instance, inside a hook script that already has its cwd set).
-
-> **Tip:** Pick Form A or Form B and stick with it within a session. Mixing them in shell history breeds confusion when you copy-paste a half-remembered command and discover the `--` separator went missing.
-
-### 5.5.4 Device-required vs no-device commands
-
-Every CLI command falls into one of two buckets: it talks to a USB device, or it doesn't. This single property drives almost every operational decision — whether a sandbox run will succeed, whether an in-CI replay can be hermetic, whether you need a coin app open. The matrix below is the canonical reference (lifted from `SKILL.md`):
-
-| Command            | Device required                   | Disable sandbox              |
-| ------------------ | --------------------------------- | ---------------------------- |
-| `account discover` | Yes                               | **Yes**                      |
-| `receive`          | Yes (optional with `--no-verify`) | **Yes**                      |
-| `send`             | Yes (unless `--dry-run`)          | **Yes** (unless `--dry-run`) |
-| `balances`         | No                                | No                           |
-| `operations`       | No                                | No                           |
-| `account fresh-address` (EVM/Solana) | No                | No                           |
-| `session view` / `session reset` | No                    | No                           |
-
-"Disable sandbox" refers to the **Bash tool** in agent contexts (Claude Code, Cursor, etc.). When you drive the CLI from a sandboxed agent, USB ioctls are blocked by default. Any command with "Yes" in the second column must be invoked with `dangerouslyDisableSandbox: true` — the agent's tool-call parameter that lifts the restriction for a single command. Plain shell users (you running `pnpm wallet-cli start ...` in your terminal) never hit this, because there's no sandbox.
-
-The pattern that drives the matrix: **device-required = USB transport opens = sandbox blocks**. `account discover` opens DMK to read the device's xpub; `receive` opens DMK to verify the address on-screen (unless `--no-verify`); `send` opens DMK to sign and broadcast (unless `--dry-run`, which validates the transaction shape with no device access). `balances` and `operations` only call the Ledger Explorer API over HTTPS and never touch the device — sandbox is fine.
-
-> **Why `send --dry-run` is safe:** `send` parses the intent, runs `prepareTransaction` against the bridge (gas estimate, nonce, fee data via HTTPS), and emits a `dry_run` envelope without ever opening DMK. No `connectLedgerApp`, no `signOperation`, no broadcast. You can run it in any sandboxed environment, in CI, in a unit test — and the test suite does exactly that (see `send.test.ts` in 5.6.10).
-
-### 5.5.5 First device session
-
-Plug in a Nano X over USB. Open the Ethereum app on the device. Then, from the repo root:
-
-```bash
-pnpm --silent wallet-cli start -- account discover ethereum
-```
-
-What you should see on stderr (it goes to stderr because the spinner uses `yocto-spinner` on fd 2):
-
-```
-[~] Discovering ethereum:main accounts...
-```
-
-If the device is locked or the Ethereum app isn't open, the human-mode handshake prints these lines on stderr (verbatim from `connect-ledger-app.ts`):
-
-```
-[~] Waiting: Ledger detected but locked. Enter your PIN on the device.
-[i] Opening Ethereum app on your Ledger... ACTION REQUIRED: Confirm on device screen.
-```
-
-After you confirm, sync runs and on stdout you get one address per line plus a V1 descriptor:
-
-```
-0x71C7656EC7ab88b098defB751B7401B5f6d8976F  account:1:address:ethereum:main:0x71C7656EC7ab88b098defB751B7401B5f6d8976F:m/44h/60h/0h/0/0
-0x... account:1:address:ethereum:main:0x...:m/44h/60h/1h/0/0
-...
-[i] Saved 3 account(s) to session.yaml
-```
-
-The third column is the V1 descriptor introduced in Chapter 5.4. It is **shell-safe** — hardened path segments use `h` instead of `'`, so you can paste the descriptor into any subsequent command without quoting.
-
-To get JSON instead:
-
-```bash
-pnpm --silent wallet-cli start -- account discover ethereum --output json
-```
-
-stdout shape:
+The bottom of the stack is a regular Node CLI. It lives at `apps/cli/` and is published as `@ledgerhq/live-cli`. The bin entry from `apps/cli/package.json`:
 
 ```json
 {
-  "status": "success",
-  "command": "account discover",
-  "network": "ethereum:main",
-  "accounts": [
-    "account:1:address:ethereum:main:0x71C7...:m/44h/60h/0h/0/0",
-    "account:1:address:ethereum:main:0x83A2...:m/44h/60h/1h/0/0"
-  ],
-  "timestamp": "2026-04-27T11:42:00.000Z"
+  "name": "@ledgerhq/live-cli",
+  "version": "24.39.0",
+  "description": "ledger-live CLI version",
+  "bin": {
+    "ledger-live": "./bin/index.js"
+  },
+  "scripts": {
+    "prebuild": "zx ./scripts/gen.mjs",
+    "build": "zx ./scripts/build.mjs",
+    "test": "zx ./scripts/test.mjs"
+  }
 }
 ```
 
-The envelope is always `{ status, command, network, [account?], <payload>, timestamp }`. The `[account?]` field is present only on commands that target a single account (`balances`, `operations`, `receive`, `send`). `account discover` is plural by definition.
+Three things to notice. First, **the bin name is `ledger-live`, not `live-cli` or `lcli`**. Every error envelope, every log line, every shell example in this guide will refer to `ledger-live`. Second, **the entry point is `./bin/index.js`** — a built JavaScript file produced by `zx scripts/build.mjs`. The TypeScript source lives in `apps/cli/src/`, but the spawn engine targets the built JS. If you edit the source and forget to run `pnpm --filter @ledgerhq/live-cli build`, your tests will run the stale binary and you will spend an hour debugging code that is not the code you think you are running. Third, **the `prebuild` step (`zx ./scripts/gen.mjs`) generates the commands index** — the file that wires every `apps/cli/src/commands/blockchain/*.ts` into the Commander dispatcher. If you add a brand-new CLI command, the generator picks it up automatically; you do not edit the index by hand.
 
-A successful `discover` also writes `session.yaml` under `XDG_STATE_HOME/ledger-wallet-cli/` (or `~/.local/state/ledger-wallet-cli/` on Linux/macOS by default). From now on you can refer to those accounts by label:
+Inside `apps/cli/src/commands/blockchain/` there are sixteen `.ts` files, each one a Commander subcommand. The two that QA cares about are:
 
-```bash
-pnpm --silent wallet-cli start -- balances ethereum-1 --output json
-pnpm --silent wallet-cli start -- balances ethereum-2 --output json
-```
+- **`send.ts`** — signs and (optionally) broadcasts a transaction. Supports `--mode approve | revokeApproval`, plus `--token`, `--spender`, `--approveAmount`, `--wait-confirmation`. This is the file driven by `runCliTokenApproval` (Layer 2) and indirectly by `approveTokenCommand` and `revokeTokenCommand` (Layer 3).
+- **`tokenAllowance.ts`** — reads the current ERC-20 allowance from the token contract. Supports `--format json` for machine-readable output. Driven by `runCliGetTokenAllowance` and indirectly by `isTokenAllowanceSufficientCommand`.
 
-The label resolver lives in `commands/inputs.ts` (`resolveAccountInput`): any value that does not contain `:` is looked up against `session.yaml`. Anything with `:` is treated as a descriptor passthrough (V0 `js:2:...` or V1 `account:1:...`).
+The other fourteen commands (`bot.ts`, `botPortfolio.ts`, `derivation.ts`, `generateTestScanAccounts.ts`, `signMessage.ts`, etc.) are out of QAA scope. They exist for live-common bots, fixture generation, or one-off engineering work — not for QA regression suites. You will see them in the directory listing; ignore them.
 
-### 5.5.6 Debug logging
-
-The CLI uses two layered logging conventions: a **debug-namespace** convention (`debug` package) for wallet-cli internals, and a **DMK log level** convention (`LedgerLiveLogger`) for the device layer.
-
-**wallet-cli internal logs** live in `shared/log.ts`:
+The key code path inside `send.ts` — the broadcast gate — is where the `DISABLE_TRANSACTION_BROADCAST` environment variable (covered in detail in Chapter 5.6) flips the binary between "sign-only" and "sign-and-broadcast" mode:
 
 ```ts
-// shared/log.ts (11 lines)
-import createDebug from "debug";
-export const debug = createDebug("wallet-cli");
+// apps/cli/src/commands/blockchain/send.ts (excerpt)
+return bridge
+  .signOperation({
+    account,
+    transaction: t,
+    deviceId: opts.device || "",
+  })
+  .pipe(
+    map(toSignOperationEventRaw),
+    // @ts-expect-error more voodoo stuff
+    ...(opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")
+      ? []
+      : [
+          concatMap((e: any) => {
+            if (e.type === "signed") {
+              l(`✔️ has been signed! ${JSON.stringify(e.signedOperation)}`);
+              return from(
+                bridge
+                  .broadcast({
+                    account,
+                    signedOperation: e.signedOperation,
+                  })
+                  .then(async op => { /* ... */ }),
+              );
+            }
+            return of(e);
+          }),
+        ]),
+  );
 ```
 
-Activate with the `DEBUG` environment variable:
+This is the only place in the entire stack where `bridge.broadcast(...)` is called for the approve/revoke path. Either flag — the `--disable-broadcast` CLI argument or the `DISABLE_TRANSACTION_BROADCAST` env var — being truthy short-circuits the broadcast operator to an empty array, and the rxjs pipe just passes the signed-operation event through without sending it on-chain. Layer 3 toggles this gate via the env var; you (Layer 5) almost never see it directly. Chapter 5.6 covers the discipline around this flag in detail.
 
-```bash
-# all wallet-cli debug lines
-DEBUG=wallet-cli pnpm --silent wallet-cli start -- balances ethereum-1
+### 5.4.3 Layer 2 — `runCli.ts`, the Spawn Engine
 
-# all wallet-cli plus any sub-namespace
-DEBUG=wallet-cli:* pnpm --silent wallet-cli start -- account discover ethereum
+Layer 2 is one file: `libs/ledger-live-common/src/e2e/runCli.ts`. It contains two engine functions (`runCliCommand` and `runCliCommandWithRetry`), one constant (`LEDGER_LIVE_CLI_BIN`), and a small set of public helpers that produce specific CLI command strings (`runCliLiveData`, `runCliGetAddress`, `runCliTokenApproval`, `runCliGetTokenAllowance`).
 
-# everything (very loud — includes live-common, axios, rxjs etc.)
-DEBUG=* pnpm --silent wallet-cli start -- balances ethereum-1
-```
-
-These logs go to **stderr**. That is intentional: stderr is reserved for diagnostics, stdout is reserved for the JSON envelope. If you redirect `stdout` into `jq`, debug lines do not contaminate the parse.
-
-**DMK device logs** are configured in `device/dmk.ts`:
+#### The spawn engine, verbatim
 
 ```ts
-// device/dmk.ts (excerpt)
-.addLogger(new LedgerLiveLogger(LogLevel.Warning))
+// libs/ledger-live-common/src/e2e/runCli.ts
+import path from "path";
+import { spawn } from "child_process";
+import { sanitizeError, sleep } from "./index";
+
+export const LEDGER_LIVE_CLI_BIN = path.resolve(__dirname, "../../../../apps/cli/bin/index.js");
 ```
 
-The default `LogLevel.Warning` means only warnings and errors from DMK reach stderr. To get full DMK trace, you'd need to either rebuild the binary with a different level or patch `dmk.ts` locally. There isn't an environment variable today that flips this — it is hard-coded in the factory. (This is a real limitation; if you need verbose APDU tracing for a hard bug, the workaround is to edit `dmk.ts` to `LogLevel.Debug` and rerun.)
+`LEDGER_LIVE_CLI_BIN` is computed at module load. `__dirname` is wherever the built copy of `runCli.js` lives inside `node_modules/@ledgerhq/live-common/lib/e2e/` (or the source directory, depending on how the workspace is consumed); the four `..` segments walk back up to the monorepo root, then forward into `apps/cli/bin/index.js`. The result is an absolute path that the spawn call below feeds to `node`. If your tests start failing with `Cannot find module '/.../apps/cli/bin/index.js'`, this is the constant to investigate — it usually means the CLI was not built.
 
-**stdout vs stderr discipline:**
-- **stdout** — JSON envelope (success or error in JSON mode), or human-readable result lines (in human mode).
-- **stderr** — spinner, device handshake messages, `DEBUG=` namespace logs, error messages in human mode, errors mapped via `toWalletCliDeviceError` before the JSON envelope is committed.
+The flag parser used in error messages:
 
-The reason this matters is the **JSON output discipline**. When a hook script does:
-
-```bash
-result=$(pnpm --silent wallet-cli start -- balances ethereum-1 --output json)
-echo "$result" | jq '.balances[0].amount'
+```ts
+function parseCliFlag(command: string, flag: string): string | undefined {
+  const parts = command.split("+");
+  const idx = parts.findIndex(p => p === `--${flag}`);
+  return idx !== -1 && idx + 1 < parts.length ? parts[idx + 1] : undefined;
+}
 ```
 
-…it captures only stdout. Any debug-namespace noise on stderr is irrelevant to the parse. If you accidentally drop `--silent`, pnpm's preamble line lands on stdout and breaks the parse — that is the single most common JSON-pipeline footgun.
+This is purely cosmetic: when a CLI command fails, the error envelope wants to surface "which currency" and "which account index" without the caller having to plumb that through. `parseCliFlag` re-parses the same `+`-joined command string the engine just spawned.
 
-> **Tip:** A test from `output.ts` reveals one important quirk: the JSON error path uses `writeSync(1, …)` plus `process.exit(1)` instead of writing to stderr. The comment says "Bun.spawn on Linux does not reliably capture fd 2 (stderr) — observable in CI." So even errors land on stdout in JSON mode, with `{ ok: false, error: { command, message } }` shape. Tests assert this exact shape — see 5.6.9.
+The retryable-error classifier:
 
-### 5.5.7 Common errors
-
-Every error you'll hit on day one comes from one of two sources: validation (Zod schemas in `commands/inputs.ts` and `wallet/intents/`) or device mapping (`wallet-cli-device-error.ts`). The table below maps the user-facing string to its diagnostic step. The five most common are also documented in `SKILL.md`:
-
-| Error                                                            | Cause                                     | First diagnostic step |
-| ---------------------------------------------------------------- | ----------------------------------------- | --------------------- |
-| `Amount must include a ticker, e.g. '0.5 ETH' or '0.001 BTC'`    | `--amount` given a bare number            | Re-quote the value: `--amount '0.5 ETH'` not `--amount 0.5`. The Zod regex requires `<number> <TICKER>` with a space separator. |
-| `Ticker UNKN not found in account. Available: ETH, USDT, ...`    | Ticker not in account balances            | Run `balances <descriptor> --output json` and copy a ticker from `data.balances[].asset`. The "Available:" suffix in the error already lists them. |
-| `No currencyId mapping for network "x:y"`                        | Unsupported network/env combination       | Check `shared/accountDescriptor/network.ts` for the supported aliases. `bitcoin`, `ethereum`, `solana`, `base` are valid. `ethereum:mainnet` aliases to `:main`. `polygon` etc. are not yet supported. |
-| `UnknownDeviceExchangeError`                                     | Device disconnected or wrong app          | Re-plug the cable, unlock the device, open the right coin app, then retry. The `connect-ledger-app.ts` retry loop will retry up to 5 times automatically — this error means it gave up. |
-| `[x] Transaction Cancelled: Rejected on device. No funds moved.` | User pressed reject on device             | Expected outcome. Either the user pressed reject deliberately (cancel test), or the transaction shape on the device screen does not match what the user expected (look at calldata in the `--data` flag and re-derive). |
-| `Timeout has occurred`                                           | Sandbox blocked USB                       | If you're running from an agent (Claude Code, Cursor), set `dangerouslyDisableSandbox: true` on the Bash tool call. If you're in a plain shell, this means the device disconnected mid-call — re-plug. |
-| `Device is locked. Unlock your Ledger with your PIN and try again.` | PIN entry timed out                     | Enter the PIN on the device within the 60s `unlockTimeout` (set in `connect-ledger-app.ts`). |
-| `Could not execute on the app. Open the correct app for this currency...` | Wrong coin app open                | Open the matching app on device. Base needs Ethereum, Solana needs Solana, Bitcoin needs Bitcoin. |
-| `Timed out talking to the Ledger over USB. Retry; check cable.`  | `SendApduTimeoutError`                    | Cable issue or the device backgrounded. Re-plug; on macOS, try a different port or remove a USB hub from the chain. |
-| `Could not communicate (garbled APDU). Unlock and retry.`        | `ReceiverApduError` after retries         | Same as above — DMK polling occasionally hits a transient transport-framing error. The internal retry already covers most cases. If you see this, re-plug. |
-
-Most of these strings are produced by the mapper in `device/wallet-cli-device-error.ts`. New commands that introduce new error paths should call `toWalletCliDeviceError(e)` in their catch block to keep the surface uniform — you'll see `withCurrencyDeviceSession` already does this.
-
-> **Tip:** The "Available:" list in the `Ticker UNKN not found` error is the fastest way to discover what tickers a discovered account actually has. Pass an obviously-bogus ticker (`--amount '1 ZZZ'`) on a `--dry-run` send and the error tells you everything the account holds: `Available: ETH, USDT, USDC, DAI, ...`. Faster than scrolling `balances` output.
-
-### 5.5.8 Debugging with `bun --inspect`
-
-Bun ships a Chrome DevTools-compatible debugger. The CLI is a Bun program, so attaching the debugger is one flag away.
-
-**Launch with debugger waiting:**
-
-```bash
-cd apps/wallet-cli
-bun --inspect-brk ./src/cli.ts balances account:1:address:ethereum:main:0x71C7...:m/44h/60h/0h/0/0
+```ts
+function isRetryableError(message: string): boolean {
+  const retryablePatterns = [
+    /503/i,
+    /502/i,
+    /504/i,
+    /GeneralDmkError/i,
+    /ECONNREFUSED/i,
+    /ETIMEDOUT/i,
+    /ECONNRESET/i,
+    /socket hang up/i,
+    /timeout/i,
+  ];
+  return retryablePatterns.some(pattern => pattern.test(message));
+}
 ```
 
-`--inspect-brk` blocks the process at startup and prints a `devtools://` URL to stderr. Open it in a Chromium-based browser (Chrome, Edge, Brave). You get the full DevTools panel: Sources, breakpoints, call stack, watch expressions, REPL.
+This is the policy that decides "transient network issue, try again" vs. "deterministic logic failure, surface immediately." The classifier is intentionally conservative: only HTTP gateway codes (502/503/504), generic DMK errors, low-level socket failures, and the literal string "timeout" trigger a retry. A `BigNumber error` or a `Speculos device not found` does not retry — those are bugs in your test setup, and silently retrying would just delay the failure.
 
-**Launch without breaking at startup:**
+Now the main engine function:
 
-```bash
-bun --inspect ./src/cli.ts balances <descriptor>
+```ts
+export function runCliCommand(command: string): Promise<string> {
+  console.warn(`[CLI] Executing: ledger-live ${command.replace(/\+/g, " ")}`);
+
+  return new Promise((resolve, reject) => {
+    const args = command.split("+");
+    const child = spawn("node", [LEDGER_LIVE_CLI_BIN, ...args], {
+      stdio: "pipe",
+      env: process.env,
+    });
+
+    let output = "";
+    let errorOutput = "";
+
+    child.stdout.on("data", data => {
+      output += data.toString();
+    });
+
+    child.stderr.on("data", data => {
+      errorOutput += data.toString();
+    });
+
+    child.on("exit", code => {
+      if (code === 0) {
+        resolve(output);
+      } else {
+        const currency = parseCliFlag(command, "currency");
+        const index = parseCliFlag(command, "index");
+        const indexText = index && index !== "undefined" ? index : "N/A";
+
+        const errorDetails = [
+          `❌ Failed to execute CLI command`,
+          `🔍 Command: ${command}`,
+          `💱 Currency: ${currency}`,
+          `🔢 Index: ${indexText}`,
+          `🔢 Exit Code: ${code}`,
+          errorOutput ? `🧾 CLI Error : ${errorOutput.trim()}` : "",
+        ].join("\n");
+
+        reject(new Error(errorDetails));
+      }
+    });
+
+    child.on("error", error => {
+      reject(new Error(`Error executing CLI command: ${sanitizeError(error)}`));
+    });
+  });
+}
 ```
 
-Useful when you want to trigger a breakpoint by code change rather than at boot. Pair this with a `debugger;` statement in the source you're debugging.
+A few things to notice:
 
-**Setting a conditional breakpoint:**
+- **The log line is the most useful debugging artefact in the entire stack.** `[CLI] Executing: ledger-live send --currency ethereum --mode revokeApproval --token ethereum/erc20/usd_coin --spender 0xRouter --index 0 --wait-confirmation` is a string you can paste into your shell (after a manual Speculos boot) and reproduce the exact command the test was running. When a test fails inscrutably in CI, this line is the first place to look in the Allure log.
+- **Args travel as one string with `+` separators, then split before spawn.** `command.split("+")` reverses the join. The reason for the `+` convention is shell-escape avoidance: the helpers in `cliCommandsUtils.ts` build the command with `cliOpts.push("--currency+ethereum")` and `cliOpts.join("+")`, never having to worry about quoting spaces, ampersands, or shell-special characters. The trade-off is that you cannot pass an argument that legitimately contains a `+` character. None of the CLI commands need to.
+- **`stdio: "pipe"`** captures stdout and stderr into the parent process's buffers. You do not see the CLI's output in your terminal in real time during a test run; you see it after the fact in `output` (returned on success) or in the error envelope (on failure).
+- **`env: process.env`** is critical. The spawned child inherits the parent's environment — including `SPECULOS_API_PORT` (set by `launchSpeculos`) and `DISABLE_TRANSACTION_BROADCAST` (toggled by `setDisableTransactionBroadcastEnv`). This is how Layer 5 communicates with Layer 1: not through arguments, but through environment variables that travel down through the spawn.
+- **The error envelope is a multi-line, emoji-flagged Markdown-ish block.** It is designed to be copy-pasted into a Jira ticket or Slack message verbatim. The currency, the index, the exit code, and the trimmed stderr are all there in one rectangle. When you triage a flake, you do not need to reconstruct context — Layer 2 has done it for you.
 
-In DevTools, click the line gutter of `commands/balances.ts` and right-click the breakpoint marker to add a condition. For example, in the `balances` handler, break only when an EVM account is being queried:
+The retry wrapper:
 
-```javascript
-descriptor.currencyId === "ethereum"
+```ts
+export async function runCliCommandWithRetry(
+  command: string,
+  retries: number = 3,
+  delayMs: number = 3000,
+): Promise<string> {
+  let lastError: Error | null = null;
+  const currency = parseCliFlag(command, "currency");
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await runCliCommand(command);
+    } catch (err: unknown) {
+      lastError = err instanceof Error ? err : new Error(String(err));
+      const willRetry = attempt < retries && isRetryableError(lastError.message);
+
+      if (!willRetry) {
+        throw sanitizeError(lastError);
+      }
+
+      console.warn(
+        `⚠️ CLI attempt ${attempt}/${retries}${currency ? ` for ${currency}` : ""} failed with retryable error – retrying in ${delayMs}ms…`,
+        lastError.message,
+      );
+
+      await sleep(delayMs);
+    }
+  }
+
+  throw sanitizeError(lastError!);
+}
 ```
 
-**The `dbg` skill alternative:** the global `dbg` skill (`~/.claude/skills/dbg/SKILL.md`) wraps the same protocol with a CLI you can drive from inside an agent context. Useful when you want repeatable scripted breakpoints.
+Three retries, three-second delay between attempts, only retryable errors bounce back into the loop. Every typed wrapper in Layer 3 calls `runCliCommandWithRetry`, never `runCliCommand` directly — so by default every CLI invocation in the test suite gets up to three tries against transient network or Speculos issues. Non-retryable errors (a malformed argument, a missing account, a `BigNumber` parse error) fail fast on the first attempt.
 
-```bash
-dbg launch --brk bun ./src/cli.ts balances <descriptor>
-dbg break src/wallet/index.ts:42
-dbg state
-dbg continue
+#### The public engine helpers
+
+| Helper | CLI command produced | Caller |
+|---|---|---|
+| `runCliLiveData(opts)` | `liveData --currency X --index N [--scheme M] --add --appjson <path>` | `liveDataCommand` (Layer 3) |
+| `runCliGetAddress(opts)` | `getAddress --currency X --path m/... --derivationMode M [--verify]` | `getAccountAddress` (Layer 3) |
+| `runCliTokenApproval(opts)` | `send --currency X --mode approve\|revokeApproval --token Y --spender Z --index N [--approveAmount N] [--wait-confirmation]` | `approveTokenCommand`, `revokeTokenCommand` (Layer 3) |
+| `runCliGetTokenAllowance(opts)` | `tokenAllowance --currency X --token Y --spender Z --index N [--format json] --ownerAddress 0x...` | `isTokenAllowanceSufficientCommand` (Layer 3) |
+
+One verbatim, so you can see the pattern:
+
+```ts
+export function runCliTokenApproval(opts: TokenApprovalOpts): Promise<string> {
+  const cliOpts = ["send"];
+  cliOpts.push(`--currency+${opts.currency}`);
+  cliOpts.push(`--mode+${opts.mode}`);
+  cliOpts.push(`--token+${opts.token}`);
+  cliOpts.push(`--spender+${opts.spender}`);
+  cliOpts.push(`--index+${opts.index}`);
+  if (opts.approveAmount) cliOpts.push(`--approveAmount+${opts.approveAmount}`);
+  if (opts.waitConfirmation) cliOpts.push("--wait-confirmation");
+  return runCliCommandWithRetry(cliOpts.join("+"));
+}
 ```
 
-`dbg` exposes the same V8/CDP machinery Bun's debugger uses. Pick whichever interface (visual DevTools or CLI) you prefer — they connect to the same underlying inspector.
+The `TokenApprovalOpts` type is defined at the top of the file:
 
-> **Caveat:** `--inspect` only works on the `bun run` path, not on the standalone binary produced by `bunli build`. If you need to debug a `dist/wallet-cli` binary, you have to rebuild without `--minify` and even then symbol fidelity is reduced. Always debug from source.
-
-### 5.5.9 Iterating on a single command
-
-When you're authoring a new command (the QAA-615 `revoke` spike, for instance), edit-save-rerun is your inner loop. Three tools help:
-
-**`pnpm dev` — Bunli dev mode with hot reload:**
-
-```bash
-cd apps/wallet-cli
-pnpm dev
+```ts
+export type TokenApprovalOpts = {
+  currency: string;
+  index: number;
+  spender: string;
+  approveAmount?: string;
+  token: string;
+  waitConfirmation?: boolean;
+  mode: "revokeApproval" | "approve";
+};
 ```
 
-This expands to `bunli dev`. It boots the CLI under a watcher; saving any file under `src/commands/` regenerates `.bunli/commands.gen.ts` in-memory and reloads. Useful when you're shaping option schemas and want fast feedback on the `--help` rendering.
+`mode: "revokeApproval" | "approve"` is the discriminated union that selects between the two flows. This is the type-level guarantee that you cannot pass `mode: "transferTo"` or `mode: ""` and have it silently produce a malformed command — TypeScript stops you at the call site.
 
-**`bun --watch` — re-run on save:**
+### 5.4.4 Layer 3 — `cliCommandsUtils.ts`, Typed Wrappers
 
-```bash
-cd apps/wallet-cli
-bun --watch run ./src/cli.ts balances <descriptor> --output json | jq '.balances[0]'
+Layer 3 lives in `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`. This is the file QA engineers extend most often. It exports:
+
+| Helper | Inputs | Returns | Used by |
+|---|---|---|---|
+| `getAccountAddress(account)` | `Account \| TokenAccount` | `Promise<string>` (also writes to `account.address`) | Every spec needing the device-derived address |
+| `liveDataCommand(account, options?)` | account + options | curried `(userdataPath?) => Promise<void>` | Desktop fixture `cliCommands: [...]` |
+| `liveDataWithAddressCommand(account, options?)` | same | curried, also caches address | When a spec needs both seed + address |
+| `liveDataWithParentAddressCommand(parent, child)` | parent + child token | curried | Token account address resolution |
+| `liveDataWithRecipientAddressCommand(tx, options?)` | a `Transaction` | curried | Send-flow specs |
+| `parseTokenAllowanceCliOutput(output)` | CLI stdout | `{ allowanceStr, unitMagnitude }` | Internal parser |
+| `isTokenAllowanceSufficientCommand(account, spender, minAmount)` | TokenAccount, spender, min | allowance string if ≥ min, else `0` | `ensureTokenApproval` (Layer 5) |
+| `approveTokenCommand(account, spender, approveAmount)` | TokenAccount, spender, amount | CLI stdout | Sets allowance, broadcast on |
+| **`revokeTokenCommand(account, spender)` (NEW)** | TokenAccount, spender | CLI stdout | Clears allowance to 0, broadcast on |
+| `setDisableTransactionBroadcastEnv(value)` | `string \| undefined` | previous env value | Broadcast env management |
+
+Let us look at four of these verbatim to see the patterns.
+
+#### `getAccountAddress` — read once, cache on the account
+
+```ts
+export const getAccountAddress = async (account: Account | TokenAccount): Promise<string> => {
+  if (account.currency.id === Currency.HBAR.id) {
+    invariant(account.address, "hedera: account address must be pre-set");
+    return account.address;
+  }
+
+  const { address } = await runCliGetAddress({
+    currency: account.currency.speculosApp.name,
+    path: account.accountPath,
+    derivationMode: account.derivationMode,
+  });
+
+  account.address = address;
+  return address;
+};
 ```
 
-`--watch` re-spawns the CLI on every save under the watched directory. Pair with `jq` for the inner-loop equivalent of "edit code -> see result". Note that `--watch` re-runs the whole command from scratch each time, so device-required runs would re-enter the PIN+app handshake — use `--watch` for `--dry-run` or no-device commands.
+Two patterns to notice. First, **the Hedera special case is hard-coded**. HBAR accounts derive their address differently — the test suite pre-sets `account.address` from a fixture, and `getAccountAddress` honours that. If you ever need to add a similar special case, this is the canonical place. Second, **the call mutates the input.** `account.address = address` writes the resolved address back onto the account object so subsequent code can read `account.address` without re-running the CLI. It is the classic "memoise on the parameter" trick.
 
-**`pnpm run start` — explicit no-watcher run:**
+#### `liveDataCommand` — the curried-function pattern
 
-```bash
-cd apps/wallet-cli
-pnpm start -- balances <descriptor>
+```ts
+export const liveDataCommand =
+  (account: Account | TokenAccount, options?: LiveDataCommandOptions) =>
+  async (userdataPath?: string) => {
+    await runCliLiveData({
+      currency: options?.currency ?? account.currency.speculosApp.name,
+      index: account.index,
+      ...(options?.useScheme && account.derivationMode ? { scheme: account.derivationMode } : {}),
+      add: true,
+      appjson: userdataPath,
+    });
+  };
 ```
 
-This is the canonical "I just want to run it once" form. It shells out to `bun run ./src/cli.ts`, no watcher.
+This is the curried-function pattern that powers the desktop fixture engine. Notice the shape: `liveDataCommand` takes an `account` and returns *another function* that takes a `userdataPath`. When a spec writes:
 
-A realistic tight loop when adding a new flag to `send`:
-
-```bash
-# Terminal 1: edit src/commands/send.ts
-$EDITOR src/commands/send.ts
-
-# Terminal 2: re-run on save against a dry-run case
-bun --watch run ./src/cli.ts send <descriptor> \
-  --to 0xDEF... --amount '0.1 ETH' --dry-run --output json \
-  | jq '.dry_run, .recipient, .amount'
+```ts
+test.use({
+  cliCommands: [liveDataCommand(account)],
+});
 ```
 
-Save the file in Terminal 1; Terminal 2 re-runs in <1s and the JSON drops out. No device involvement.
+…it is passing the partially-applied function — bound to `account` but waiting for the userdata path — into the fixture. The Playwright fixture engine, at the right point in the lifecycle, calls each entry in `cliCommands` with the test's userdata path. The currying lets the spec author specify the *what* (which account) at test definition time, while the fixture engine supplies the *where* (which userdata file) at runtime. Without currying, the spec author would have to thread the userdata path through every fixture by hand.
 
-> **Tip:** Whenever you add or remove a command file under `src/commands/`, run `pnpm generate` to regenerate `.bunli/commands.gen.ts`. The CI gate `pnpm generate:check` (which runs in PR validation) will fail your PR if you forgot, with a `git diff --exit-code` failure on the generated file. Always commit the regenerated `.bunli/commands.gen.ts` alongside your command.
+The mobile workspace consumes the same helper but bypasses the curry: `e2e/mobile/jest.environment.ts` line 138 does `Object.assign(this.global, cliCommandsUtils)` so every helper becomes a global, and mobile specs call `await liveDataCommand(account)(userdataPath)` directly — manually applying both arguments.
 
-### 5.5.10 Reading help
+#### `isTokenAllowanceSufficientCommand` — the pre-check
 
-Every Bunli `defineCommand` carries a `description` plus per-flag `description` strings. These are auto-rendered by Bunli's `--help`:
+```ts
+export const isTokenAllowanceSufficientCommand = async (
+  account: TokenAccount,
+  spenderAddress: string,
+  minAmount: string,
+) => {
+  const ownerAddress = account.parentAccount?.address ?? account.address;
+  if (!ownerAddress) throw new Error("Token allowance check requires the main account address");
 
-**Top-level help:**
+  const output = await runCliGetTokenAllowance({
+    currency: account.currency.speculosApp.name,
+    token: account.currency.id,
+    spenderAddress,
+    index: account.index,
+    format: "json",
+    ownerAddress,
+  });
 
-```bash
-pnpm --silent wallet-cli start -- --help
+  const { allowanceStr, unitMagnitude } = parseTokenAllowanceCliOutput(output);
+
+  const smallestUnit = { name: "smallest", code: "", magnitude: unitMagnitude } as const;
+  const minInSmallestUnit = parseCurrencyUnit(smallestUnit, minAmount);
+  const minStr = minInSmallestUnit.toFixed(0);
+
+  const allowanceBi = BigInt(allowanceStr);
+  const minBi = BigInt(minStr);
+  if (allowanceBi >= minBi) return allowanceStr;
+  return 0;
+};
 ```
 
-Lists every group (`account`, `session`) and every leaf command (`balances`, `operations`, `receive`, `send`).
+This is the read-side wrapper for `tokenAllowance`. It does three things `runCliGetTokenAllowance` cannot do alone:
 
-**Group help:**
+1. **Resolves the owner address.** A `TokenAccount` does not carry its own owner address — the underlying ETH account does. The line `account.parentAccount?.address ?? account.address` reaches up to the parent for ERC-20 token accounts, falling back to the account's own address if no parent is present.
+2. **Parses the JSON output.** `parseTokenAllowanceCliOutput` extracts `{ allowanceStr, unitMagnitude }` from the CLI's JSON stdout. The CLI returns the raw allowance in the token's smallest units; the unit magnitude lets the caller know how many decimals to apply.
+3. **Compares as BigInts.** The min amount comes in as a human-readable string (e.g. `"100"` USDC). It gets multiplied through `parseCurrencyUnit` into the same smallest-unit representation as the allowance, then both go through `BigInt(...)` for an exact comparison. JavaScript `Number` arithmetic would lose precision on values larger than 2^53.
 
-```bash
-pnpm --silent wallet-cli start -- account --help
-pnpm --silent wallet-cli start -- session --help
+The return contract is a tiny piece of API design: the function returns `allowanceStr` (a non-empty string) when the allowance is sufficient, and the literal `0` when it is not. Truthiness is the test: `if (currentAllowance) return;` in the POM (Layer 5) skips the device dance when allowance is already enough. Returning the string instead of `true` lets the caller log the actual allowance value if it wants to.
+
+#### `approveTokenCommand` and the new `revokeTokenCommand`
+
+These are the two wrappers that drive the device. First the existing one:
+
+```ts
+export const approveTokenCommand = async (
+  account: TokenAccount,
+  spender: string,
+  approveAmount: string,
+) => {
+  const original = setDisableTransactionBroadcastEnv("0");
+
+  const result = runCliTokenApproval({
+    currency: account.currency.speculosApp.name,
+    index: account.index,
+    spender,
+    token: account.currency.id,
+    mode: "approve",
+    approveAmount,
+    waitConfirmation: true,
+  });
+
+  try {
+    await approveToken();
+  } finally {
+    setDisableTransactionBroadcastEnv(original);
+  }
+  return await result;
+};
 ```
 
-Lists subcommands within the group.
+Now the new one from the senior's commit, verbatim:
 
-**Leaf command help:**
+```ts
+export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
+  const original = setDisableTransactionBroadcastEnv("0");
 
-```bash
-pnpm --silent wallet-cli start -- send --help
-pnpm --silent wallet-cli start -- balances --help
-pnpm --silent wallet-cli start -- account discover --help
+  const result = runCliTokenApproval({
+    currency: account.currency.speculosApp.name,
+    index: account.index,
+    spender,
+    token: account.currency.id,
+    mode: "revokeApproval",
+    waitConfirmation: true,
+  });
+
+  try {
+    await approveToken();
+  } finally {
+    setDisableTransactionBroadcastEnv(original);
+  }
+  return await result;
+};
 ```
 
-Each prints flags, descriptions, defaults, and required-vs-optional. The `description` strings are pulled directly from `option(z.…(), { description: "…" })` calls in the command source and from the shared option helpers in `commands/inputs.ts`.
+Side-by-side these two helpers tell the whole story. They differ in exactly two places: the `mode` (`"approve"` vs `"revokeApproval"`) and the absence of `approveAmount` in the revoke (because revoke is `approve(spender, 0)` — there is no amount to set). Everything else — the env flip, the parallel `approveToken()` device tap, the try/finally restore — is identical.
 
-> **Tip:** When `SKILL.md` and the source disagree on a flag, **trust the source** and rerun `--help`. Bunli help is generated from the live Zod schemas at runtime, so it cannot drift the way a hand-written doc can. `SKILL.md` lags reality by definition; `--help` is reality.
+The control flow is worth stepping through carefully because it is the one piece of multi-track logic you must understand to debug these helpers:
 
-A worked example:
+1. **`setDisableTransactionBroadcastEnv("0")` flips the env to broadcast-on.** It returns the previous value, captured in `original`. If broadcast was already on, `original` is `"0"`; if it was off (`"1"`), `original` is `"1"`; if it was unset, `original` is `undefined`. The helper restores that exact original at the end. Chapter 5.6 covers why broadcast must be on for this command and off for most others.
+2. **`runCliTokenApproval(...)` is called *without* `await`.** It returns a `Promise<string>` that is held in the `result` variable. The CLI subprocess is now spawned and running in parallel — sitting in `bridge.signOperation(...)`, waiting for the device to confirm the transaction.
+3. **`await approveToken()` is the device tap.** While the CLI subprocess is blocked waiting for the device, this helper *is* the device. It drives Speculos's REST API to walk through the review screens and press the buttons. Layer 4 covers the screen primitives in detail. The crucial point here is the parallelism: the CLI and the device tap are two cooperating coroutines, neither one finishing without the other.
+4. **The `try/finally` guarantees env restoration.** If `approveToken()` throws (a screen never appears, a button press fails, Speculos times out), the `finally` block still runs and `setDisableTransactionBroadcastEnv(original)` puts the env back. Without this discipline, a single failed test would mutate `process.env` for the rest of the run, silently flipping broadcast for every subsequent CLI call. Chapter 5.6 has the full discipline section.
+5. **`return await result;`** awaits the CLI subprocess's resolution. By this point the device tap has sent the buttons that confirm the signature; the CLI has built the signed transaction, called `bridge.broadcast(...)`, waited for the on-chain confirmation (because `waitConfirmation: true`), and resolved with its stdout. The stdout is a multi-line block ending with the broadcast operation hash, which the POM passes into Allure for traceability.
 
-```bash
-$ pnpm --silent wallet-cli start -- send --help
+The `setDisableTransactionBroadcastEnv` helper itself is a few lines at the bottom of the file:
 
-Usage: wallet-cli send [options]
+```ts
+const ENV_KEY = "DISABLE_TRANSACTION_BROADCAST";
 
-Options:
-  --account, -a <string>      Account descriptor or session label (e.g. ethereum-1)...
-  --to, -t <address>          Recipient address (required)
-  --amount <"V TICKER">       e.g. '0.001 BTC', '0.01 ETH', '0.4 USDT' (required)
-  --fee-per-byte <satoshis>   Custom fee per byte (bitcoin only)
-  --rbf                       Enable Replace-By-Fee (bitcoin only)
-  --mode <mode>               Solana mode: send | stake.createAccount | stake.delegate | ...
-  --validator <address>       Validator address (Solana staking)
-  --stake-account <address>   Stake account address (Solana staking)
-  --memo <text>               Memo/tag (Solana)
-  --data <0x...>              EVM raw calldata as 0x-hex
-  --dry-run                   Prepare and validate without signing or opening the device
-  --output <human|json>       Output format (default: human)
-  -h, --help                  display help for command
+export function setDisableTransactionBroadcastEnv(value: string | undefined): string | undefined {
+  const previous = process.env[ENV_KEY];
+  if (value === undefined) {
+    delete process.env[ENV_KEY];
+  } else {
+    process.env[ENV_KEY] = value;
+  }
+  return previous;
+}
 ```
 
-The `--data` flag is the fact that unlocked the QAA-615 spike: EVM raw calldata is already plumbed end-to-end. A `revoke` subcommand would just be a wrapper that builds `0x095ea7b3<spender_padded>0000…0` and hands off to `send`.
+Three rules: read the previous value, set the new value (or `delete` it if `undefined` was passed), return the previous. The "return the previous" contract is the foundation of the try/finally restore pattern — without it, you would have to read the env *before* calling the helper and pass it in, which is a footgun.
 
-### 5.5.11 The sandbox trap
+> See Chapter 5.6 for the broadcast discipline in depth: when broadcast is on, when it is off, why the default is off, and the full set of read sites and set sites.
 
-If you're driving the CLI from inside an agent (Claude Code, Cursor, an automation pipeline using a sandboxed Bash tool), there is exactly one thing to remember:
+### 5.4.5 Layer 4 — `families/evm.ts`, Device-Tap Automation
 
-> **Device-required commands need the sandbox disabled. Non-device commands do not.**
+Layer 4 lives in `libs/ledger-live-common/src/e2e/families/evm.ts`. This is where Speculos is *driven*: the layer above (Layer 3) has spawned a CLI subprocess that is now blocked waiting for the device to confirm a transaction; this layer is the user, walking through the review screens and pressing the buttons.
 
-Concretely, when an agent invokes a Bash tool to run a wallet-cli command, the tool call has a `dangerouslyDisableSandbox` parameter. The decision rule is the device-required column from 5.5.4:
+#### The screen primitives
 
-| Command                                  | `dangerouslyDisableSandbox` |
-| ---------------------------------------- | --------------------------- |
-| `account discover <network>`             | **true** |
-| `receive <descriptor>`                   | **true** |
-| `receive <descriptor> --no-verify`       | false (no device) |
-| `send <descriptor> ... `                 | **true** |
-| `send <descriptor> ... --dry-run`        | false (no device) |
-| `balances <descriptor>`                  | false |
-| `operations <descriptor>`                | false |
-| `account fresh-address` (EVM/Solana)     | false |
-| `session view` / `session reset`         | false |
+Imported at the top of `evm.ts`:
 
-Why this matters: the sandbox blocks USB ioctls. A device-required command spends ~30s opening the USB transport, then **silently times out** with `Timeout has occurred`. The error is genuinely confusing — it doesn't say "sandbox" anywhere. It looks identical to a flaky USB cable. The first time you hit it, you'll spend 10 minutes re-plugging cables before remembering the rule.
+```ts
+import {
+  containsSubstringInEvent,
+  fetchCurrentScreenTexts,
+  waitForReviewTransaction,
+  pressUntilTextFound,
+  waitFor,
+} from "../speculos";
+import { getSpeculosModel, isTouchDevice } from "../speculosAppVersion";
+import {
+  longPressAndRelease,
+  pressAndRelease,
+  swipeRight,
+} from "../deviceInteraction/TouchDeviceSimulator";
+import { DeviceLabels } from "../enum/DeviceLabels";
+import { withDeviceController } from "../deviceInteraction/DeviceController";
+```
 
-Plain shell users (you, in Terminal.app, running `pnpm wallet-cli start ...`) never hit this. The sandbox is only a thing when an agent harness is mediating the call.
+The primitives:
 
-> **Citation:** This rule is documented in `SKILL.md` (line 20) and is the single most common pitfall the skill warns against. Read it once, internalize it, never forget.
+- **`waitFor(label)`** — block until the given screen-text label appears on the Speculos display. Polls the Speculos REST API. Times out after the suite-level timeout if the label never appears.
+- **`waitForReviewTransaction()`** — sugar for `waitFor("Review transaction")` (or the touch-device equivalent). Used at the start of the device tap to confirm the CLI has reached the signing prompt.
+- **`pressUntilTextFound(label)`** — repeatedly press the right button (button device) or scroll right (touch device) until the given label appears. Returns the array of screen-text events seen along the way; this array is what `validateTransactionData` later checks for amount, recipient, and ENS-name correctness.
+- **`pressAndRelease(direction, x, y)`** — simulate a single button or touch press at the given coordinates.
+- **`longPressAndRelease(label, seconds)`** — hold to sign on touch devices. Used when the final screen demands a multi-second hold.
+- **`fetchCurrentScreenTexts(port)`** — pull the current screen text from Speculos's REST API. Used for read-only screen inspection.
+- **`withDeviceController(fn)`** — DI wrapper that provides a `getButtonsController()` to the inner function. The buttons controller exposes `.both()`, `.left()`, `.right()` for explicit button presses on Nano S/X/S+.
+- **`DeviceLabels.*`** — a shared registry of screen-text constants (`REVIEW_TRANSACTION_TO`, `SIGN_TRANSACTION`, `HOLD_TO_SIGN`, `ACCEPT`). Touch and button devices use the same logical label keys but the actual on-device strings may differ; the enum centralises that mapping.
 
-### 5.5.12 Chapter 5.5 Quiz
+#### `approveToken` — the public entry point
+
+```ts
+export async function approveToken() {
+  if (isTouchDevice()) {
+    return approveTokenTouchDevices();
+  }
+  return approveTokenButtonDevice();
+}
+```
+
+Three lines. The branch is on `isTouchDevice()`, which reads the current Speculos device model (from the env-configured firmware) and returns `true` for Stax and Flex, `false` for Nano S, X, and S+. The two implementations share the same logical flow but use different physical interactions.
+
+#### `approveTokenTouchDevices` — Stax and Flex
+
+```ts
+export async function approveTokenTouchDevices() {
+  await waitForReviewTransaction();
+  await pressUntilTextFound(DeviceLabels.HOLD_TO_SIGN);
+  await longPressAndRelease(DeviceLabels.HOLD_TO_SIGN, 3);
+}
+```
+
+Three steps: wait for the review screen, scroll until the "Hold to sign" prompt appears, then perform a 3-second hold to confirm. The hold duration is hard-coded to 3 seconds — if Stax firmware ever changes that requirement, this is the constant to update.
+
+#### `approveTokenButtonDevice` — Nano S/X/S+
+
+```ts
+export const approveTokenButtonDevice = withDeviceController(
+  ({ getButtonsController }) =>
+    async () => {
+      await waitFor(DeviceLabels.REVIEW_TRANSACTION_TO);
+      await pressUntilTextFound(DeviceLabels.SIGN_TRANSACTION);
+      await getButtonsController().both();
+    },
+);
+```
+
+The structure mirrors the touch-device variant but uses button presses. `withDeviceController` is the DI wrapper that provides `getButtonsController()`. The flow is:
+
+1. **`waitFor(DeviceLabels.REVIEW_TRANSACTION_TO)`** — block until the device renders "Review transaction To" (the recipient screen).
+2. **`pressUntilTextFound(DeviceLabels.SIGN_TRANSACTION)`** — press the right button repeatedly to advance through the review screens (recipient, amount, fees, contract data, etc.) until "Sign transaction" appears.
+3. **`getButtonsController().both()`** — press both buttons simultaneously to confirm.
+
+Note that `approveTokenTouchDevices` is exported as a regular `async function` while `approveTokenButtonDevice` is a `withDeviceController(...)`-wrapped value. The shape is different because the touch variant does not need the buttons controller; touch interactions go through `longPressAndRelease` which uses Speculos's touch endpoint, not the button endpoint. The DI wrapper is the cleanest way to opt in to the buttons controller only on the button-device branch.
+
+#### Parallelism — the moving parts
+
+The diagram everyone needs to internalise is this:
+
+```
+TIME ──────────────────────────────────────────────────────────────────►
+
+CLI subprocess (Layer 1):    spawn → signOperation → [block on device] → broadcast → confirm
+                                                          ▲                ▲
+                                                          │                │
+                                                          │  (APDU)        │  (broadcast result)
+                                                          │                │
+Device tap (Layer 4):                            waitFor → press → press → both()
+                                                 (drives Speculos REST API in parallel)
+```
+
+The CLI subprocess and the device tap are two coroutines running in the same Node process. The CLI's subprocess (Layer 1) is the one calling `bridge.signOperation(...)`, which under the hood opens an APDU transport to Speculos and waits for the device to respond with a signed payload. The device tap (Layer 4) is the one calling Speculos's REST API to render screens and press buttons. They communicate through Speculos itself — the device — not through any direct JavaScript wiring.
+
+Critically, both must complete for the whole thing to succeed. If the device tap finishes early (because the screen labels are wrong and `pressUntilTextFound` returns prematurely), the CLI still hangs waiting for an APDU response. If the CLI fails early (an invalid argument, a missing token), the device tap will hang waiting for a screen that never renders. The `waitConfirmation: true` flag on `runCliTokenApproval` plus the suite-level timeouts on `waitFor` are the fail-safes that prevent the test from hanging forever.
+
+### 5.4.6 Layer 5 — POM Methods
+
+Layer 5 is where you live. The two POM methods that orchestrate everything below are `ensureTokenApproval` and the new `revokeTokenApproval`, both in `e2e/desktop/tests/page/swap.page.ts`. Verbatim from the file as it stands on the senior's branch:
+
+```ts
+@step("Ensure token approval")
+async ensureTokenApproval(
+  fromAccount: Account | TokenAccount,
+  provider: Provider,
+  minAmount: string,
+) {
+  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+
+  const currentAllowance = await isTokenAllowanceSufficientCommand(
+    fromAccount,
+    provider.contractAddress,
+    minAmount,
+  );
+  console.log("CLI result: Current Allowance: ", currentAllowance);
+  if (currentAllowance) return;
+
+  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+  try {
+    const result = await approveTokenCommand(
+      fromAccount,
+      provider.contractAddress,
+      new BigNumber(minAmount).times(12).div(10).toFixed(),
+    );
+    await allure.description(`Token approval result for ${provider.uiName}:\n\n ${result}`);
+  } finally {
+    await cleanSpeculos(speculos, previousSpeculosPort);
+  }
+}
+
+@step("Ensure token approval")
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+
+  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+  try {
+    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
+  } finally {
+    await cleanSpeculos(speculos, previousSpeculosPort);
+  }
+}
+```
+
+A few observations.
+
+The `@step("Ensure token approval")` decorator on `revokeTokenApproval` is a copy-paste bug that the senior left behind for code review — the final PR should change it to `@step("Revoke token approval")`. The `step` decorator publishes the method name into the Allure timeline so reviewers can see "this test entered the revoke step at 14:23:01" in the report. Two methods reporting the same step name will collide visually in the timeline.
+
+The two methods share a common structure that is worth naming explicitly — the **"snapshot the port, launch a fresh Speculos, run a CLI command, restore"** pattern:
+
+1. **Guard.** `if (!provider.contractAddress || !fromAccount.parentAccount) return;` — bail early for native-asset providers (no contract address) and non-token accounts. This is the cheap escape hatch that lets the same POM method be called for every provider in a parameterised test, without the caller having to filter.
+2. **Snapshot.** `const previousSpeculosPort = getEnv("SPECULOS_API_PORT");` — capture the current Speculos port. The test may already have a Speculos instance running (the Exchange app for the swap UI flow). We are about to launch a *different* Speculos instance (the Ethereum app for the approve/revoke transaction). Restoring the port at the end lets the swap UI code resume against its original Exchange-app Speculos.
+3. **Launch.** `const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);` — start a new Speculos for the token's chain (e.g. Ethereum for USDC). This call sets `SPECULOS_API_PORT` to the new instance's port and registers the HTTP transport so the CLI subprocess can connect. Chapter 5.5 covers the full lifecycle.
+4. **Act.** Inside the try, the CLI helper runs (`approveTokenCommand` or `revokeTokenCommand`), which spawns the CLI subprocess and concurrently drives the device tap. The result string goes into Allure for traceability.
+5. **Restore.** `await cleanSpeculos(speculos, previousSpeculosPort);` in the `finally` — stop the new Speculos, unregister its transport, and reset `SPECULOS_API_PORT` to the original. Even on throw, this runs.
+
+The differences between the two methods are exactly the differences in semantics:
+
+- **`ensureTokenApproval` does a pre-check.** Calling `isTokenAllowanceSufficientCommand` before launching Speculos avoids the entire device dance when the allowance is already enough — a major speedup in re-runs. `revokeTokenApproval` does not pre-check because revoking an already-zero allowance is a no-op gas-wise, and the test author wants the deterministic "after this method, allowance is zero" guarantee.
+- **`ensureTokenApproval` applies a 1.2x slippage buffer.** `new BigNumber(minAmount).times(12).div(10).toFixed()` multiplies the minimum amount by 1.2 before passing it to `approveTokenCommand`, so the approved allowance leaves headroom for swap-rate fluctuations between the time the test approves and the time it executes. `revokeTokenApproval` has no such math because revoke always sets to zero.
+
+Layer 5 is the integration point. From the perspective of a layer-5 author, the entire stack below collapses into "two helpers, one Speculos lifecycle, one Allure description." That is the abstraction the four lower layers were designed to provide.
+
+### 5.4.7 The End-to-End Trace
+
+When a desktop swap spec calls `await app.swap.revokeTokenApproval(account, provider)`, here is the complete sequence of events. Read it once with the layer numbers to anchor each step in the file you would open to debug it:
+
+```
+1. POM (Layer 5):  getEnv("SPECULOS_API_PORT")  → save previous port
+                   (the Exchange-app Speculos already running for the swap UI)
+
+2. POM (Layer 5):  launchSpeculos(currency.speculosApp.name)  → starts Ethereum-app Speculos
+                   ↳ utils/speculosUtils.ts (Chapter 5.5)
+                       ↳ startSpeculos(testTitle, specs[appName], previousPort)
+                           ↳ Docker container OR remote pool (REMOTE_SPECULOS=true)
+                       ↳ setEnv("SPECULOS_API_PORT", device.port)
+                       ↳ process.env.SPECULOS_API_PORT = String(device.port)
+                       ↳ CLI.registerSpeculosTransport(port, getSpeculosAddress())
+                       ↳ allure.description("SPECULOS\n" + appInfo)
+
+3. POM (Layer 5):  await revokeTokenCommand(account, spender)
+                   ↳ Layer 3: setDisableTransactionBroadcastEnv("0")  → returns original
+                   ↳ Layer 3: runCliTokenApproval({
+                                 currency: "ethereum",
+                                 mode: "revokeApproval",
+                                 token: "ethereum/erc20/usd_coin",
+                                 spender: "0xRouter",
+                                 index: 0,
+                                 waitConfirmation: true,
+                               })  → returns Promise<string> (NOT awaited yet)
+                       ↳ Layer 2: runCliCommandWithRetry(joined-command-string)
+                           ↳ Layer 2: spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])
+                               ↳ Layer 1: apps/cli/bin/index.js parses argv
+                               ↳ Layer 1: dispatches to send.ts
+                               ↳ Layer 1: scan(account) + inferTransactions(mode=revokeApproval)
+                               ↳ Layer 1: bridge.signOperation(...) — waits for device APDU
+                                          (subprocess is now blocked here)
+                   ↳ Layer 3: await approveToken()  ← runs in parallel with the subprocess
+                       ↳ Layer 4: isTouchDevice() → false (assume Nano X)
+                       ↳ Layer 4: approveTokenButtonDevice()
+                           ↳ Layer 4: waitFor(REVIEW_TRANSACTION_TO)
+                           ↳ Layer 4: pressUntilTextFound(SIGN_TRANSACTION)
+                           ↳ Layer 4: getButtonsController().both()
+                       ↳ device confirms → APDU response sent to CLI subprocess
+                   ↳ Layer 1: subprocess unblocks, builds + signs tx
+                   ↳ Layer 1: broadcast gate: DISABLE_TRANSACTION_BROADCAST="0" → broadcast runs
+                   ↳ Layer 1: bridge.broadcast({ account, signedOperation })
+                   ↳ Layer 1: waitForTransactionConfirmation (because --wait-confirmation)
+                   ↳ Layer 1: subprocess writes result to stdout, exits 0
+                   ↳ Layer 2: runCliCommand resolves with output string
+                   ↳ Layer 3: finally → setDisableTransactionBroadcastEnv(original)
+                   ↳ Layer 3: return await result;  → the CLI stdout
+
+4. POM (Layer 5):  allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`)
+
+5. POM (Layer 5):  finally → cleanSpeculos(speculos, previousSpeculosPort)
+                   ↳ stopSpeculos(device.id)
+                   ↳ unregisterTransportModule("speculos-http-" + port)
+                   ↳ setEnv("SPECULOS_API_PORT", previousPort)  → restore Exchange-app port
+                   ↳ process.env.SPECULOS_API_PORT = String(previousPort)
+```
+
+Sixteen distinct things happen between the spec's one-liner and the test moving on. The reason to read this trace once with the layers attached is that, when something goes wrong, the failure mode usually points at a specific layer — and the first move is to open that layer's file.
+
+A tour of the common failure shapes:
+
+- **"Cannot find module .../apps/cli/bin/index.js"** → Layer 1 not built. Run `pnpm --filter @ledgerhq/live-cli build`.
+- **"❌ Failed to execute CLI command ... Exit Code: 1"** → Layer 1 returned non-zero. Read the `🧾 CLI Error` line in the envelope to see what the CLI itself logged.
+- **"⚠️ CLI attempt 1/3 ... retrying in 3000ms"** → Layer 2 retry policy fired. Transient. If it happens 3 times, the underlying error is no longer transient.
+- **"REVIEW_TRANSACTION_TO not found within timeout"** → Layer 4 device tap could not find a screen label. Either the device firmware changed (label drift), the CLI subprocess never reached the signing screen (a Layer 1 problem), or `SPECULOS_API_PORT` is pointing at the wrong device (a Layer 5 / Chapter 5.5 problem).
+- **"Speculos not started"** → Layer 5 / Chapter 5.5. `startSpeculos` could not boot a container. Local Docker issue, or remote pool exhaustion.
+- **The test passes but the next test runs against the wrong env** → `setDisableTransactionBroadcastEnv` did not restore. Almost always means a try/finally was forgotten in a new helper. Chapter 5.6.
+
+### 5.4.8 Where the Layers Are Imported From
+
+The layer-3 helpers are the single point of contact between specs and the CLI. Here is the catalogue of how they are consumed across the desktop test workspace today, which should anchor any new helper you add in real usage patterns:
+
+| Spec | Helpers imported |
+|---|---|
+| `tests/page/swap.page.ts` | `approveTokenCommand`, `isTokenAllowanceSufficientCommand`, `revokeTokenCommand` |
+| `tests/specs/earn.v2.spec.ts` | `liveDataCommand`, `liveDataWithAddressCommand` |
+| `tests/specs/newSendFlow.tx.spec.ts` | `liveDataWithRecipientAddressCommand` |
+| `tests/specs/receive.address.spec.ts` | `liveDataCommand` |
+| `tests/specs/validation.swap.spec.ts` | `liveDataWithAddressCommand` |
+| `tests/specs/earn.spec.ts` | `liveDataCommand`, `liveDataWithAddressCommand` |
+| `tests/specs/rename.account.spec.ts` | `liveDataCommand` |
+| `tests/specs/delete.account.spec.ts` | `liveDataCommand` |
+| `tests/specs/settings.spec.ts` | `liveDataCommand` |
+| `tests/specs/delegate.spec.ts` | `liveDataCommand` |
+| `tests/specs/entrypoint.swap.spec.ts` | `liveDataWithAddressCommand` |
+| `tests/specs/accounts.swap.spec.ts` | `liveDataWithAddressCommand` |
+| `tests/specs/subAccount.spec.ts` | `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithParentAddressCommand` |
+| `tests/specs/buySell.spec.ts` | `liveDataCommand` |
+| `tests/specs/activate.private.balance.spec.ts` | `liveDataCommand` |
+| `tests/specs/send.swap.spec.ts` | `liveDataWithAddressCommand` |
+| `tests/specs/ui.swap.spec.ts` | `liveDataWithAddressCommand` |
+| `tests/specs/provider.swap.spec.ts` | `liveDataWithAddressCommand` |
+| `tests/specs/send.tx.spec.ts` | (multiple) |
+
+The pattern is overwhelmingly **`liveDataCommand` plus, optionally, an address-resolving variant.** The vast majority of specs need exactly one thing from Layer 3: "seed the account, optionally also tell me its device-derived address." The approve/revoke pair is, today, used in only one file — `swap.page.ts` — because token-allowance is a swap-specific concern. As QAA expands its broadcast-enabled coverage to staking, NFT, and lending flows, expect `approveTokenCommand` and `revokeTokenCommand` (and possibly siblings yet to be written) to spread.
+
+The mobile workspace consumes the same helpers but through a different mechanism. `e2e/mobile/jest.environment.ts` line 29 imports `* as cliCommandsUtils`, and line 138 does `Object.assign(this.global, cliCommandsUtils)`. Every helper becomes a Jest global. Type definitions live at `e2e/mobile/types/global.d.ts:104-111`. A mobile spec calls e.g. `await liveDataCommand(account)(userdataPath)` *without an import statement*, because the helper is already on the global. This is a deliberate divergence between the two workspaces: desktop uses ESM imports (Playwright/Vitest convention); mobile uses globals (Jest convention, easier interop with Detox's existing globals).
+
+The desktop fixture engine is the other consumption path. `e2e/desktop/tests/fixtures/common.ts` consumes the `cliCommands: [...]` field from each test's fixture data and runs each curried function in the test setup phase. A typical use:
+
+```ts
+// from a hypothetical earn spec
+test.use({
+  cliCommands: [liveDataCommand(account)],
+  userdataFile: "skip-onboarding",
+});
+```
+
+The fixture engine, reading the array, calls each entry with the resolved userdata path. The currying on `liveDataCommand` is what makes this work — the spec author binds the account at write time, the engine binds the userdata path at run time.
+
+### 5.4.9 Error Propagation
+
+Each layer has a different mode of failure and a different recovery story:
+
+**Layer 1 (CLI exits non-zero).** The CLI process writes its error to stderr and exits with a non-zero code. Layer 2's `child.on("exit", code => …)` handler builds the multi-line error envelope (`❌ Failed to execute CLI command`, currency, index, exit code, trimmed stderr) and rejects the promise. The error envelope is the most actionable single artefact for a CLI failure — paste it into a Jira ticket as-is.
+
+**Layer 2 (retryable error).** `runCliCommandWithRetry` catches the rejection from `runCliCommand`, consults `isRetryableError` against the error message, and either retries (up to 3 attempts, 3-second delay) or rethrows. The retry loop is silent on success and emits a `⚠️ CLI attempt N/3 …` warning on each retry. If you see two warnings followed by success, the underlying issue is transient and probably acceptable; if you see three followed by failure, the issue has a non-retryable root cause hiding behind a retryable signature, and the final exception is the one that matters.
+
+**Layer 3 (env restore failure).** If `setDisableTransactionBroadcastEnv` is called but the `finally` block is omitted, an exception in the helper body (the device tap, typically) leaves `process.env.DISABLE_TRANSACTION_BROADCAST` mutated for the rest of the run. Subsequent CLI calls — even ones that have nothing to do with approvals — will see the wrong broadcast state and silently behave differently. The `try/finally` in `approveTokenCommand` and `revokeTokenCommand` is the defensive pattern that prevents this. Any new helper that flips an env var must do the same. Chapter 5.6 covers the discipline in full.
+
+**Layer 4 (device tap timeout).** The screen primitives (`waitFor`, `pressUntilTextFound`) reject when their internal timeout elapses. A common cause is firmware label drift: the device renders "Sign Transaction" with a capital T but `DeviceLabels.SIGN_TRANSACTION` was registered as "Sign transaction". Another common cause is the CLI subprocess not actually reaching the signing screen — usually because of a Layer 1 argument error that takes the CLI down a different code path. If the device tap rejects, the CLI subprocess (Layer 1) is still blocked waiting for an APDU; it will hang until its own `wait-confirmation-timeout` (default 120 seconds) expires. The two timeouts together cap the total failure time at around two minutes.
+
+**Layer 5 (Speculos cleanup miss).** If a POM method's `finally` is omitted (or the `cleanSpeculos` call inside it fails silently), the Docker container leaks and the transport-module registry retains a stale entry. Subsequent tests in the same process may pick up the stale Speculos port via `getEnv("SPECULOS_API_PORT")` and route their CLI calls to a dead device. Chapter 5.5 covers the lifecycle hygiene in full and shows exactly why the snapshot-and-restore pattern matters.
+
+The general rule: errors propagate up through the layers, but each layer adds context. By the time an exception reaches the test runner, it should carry enough information (the error envelope from Layer 2, the helper name from Layer 3, the POM step name from Layer 5's `@step` decorator) for a triage engineer to know which file to open without re-running anything.
+
+### 5.4.10 The Complete File List
+
+Here is every file a Layer 5 author might touch, ranked by frequency:
+
+**Frequent — one or both of these per ticket:**
+- `e2e/desktop/tests/page/swap.page.ts`, `e2e/desktop/tests/page/<feature>.page.ts` — POM methods.
+- `e2e/mobile/page/trade/swap.page.ts`, `e2e/mobile/page/<feature>/<feature>.page.ts` — mobile POM methods.
+- `e2e/desktop/tests/specs/*.spec.ts`, `e2e/mobile/specs/**/*.spec.ts` — the test files themselves.
+- `e2e/desktop/tests/fixtures/common.ts` (occasionally) — when adding a new `cliCommands`-style fixture field.
+- `e2e/desktop/tests/userdata/*.json`, `e2e/mobile/userdata/*.json` — when a new account or feature flag is needed.
+
+**Occasional — a few times a quarter:**
+- `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` — Layer 3 helper extensions for new tickets.
+- `libs/ledger-live-common/src/e2e/enum/Account.ts`, `Currency.ts`, `Provider.ts` — when a ticket introduces a new currency, account fixture, or swap provider.
+
+**Rare — once or twice a year for a typical QA engineer:**
+- `apps/cli/src/commands/blockchain/*.ts` — only when adding a brand-new CLI subcommand. Coordinate with the platform team; this is shared with non-QA consumers.
+- `libs/ledger-live-common/src/e2e/runCli.ts` — engine extensions (a new public engine helper, a new retry pattern). Almost always platform-team work, not QA.
+- `libs/ledger-live-common/src/e2e/families/evm.ts` — new device-tap pattern (a new transaction type with a new screen flow). Coordinate with the firmware team for the screen labels.
+- `libs/ledger-live-common/src/e2e/speculos.ts`, `speculosCI.ts`, `speculosAppVersion.ts` — Speculos lifecycle and version detection. Almost never QA work; covered in Chapter 5.5.
+
+Touching a file from the "rare" tier should always come with a code review request from the senior engineers. Touching a file from the "frequent" tier should be a routine PR.
+
+### 5.4.11 Cross-Reference With Part 3 and Part 4
+
+This chapter sits between the desktop and mobile codebase deep dives. Part 3 Chapter 3.6 catalogues `e2e/desktop/`; Part 4 Chapter 4.7 catalogues `e2e/mobile/`. Both workspaces describe their own page objects, fixtures, runners, and configurations in detail. **The CLI integration layer this chapter describes lives below both of them.**
+
+The crucial fact for a new QA engineer is this: layers 1 through 4 are *one* codebase, used identically by both workspaces. There is no desktop CLI helper and a separate mobile CLI helper. There is no Playwright-specific spawn engine and a separate Detox-specific spawn engine. `cliCommandsUtils.ts` is imported by Playwright specs through ESM and by Jest specs through Jest globals, but it is the same TypeScript file. Bug-fix one helper, both workspaces benefit. Add one helper, both can use it.
+
+Layer 5 is where the workspaces diverge:
+
+- **Desktop POM methods** live in `e2e/desktop/tests/page/*.page.ts`. They use Playwright's `Page` API, the `@step(...)` decorator from `tests/misc/reporters/step`, and Allure via `allure-js-commons`.
+- **Mobile POM methods** live in `e2e/mobile/page/<feature>/*.page.ts`. They use Detox's matcher API (`element(by.id(...))`, `device.launchApp(...)`), often a different `@step` implementation, and the same Allure library.
+
+But both call into the same Layer 3 helpers. When you read `e2e/mobile/page/trade/swap.page.ts` and see `await revokeTokenCommand(account, spender)`, that is the *same function* the desktop swap page object calls. The shared boundary is healthy infrastructure: it forces the lower layers to stay framework-agnostic, and it lets QA engineers move between desktop and mobile tickets without re-learning the CLI integration.
+
+The one place to be careful: when a Layer 3 helper takes a curried form (`liveDataCommand(account)(userdataPath)`), the desktop fixture engine applies the second argument for you, but the mobile global usage requires you to apply both arguments by hand. Read the file you are working in. If you see `cliCommands: [...]` in a fixture, you are on desktop; if you see `await liveDataCommand(account)(userdataPath)` directly in a spec, you are on mobile.
+
+<div class="quiz-container" data-pass-threshold="80">
+  <h3>Chapter 5.4 Quiz</h3>
+  <p class="quiz-subtitle">6 questions · 80% to pass</p>
+  <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+  <div class="quiz-question" data-correct="C">
+    <p><strong>Q1.</strong> Which of the five layers is the typed wrapper layer where most new per-ticket helpers are added?</p>
+    <div class="quiz-choices">
+      <button class="quiz-choice" data-value="A">A) Layer 1 — apps/cli/bin/index.js</button>
+      <button class="quiz-choice" data-value="B">B) Layer 2 — runCli.ts</button>
+      <button class="quiz-choice" data-value="C">C) Layer 3 — cliCommandsUtils.ts</button>
+      <button class="quiz-choice" data-value="D">D) Layer 4 — families/evm.ts</button>
+    </div>
+    <p class="quiz-explanation">Layer 3 (<code>cliCommandsUtils.ts</code>) is the typed-wrapper layer. It exports <code>liveDataCommand</code>, <code>approveTokenCommand</code>, <code>revokeTokenCommand</code>, and friends. Layers 1, 2, and 4 are infrastructure that QA engineers extend rarely.</p>
+  </div>
+
+  <div class="quiz-question" data-correct="B">
+    <p><strong>Q2.</strong> Why is <code>liveDataCommand</code> a curried function (<code>(account, options?) =&gt; (userdataPath?) =&gt; Promise&lt;void&gt;</code>) instead of a single-call function?</p>
+    <div class="quiz-choices">
+      <button class="quiz-choice" data-value="A">A) Because TypeScript performance is faster with curried generics</button>
+      <button class="quiz-choice" data-value="B">B) So the spec author binds the account at write time and the fixture engine binds the userdata path at run time</button>
+      <button class="quiz-choice" data-value="C">C) Because Playwright fixtures only accept thunks</button>
+      <button class="quiz-choice" data-value="D">D) To prevent the helper from being awaited twice</button>
+    </div>
+    <p class="quiz-explanation">The currying lets the fixture engine schedule the call at the right point in the test lifecycle. The spec writes <code>cliCommands: [liveDataCommand(account)]</code>; the engine, knowing the userdata path, calls each entry with that path. This is the single most important pattern in <code>cliCommandsUtils.ts</code>.</p>
+  </div>
+
+  <div class="quiz-question" data-correct="A">
+    <p><strong>Q3.</strong> What is the retry policy in <code>runCliCommandWithRetry</code>?</p>
+    <div class="quiz-choices">
+      <button class="quiz-choice" data-value="A">A) Up to 3 attempts, 3-second delay between attempts, only retryable error patterns trigger a retry</button>
+      <button class="quiz-choice" data-value="B">B) Unlimited attempts with exponential backoff</button>
+      <button class="quiz-choice" data-value="C">C) Up to 5 attempts, 1-second delay, retries on every error</button>
+      <button class="quiz-choice" data-value="D">D) Single attempt; the caller is responsible for retrying</button>
+    </div>
+    <p class="quiz-explanation">The defaults are <code>retries = 3</code> and <code>delayMs = 3000</code>. Only error messages matching the patterns in <code>isRetryableError</code> (HTTP 502/503/504, <code>GeneralDmkError</code>, <code>ECONNREFUSED</code>, <code>ETIMEDOUT</code>, <code>ECONNRESET</code>, "socket hang up", "timeout") trigger a retry; deterministic logic errors fail fast.</p>
+  </div>
+
+  <div class="quiz-question" data-correct="D">
+    <p><strong>Q4.</strong> What does the constant <code>LEDGER_LIVE_CLI_BIN</code> resolve to at runtime?</p>
+    <div class="quiz-choices">
+      <button class="quiz-choice" data-value="A">A) The path to <code>apps/cli/src/index.ts</code></button>
+      <button class="quiz-choice" data-value="B">B) The npm-published binary at <code>node_modules/.bin/ledger-live</code></button>
+      <button class="quiz-choice" data-value="C">C) Whatever <code>which ledger-live</code> returns on the host</button>
+      <button class="quiz-choice" data-value="D">D) An absolute path to <code>apps/cli/bin/index.js</code> in the monorepo, computed from <code>__dirname</code> with four <code>..</code> segments</button>
+    </div>
+    <p class="quiz-explanation">The line is <code>path.resolve(__dirname, "../../../../apps/cli/bin/index.js")</code>. It walks back from the location of the built <code>runCli.js</code> to the monorepo root, then forward into the CLI's built <code>bin/index.js</code>. If the CLI is not built, the constant points at a non-existent file and spawn fails.</p>
+  </div>
+
+  <div class="quiz-question" data-correct="B">
+    <p><strong>Q5.</strong> In the end-to-end trace of <code>revokeTokenApproval</code>, what runs <em>in parallel</em> with the spawned CLI subprocess while the device is being signed?</p>
+    <div class="quiz-choices">
+      <button class="quiz-choice" data-value="A">A) Nothing — the CLI subprocess runs alone and the device tap runs after it exits</button>
+      <button class="quiz-choice" data-value="B">B) The Layer 4 device tap (<code>approveToken</code>), which drives Speculos's REST API to walk through the review screens and press the buttons</button>
+      <button class="quiz-choice" data-value="C">C) A second CLI subprocess that pushes button events</button>
+      <button class="quiz-choice" data-value="D">D) The Allure reporter, which records APDU traffic in real time</button>
+    </div>
+    <p class="quiz-explanation">The CLI subprocess sits inside <code>bridge.signOperation(...)</code> waiting for the device's APDU response. While it waits, the layer-3 helper <code>await</code>s <code>approveToken()</code>, which is the Layer 4 device tap driving Speculos via REST to render screens and press buttons. They are two cooperating coroutines; both must complete for the whole flow to succeed.</p>
+  </div>
+
+  <div class="quiz-question" data-correct="C">
+    <p><strong>Q6.</strong> Inside <code>revokeTokenCommand</code>, why is the call to <code>setDisableTransactionBroadcastEnv(original)</code> wrapped in a <code>finally</code> block?</p>
+    <div class="quiz-choices">
+      <button class="quiz-choice" data-value="A">A) Because <code>finally</code> blocks run faster than non-finally blocks in V8</button>
+      <button class="quiz-choice" data-value="B">B) Because <code>process.env</code> is read-only outside <code>finally</code></button>
+      <button class="quiz-choice" data-value="C">C) Because if the device tap throws, the env var would otherwise stay flipped to <code>"0"</code> for the rest of the run, silently changing broadcast behaviour for every later CLI call</button>
+      <button class="quiz-choice" data-value="D">D) To satisfy a TypeScript exhaustiveness check on the union type of the env value</button>
+    </div>
+    <p class="quiz-explanation">The <code>try/finally</code> is the safety net for env-var mutations. Without it, an exception between the flip and the restore would leak global state across tests. Chapter 5.6 covers the broadcast-discipline pattern in detail.</p>
+  </div>
+
+  <div class="quiz-score"></div>
+</div>
+
+<div class="chapter-outro">
+You now have a layer-by-layer map of how a single line in a desktop spec — <code>await app.swap.revokeTokenApproval(account, provider)</code> — descends through five distinct files, spawns a Node subprocess, drives a Speculos REST API in parallel with that subprocess, and reaches an on-chain broadcast on a public testnet. The next chapter zooms in on one of the supporting cast members of this trace: the Speculos lifecycle. <code>launchSpeculos</code> and <code>cleanSpeculos</code> appeared at the top and bottom of every Layer 5 method in this chapter; Chapter 5.5 takes them apart, shows what <code>startSpeculos</code> does inside (Docker container or remote pool), explains the <code>SPECULOS_API_PORT</code> snapshot-and-restore pattern in full, and gives you the playbook for debugging Speculos boot failures.
+</div>
+## Speculos Lifecycle in CLI Tests
+
+<div class="chapter-intro">
+The CLI subprocess and the Speculos device-tap automation run in parallel during every approve or revoke test. The CLI is blocked waiting for device confirmation; the Speculos helper drives the simulator's REST API as if a human were pressing buttons. Both processes need to agree on which Speculos instance is the device — and that agreement is brokered by a small, careful pair of utility functions in <code>e2e/desktop/tests/utils/speculosUtils.ts</code>. This chapter walks through that pair, the snapshot-and-restore pattern that lets a single test orchestrate two Speculos instances, the local-versus-remote toggle, and the failure modes you will hit if you skip cleanup.
+</div>
+
+### 5.5.1 Why Speculos Lifecycle Matters in CLI Tests
+
+A CLI test that signs a transaction has two parallel actors:
+
+- **The CLI subprocess** — `node apps/cli/bin/index.js send --currency ethereum --mode revokeApproval ...` — spawned by `runCliCommand`, blocked at `bridge.signOperation` waiting for `hw-transport-node-speculos-http` to return signed bytes.
+- **The Speculos device-tap helper** — `approveToken()` from `families/evm.ts` — driving the Speculos REST API, polling screen text, pressing buttons or doing the touch-screen hold.
+
+Both actors need to talk to the same Speculos container. They identify it by port. The lifecycle utilities are responsible for:
+
+1. Starting Speculos with the right firmware and app for the test.
+2. Telling the CLI subprocess which port to use (via env var inheritance and explicit transport registration).
+3. Telling the device-tap helper which port to use (same env var, read directly).
+4. Stopping Speculos and unregistering its transport when the test is done.
+
+If any one of those steps is wrong or skipped, you get one of: a transport leak (next test picks up a stale entry), a port collision (`startSpeculos` errors out at setup), a stopped-Speculos timeout (test hangs waiting for a container that no longer exists), or a Docker container leak (the previous Speculos keeps running and burning memory until the worker is recycled).
+
+Most QAA spec writers don't think about this layer day-to-day — they call `launchSpeculos` and `cleanSpeculos` and trust the rest. But when something goes wrong, you need to know what these functions do. This chapter is that knowledge.
+
+### 5.5.2 The Two Functions
+
+Both live in `e2e/desktop/tests/utils/speculosUtils.ts`. Here they are verbatim.
+
+```ts
+import { setEnv } from "@ledgerhq/live-env";
+import {
+  startSpeculos, specs, stopSpeculos, type SpeculosDevice, getSpeculosAddress,
+} from "@ledgerhq/live-common/e2e/speculos";
+import invariant from "invariant";
+import * as allure from "allure-js-commons";
+import { waitForSpeculosReady } from "@ledgerhq/live-common/e2e/speculosCI";
+import { CLI } from "./cliUtils";
+import { unregisterTransportModule } from "@ledgerhq/live-common/hw/index";
+
+export async function launchSpeculos(appName, testTitle?, previousDevice?): Promise<SpeculosDevice> {
+  if (testTitle) testTitle = testTitle.replace(/ /g, "_");
+
+  if (previousDevice) await cleanSpeculos(previousDevice);
+
+  const device = await startSpeculos(
+    testTitle ?? "cli_speculos",
+    specs[appName.replace(/ /g, "_")],
+    previousDevice?.port,
+  );
+  invariant(device, "[E2E Setup] Speculos not started");
+
+  if (process.env.REMOTE_SPECULOS === "true") {
+    await waitForSpeculosReady(device.id);
+  }
+
+  setEnv("SPECULOS_API_PORT", device.port);
+  process.env.SPECULOS_API_PORT = device.port.toString();
+  CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());
+
+  let info = `App: ${device.appName || ""} (${device.appVersion || ""})`;
+  if (device.dependencies?.length) {
+    info += `\nDependencies: ${device.dependencies?.map(dep => dep.name + " (" + dep.appVersion + ")").join(", ") || ""}`;
+  }
+  await allure.description("SPECULOS\n" + info);
+
+  return device;
+}
+
+export async function cleanSpeculos(speculos, previousPort?) {
+  await stopSpeculos(speculos.id);
+  unregisterTransportModule("speculos-http-" + String(speculos.port));
+  if (previousPort) {
+    setEnv("SPECULOS_API_PORT", previousPort);
+    process.env.SPECULOS_API_PORT = String(previousPort);
+  }
+}
+```
+
+About thirty lines of code. Every line earns its place — there is no spare ceremony here. The next subsections walk through each function step by step.
+
+### 5.5.3 What `launchSpeculos` Does, Step by Step
+
+Signature:
+
+```ts
+launchSpeculos(appName, testTitle?, previousDevice?): Promise<SpeculosDevice>
+```
+
+The three parameters:
+
+- `appName` — string key into the `specs` map. `"Ethereum"`, `"Bitcoin"`, `"Solana"`, etc. Spaces are replaced with underscores before lookup, so `"Exchange App"` becomes `"Exchange_App"` for the spec key.
+- `testTitle` — optional human-readable label that gets passed to `startSpeculos` as the container name suffix. Spaces are replaced with underscores. Used so that `docker ps` shows readable names while a test suite is running. Defaults to `"cli_speculos"` if omitted.
+- `previousDevice` — optional `SpeculosDevice` from a prior `launchSpeculos` call. If passed, it is cleaned up first (see step 1 below) and its port is reused for the new device.
+
+Step by step:
+
+**1. Sanitise testTitle.** `testTitle.replace(/ /g, "_")` — Docker container names cannot contain spaces.
+
+**2. Clean up previousDevice if given.** `if (previousDevice) await cleanSpeculos(previousDevice);` — this is the one-line "swap" pattern. If a test had Speculos A running and now needs Speculos B, the helper stops A and unregisters its transport before starting B. Importantly, this is the only branch that performs cleanup automatically; if you call `launchSpeculos` twice without passing `previousDevice` to the second call, the first one keeps running and you leak a container.
+
+**3. Start the new Speculos.** `startSpeculos(testTitle ?? "cli_speculos", specs[appName.replace(/ /g, "_")], previousDevice?.port)` — this is the heavy lift. It pulls the spec for the requested app (firmware path, app path, model id), then either spawns a Docker container locally or asks the remote Stargate pool for a Speculos instance. `previousDevice?.port` is passed as a port hint — if a previous device existed, the helper tries to reuse its port for the new instance. This matters in the swap-then-revoke case: starting on the same port avoids a port reservation race. `startSpeculos` lives in `@ledgerhq/live-common/e2e/speculos` and returns a `SpeculosDevice` object with `id`, `port`, `appName`, `appVersion`, `dependencies`, and a few internal handles.
+
+**4. Invariant check.** `invariant(device, "[E2E Setup] Speculos not started");` — fail loudly if `startSpeculos` returned undefined. This shouldn't happen in practice (it would throw before returning) but is a defensive belt-and-braces.
+
+**5. Wait for readiness if remote.** `if (process.env.REMOTE_SPECULOS === "true") { await waitForSpeculosReady(device.id); }` — when running against the production CI Speculos pool, the device may not be immediately responsive after `startSpeculos` returns. `waitForSpeculosReady` polls the remote API until the container reports ready. Local Docker is reliably synchronous and skips this step.
+
+**6. Set the port env var, twice.** `setEnv("SPECULOS_API_PORT", device.port);` and `process.env.SPECULOS_API_PORT = device.port.toString();` — both forms are written, defensively, because the codebase has two ways to read it: `getEnv("SPECULOS_API_PORT")` from `@ledgerhq/live-env` (used by the device-tap helper) and `process.env.SPECULOS_API_PORT` (used by anything that reads raw env). Setting both means whichever consumer reads first sees the right value. The CLI subprocess inherits `process.env` at spawn time, so it gets the right port automatically.
+
+**7. Register the transport.** `CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());` — this tells the live-common transport registry that there is a `speculos-http-<port>` transport now available. The CLI subprocess, when it instantiates its `hw-transport-node-speculos-http`, looks up its config from the transport registry. Without registration, the CLI either uses a default port (wrong) or errors out. `getSpeculosAddress()` returns either `"localhost"` (Docker-local default) or the `SPECULOS_ADDRESS` env var when set (remote pool case).
+
+**8. Write the Allure description.** Composes a string like `"SPECULOS\nApp: Ethereum (1.10.4)"` (plus a list of dependencies if the app has them — Ethereum loaded with the Plugin app for clear-signing has both shown). `allure.description` writes this to the test's Allure report so anyone investigating a failed test can immediately see which Speculos was active.
+
+**9. Return the device handle.** The caller stores it for the matching `cleanSpeculos` in `finally`.
+
+### 5.5.4 What `cleanSpeculos` Does
+
+Signature:
+
+```ts
+cleanSpeculos(speculos, previousPort?)
+```
+
+Two parameters:
+
+- `speculos` — the `SpeculosDevice` returned by `launchSpeculos`.
+- `previousPort` — optional. The port that was in use before this Speculos was launched. When passed, the cleanup restores it.
+
+Step by step:
+
+**1. Stop Speculos.** `stopSpeculos(speculos.id)` — kills the Docker container locally, or asks Stargate to release the remote slot. Idempotent; calling stop twice on the same id is a no-op.
+
+**2. Unregister the transport.** `unregisterTransportModule("speculos-http-" + String(speculos.port));` — removes the entry from the live-common transport registry. Without this step, the registry would keep accumulating dead `speculos-http-<port>` entries for every test in the suite. Eventually a later test, calling `registerSpeculosTransport` for a *different* port, would find a stale entry on the same port number first and route to the dead container. Test hangs, eventually times out.
+
+**3. Restore previousPort if given.** `if (previousPort) { setEnv("SPECULOS_API_PORT", previousPort); process.env.SPECULOS_API_PORT = String(previousPort); }` — if the caller saved the port that was active before this Speculos was launched, restore it. This is the second half of the snapshot-and-restore pattern (see 5.5.6). Without restoration, after a sub-test inside a larger swap test cleans up its revoke Speculos, the env points to nothing and the outer swap test's next CLI call fails.
+
+### 5.5.5 The `specs` Map
+
+`specs` is imported from `@ledgerhq/live-common/e2e/speculos`. It is a flat object keyed by app name:
+
+```ts
+const specs = {
+  Ethereum:    { firmware: "...", app: "...", model: "nanoSP", ... },
+  Bitcoin:     { firmware: "...", app: "...", model: "nanoSP", ... },
+  Solana:      { firmware: "...", app: "...", model: "nanoSP", ... },
+  Exchange_App:{ firmware: "...", app: "...", model: "nanoSP", ... },
+  ...
+};
+```
+
+Each entry contains:
+
+- `firmware` — path to the firmware ELF inside the Speculos Docker image. Different device models have different firmware paths.
+- `app` — path to the app ELF. For Ethereum, this is the Ethereum app build for the matching firmware.
+- `model` — the device model id (`"nanoSP"`, `"nanoX"`, `"stax"`, `"flex"`). Determines screen size, button layout, and the device-tap helper branch (`isTouchDevice()`).
+- Optional `dependencies` — sibling apps that need to be loaded alongside (e.g. Plugin Ethereum for clear-sign decoders, or Exchange app for swap flows).
+
+The map is the single source of truth for "what does the Ethereum app on Speculos look like for QAA tests." Updating to a new app version is a one-line change in the map, propagated to every test automatically.
+
+The `appName.replace(/ /g, "_")` in `launchSpeculos` accommodates app names with spaces — `"Exchange App"` is keyed as `Exchange_App` in the map.
+
+### 5.5.6 The Snapshot-and-Restore Pattern
+
+This is the canonical wrapper around `launchSpeculos`/`cleanSpeculos` in any test that needs to interact with a Speculos device.
+
+Here is `ensureTokenApproval` from `e2e/desktop/tests/page/swap.page.ts` — the existing twin of the new revoke method. Verbatim:
+
+```ts
+async ensureTokenApproval(fromAccount, provider, minAmount) {
+  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+
+  // Pre-check — skip the device dance if we already have enough
+  const currentAllowance = await isTokenAllowanceSufficientCommand(
+    fromAccount, provider.contractAddress, minAmount,
+  );
+  console.log("CLI result: Current Allowance: ", currentAllowance);
+  if (currentAllowance) return;
+
+  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+  try {
+    const result = await approveTokenCommand(
+      fromAccount,
+      provider.contractAddress,
+      new BigNumber(minAmount).times(12).div(10).toFixed(),  // 1.2x for slippage buffer
+    );
+    await allure.description(`Token approval result for ${provider.uiName}:\n\n ${result}`);
+  } finally {
+    await cleanSpeculos(speculos, previousSpeculosPort);
+  }
+}
+```
+
+And here is the new `revokeTokenApproval`, also verbatim from the senior's commit:
+
+```ts
+@step("Ensure token approval")  // copy-paste bug; final PR should say "Revoke token approval"
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+
+  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+  try {
+    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
+  } finally {
+    await cleanSpeculos(speculos, previousSpeculosPort);
+  }
+}
+```
+
+The shape is identical:
+
+```ts
+const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+try {
+  // ... CLI command + device tap ...
+} finally {
+  await cleanSpeculos(speculos, previousSpeculosPort);
+}
+```
+
+**Why this shape?**
+
+The outer test (a swap spec, for example) is already running with one Speculos active — the Exchange app Speculos that the swap flow uses. When the test wants to do a token revoke, it needs the *Ethereum* app Speculos, not the Exchange app Speculos. So:
+
+1. **Snapshot.** `getEnv("SPECULOS_API_PORT")` reads the currently active Speculos port (the swap's Exchange Speculos) into a local variable.
+2. **Swap.** `launchSpeculos("Ethereum")` starts a new Speculos with the Ethereum app. The env var now points to the Ethereum Speculos. The CLI subprocess will pick this up.
+3. **Use.** Inside the `try`, the `revokeTokenCommand` runs against the Ethereum Speculos. The CLI signs a revoke transaction; the device-tap helper drives the Ethereum app's screen flow.
+4. **Restore.** `cleanSpeculos(speculos, previousSpeculosPort)` stops the Ethereum Speculos, unregisters its transport, and restores the env var to the original Exchange Speculos port. The outer swap test continues as if nothing happened.
+
+**Why two Speculos instances at all?** Each Speculos container runs *one* app at a time. The Exchange app and the Ethereum app are different apps. The swap flow needs Exchange (because the swap is mediated through Ledger's Exchange app for the clear-sign decoder of swap-specific calldata); the revoke is a plain ERC-20 `approve(spender, 0)` on Ethereum which needs the Ethereum app. You can't time-share — the swap is mid-flow, holding state on the Exchange Speculos. So you start a second Speculos in parallel, do the revoke, tear it down, and the swap's Speculos is untouched.
+
+**Why the `finally`?** Because if `revokeTokenCommand` throws — the device-tap fails, the broadcast errors out, the transaction reverts on-chain — the cleanup must still run. Otherwise the second Speculos leaks, the env var stays pointed at the dead container, and every subsequent CLI call in the outer test fails with a confusing transport error.
+
+The pattern is dense but local: one snapshot variable, one launch, one `finally` block. Once you internalise it, every multi-Speculos test reads the same.
+
+### 5.5.7 A Concrete Timeline — Swap with Mid-Test Revoke
+
+Walk through the full timeline of a `provider.swap.spec.ts` run that calls `revokeTokenApproval` before exercising the swap. Every step matters; the order is what makes the orchestration safe.
+
+**T=0.** Test starts. Test fixture sets up the desktop app, runs `liveDataWithAddressCommand` to seed the account. No Speculos yet. `SPECULOS_API_PORT` is unset (or set by a previous test that cleaned up correctly).
+
+**T=1.** Test enters its body. Calls `await app.swap.swapAndCheck(...)`. The swap flow internally calls `launchSpeculos("Exchange App")`. At this point:
+- `previousDevice` is undefined, so no cleanup branch runs.
+- `startSpeculos("swap_test", specs.Exchange_App, undefined)` spawns a Docker container exposing the Speculos REST API on a fresh port — say port 41001.
+- `SPECULOS_API_PORT` is set to `"41001"` (both via `setEnv` and `process.env`).
+- `CLI.registerSpeculosTransport("41001", "localhost")` adds the entry `speculos-http-41001 → http://localhost:41001` to the live-common transport registry.
+- Allure description gets `App: Exchange App (3.0.0)`.
+
+The swap flow now drives the Exchange Speculos. The test holds the device handle in a variable like `swapSpeculos`.
+
+**T=2.** Mid-test, before broadcasting the swap, the test wants to clear any leftover token allowance. It calls `await app.swap.revokeTokenApproval(fromAccount, provider)`. Inside that method:
+- `previousSpeculosPort = getEnv("SPECULOS_API_PORT")` reads `"41001"` and stores it.
+- `launchSpeculos(fromAccount.currency.speculosApp.name)` is called with `"Ethereum"` (assuming an EVM swap).
+  - `previousDevice` not passed — the previous device is the *swap's Exchange Speculos*, but we don't want to stop it. We want it preserved. So we do *not* pass it as the third arg. Instead, the swap Speculos keeps running while we start a sibling.
+  - `startSpeculos("cli_speculos", specs.Ethereum, undefined)` spawns a *second* container, on a *different* port — say 41002.
+  - `SPECULOS_API_PORT` gets overwritten to `"41002"`.
+  - `CLI.registerSpeculosTransport("41002", "localhost")` adds the `speculos-http-41002` entry. The registry now has both 41001 and 41002.
+  - Allure picks up another description: `App: Ethereum (1.10.4)`. The test report shows both blocks.
+
+**T=3.** The test calls `revokeTokenCommand(fromAccount, provider.contractAddress)`. This:
+- Sets `DISABLE_TRANSACTION_BROADCAST="0"` (saving the previous value).
+- Spawns `node apps/cli/bin/index.js send --currency ethereum --mode revokeApproval ...` via `runCliCommand`. The CLI subprocess inherits `process.env`, so it reads `SPECULOS_API_PORT=41002`. It instantiates `hw-transport-node-speculos-http`, looks up `speculos-http-41002` in the registry, finds the constructor we registered at T=2, and connects to `localhost:41002`. It begins signing.
+- In parallel, the test code awaits `approveToken()` from `families/evm.ts`. That helper polls Speculos REST at port 41002 (read from `SPECULOS_API_PORT`), pages through the review screens, and presses both buttons (or holds-to-sign on touch devices). The CLI subprocess unblocks with signed bytes. CLI broadcasts the tx. CLI exits with code 0.
+
+**T=4.** `revokeTokenCommand` restores `DISABLE_TRANSACTION_BROADCAST` to its prior value. Returns the CLI stdout.
+
+**T=5.** Back in `revokeTokenApproval`, the `try` block ends successfully. `finally` runs: `cleanSpeculos(speculos, previousSpeculosPort)`:
+- `stopSpeculos(speculos.id)` kills the Ethereum Speculos container at port 41002.
+- `unregisterTransportModule("speculos-http-41002")` removes that entry.
+- `previousSpeculosPort = "41001"` was passed, so `setEnv("SPECULOS_API_PORT", "41001")` and `process.env.SPECULOS_API_PORT = "41001"` restore the swap Speculos's port.
+
+**T=6.** Control returns to the swap flow. The Exchange Speculos at port 41001 is still running. `SPECULOS_API_PORT` is back to `"41001"`. The transport registry still has `speculos-http-41001`. The next CLI call (or the next device-tap) inside the swap flow finds everything as it was at T=2, before the revoke nest. The swap proceeds, broadcasts, completes.
+
+**T=7.** Swap test ends. The outer fixture or the swap flow cleans up the swap Speculos (`cleanSpeculos(swapSpeculos)` — no port restoration needed because at T=0 nothing was active). Container at 41001 stops. Registry is clean. `SPECULOS_API_PORT` reset.
+
+The whole orchestration is fifteen lines of test code. The two utility functions handle every subtle bit. Once you trace this once, you'll trust the pattern.
+
+### 5.5.8 Local Speculos vs Remote
+
+`process.env.REMOTE_SPECULOS === "true"` is the toggle.
+
+**Local mode (default).** `REMOTE_SPECULOS` unset or `"false"`. `startSpeculos` spawns a Docker container on the local machine. The container exposes the Speculos REST API on a host-bound port. `getSpeculosAddress()` returns `"localhost"`. This is what you get when you run `pnpm e2e:test` on your laptop, or when a CI runner is configured for self-hosted Speculos.
+
+**Remote mode.** `REMOTE_SPECULOS=true`. `startSpeculos` does not spawn anything locally. Instead, it asks the Stargate-managed Speculos pool to allocate a slot. Stargate is the production CI Speculos cluster. The pool returns a host:port that points to a remote Speculos instance. `getSpeculosAddress()` returns whatever `SPECULOS_ADDRESS` is set to — typically the Stargate gateway hostname. `waitForSpeculosReady(device.id)` polls the remote API until the container reports ready; this extra wait exists because remote allocations have higher startup latency than local Docker.
+
+The same code path produces the right device handle in both modes. The lifecycle utilities don't branch based on local vs remote; they only branch on the readiness wait. Everything else — port management, transport registration, env var setting, allure description — is identical.
+
+The relevant env vars:
+
+- `REMOTE_SPECULOS` — `"true"` to enable remote mode. Anything else is local.
+- `SPECULOS_ADDRESS` — the host (or hostname) where Speculos is reachable. `"localhost"` for Docker-local; a Stargate-issued hostname for remote.
+- `SPECULOS_API_PORT` — set by `launchSpeculos`; read by `cleanSpeculos`, by the device-tap helpers, and inherited by the spawned CLI subprocess.
+
+For day-to-day spec writing, you don't think about local vs remote. You write the spec, it works in your local Docker setup, and it also works in CI with `REMOTE_SPECULOS=true`. The lifecycle layer absorbs the difference.
+
+### 5.5.9 The Transport Registration Step
+
+The single most subtle line in `launchSpeculos`:
+
+```ts
+CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());
+```
+
+What does it actually do?
+
+`hw-transport-node-speculos-http` is a transport implementation in `@ledgerhq/hw-transport-node-speculos-http`. It is the bridge between live-common's transport API (`open`, `exchange`, `close`) and Speculos's HTTP API. To use it, code calls something like:
+
+```ts
+const transport = await SpeculosHttpTransport.open("speculos-http-<port>");
+```
+
+But `transport` resolution is dynamic — the `open` call goes through a registry of named transports, and `speculos-http-<port>` is dynamic per-instance. The CLI subprocess and the device-tap helper both need to find the right transport entry by name, but the name encodes the port, which is only known at runtime after Speculos starts.
+
+`CLI.registerSpeculosTransport(port, address)` adds an entry to the live-common transport registry mapping the name `speculos-http-<port>` to a constructor that opens a connection to `<address>:<port>`. After this call, any code that does `transport.open("speculos-http-<port>")` succeeds.
+
+The CLI subprocess inherits `process.env` (including `SPECULOS_API_PORT`) at spawn time. When the CLI internally instantiates its transport, it reads `SPECULOS_API_PORT`, builds the name `speculos-http-<port>`, and calls `open` on it. The registry entry registered just above is what makes this resolve to the right Speculos.
+
+The cleanup counterpart, `unregisterTransportModule("speculos-http-" + port)`, removes that entry. If you skip the unregister step, the registry accumulates dead entries; if a later test happens to reuse a port number for a new Speculos, the registry might find the old (dead) entry first.
+
+This subsystem is invisible to you when it works. When it breaks — when you see "transport not found" or "ECONNREFUSED on port XXXX" or a CLI hang waiting for a response that never comes — the transport registry is usually where the bug lives. Knowing the registry exists and how to inspect it is the difference between a one-hour debug session and a one-day one.
+
+### 5.5.10 Error Modes
+
+What happens when something goes wrong?
+
+**Skipped `cleanSpeculos`.** The Speculos container keeps running locally (or the remote slot stays allocated). The transport registry retains the `speculos-http-<port>` entry. Two failure modes downstream:
+- A subsequent test, on a fresh `launchSpeculos`, may receive the same port from the remote pool (or from local Docker port reuse) and find the stale entry resolved to a now-dead container. Mismatch, hang, timeout.
+- Memory pressure: each leaked Docker Speculos eats hundreds of megabytes. Run a hundred tests with leaks and your CI worker runs out of RAM.
+
+The correct fix is always `try`/`finally`. There is no scenario where you want to leak.
+
+**Port collision on `startSpeculos`.** `startSpeculos` errors out with something like "port already in use." This usually means a previous test left its Speculos running and the new test got the same port assignment. Symptom: test fails on setup, before any spec code runs. Diagnosis: check `docker ps` for stale Speculos containers. Mitigation: kill them and restart; root cause is almost always a missing `cleanSpeculos`.
+
+**Forgot to restore `SPECULOS_API_PORT`.** You called `cleanSpeculos(speculos)` without the second argument. The Speculos itself is correctly stopped; the env var is left pointing at the now-dead port. The next CLI call in the outer test reads `SPECULOS_API_PORT`, points the spawned subprocess at the dead port, and the CLI hangs trying to connect. Eventually times out. The subtle part: the failure is several lines after the missing argument, so reading the stack trace doesn't immediately point you at the bug. Mitigation: always pass `previousSpeculosPort` to `cleanSpeculos` if you snapshotted it.
+
+**Two `launchSpeculos` calls without intermediate cleanup.** You called `launchSpeculos("Ethereum")`, then later `launchSpeculos("Bitcoin")` without cleaning up the first. If you passed the first device handle as the third argument (`previousDevice`) to the second call, the helper cleans up for you — that's why the parameter exists. If you didn't pass it, the first Speculos leaks. The Bitcoin one starts up fine but the Ethereum one keeps running until the worker is recycled. In CI, the leak is noticed when the next batch of tests spawn and the host runs out of free ports or memory. Mitigation: either pass `previousDevice`, or call `cleanSpeculos` explicitly between the two `launchSpeculos` calls.
+
+**Transport registered but never unregistered.** Symptom: tests pass individually but the suite slows down over time as the transport registry grows. Eventually, port reuse plus a stale entry causes a confusing routing error. Mitigation: pair every `register` with an `unregister`. The cleanup helper does this for you when called.
+
+**REMOTE_SPECULOS set incorrectly.** If `REMOTE_SPECULOS=true` is set but no Stargate pool is reachable, `waitForSpeculosReady` polls forever (or until the test timeout). If `REMOTE_SPECULOS=false` (or unset) but the local Docker daemon isn't running, `startSpeculos` errors immediately. Both produce loud, easy-to-diagnose failures. The dangerous case is mismatched `SPECULOS_ADDRESS` — pointing at a host that exists but isn't a Speculos pool. Then the calls succeed-then-fail mid-test in confusing ways. Mitigation: set both env vars together, never one without the other.
+
+### 5.5.11 Allure Integration
+
+The last few lines of `launchSpeculos`:
+
+```ts
+let info = `App: ${device.appName || ""} (${device.appVersion || ""})`;
+if (device.dependencies?.length) {
+  info += `\nDependencies: ${device.dependencies?.map(dep => dep.name + " (" + dep.appVersion + ")").join(", ") || ""}`;
+}
+await allure.description("SPECULOS\n" + info);
+```
+
+Every `launchSpeculos` writes a Speculos description block to the current test's Allure report. The block includes:
+
+- The app name and version (e.g. `Ethereum (1.10.4)`).
+- Any dependencies and their versions (e.g. for Ethereum with Plugin: `Ethereum (1.10.4)\nDependencies: Plugin Ethereum (1.4.0)`).
+
+When a test fails, the Allure UI shows this block in the description tab. You see immediately which Speculos was active, which app version was loaded, and whether the test was using a particular plugin variant. For tests that launch two Speculos instances (the snapshot-and-restore case), each call contributes its own description block; the report shows both.
+
+This is the single highest-leverage debugging artifact in the Speculos lifecycle. It has saved many hours that would otherwise have been spent re-running tests with verbose logs to figure out which app a failed signature came from.
+
+A small operational note: `allure.description` is *additive* — calling it multiple times in the same test doesn't overwrite, it appends. So a snapshot-and-restore test gets both Speculos blocks in the description. Easy to read; nothing to configure.
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> <code>launchSpeculos</code> and <code>cleanSpeculos</code> are thirty lines of glue holding the CLI subprocess and the device-tap helper to the same Speculos instance, across local and remote modes. The snapshot-and-restore pattern is what lets a swap test do a revoke mid-flow without disturbing the outer Speculos. Every step earns its place — skip one and you get container leaks, transport registry corruption, or hangs that look like they came from elsewhere. When in doubt, mirror the <code>ensureTokenApproval</code>/<code>revokeTokenApproval</code> shape exactly.
+</div>
+
+### 5.5.12 Quiz
 
 <!-- ── Chapter 5.5 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
+<h3>Chapter 5.5 Quiz</h3>
 <p class="quiz-subtitle">6 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> Why do you need to pass <code>--silent</code> to <code>pnpm</code> when invoking <code>wallet-cli</code> with <code>--output json</code>?</p>
+<p><strong>Q1.</strong> Why does a swap-then-revoke test need TWO Speculos instances?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because <code>pnpm</code> defaults to noisy debug output that slows down command execution</button>
-<button class="quiz-choice" data-value="B">B) Because <code>--silent</code> tells the CLI to skip the device handshake</button>
-<button class="quiz-choice" data-value="C">C) Because <code>pnpm</code> prints a script preamble (<code>&gt; @ledgerhq/wallet-cli@... start ...</code>) on stdout that would corrupt the JSON envelope when parsed</button>
-<button class="quiz-choice" data-value="D">D) Because <code>--silent</code> is required by Bunli to enable JSON mode</button>
+<button class="quiz-choice" data-value="A">A) For redundancy in case one Docker container crashes</button>
+<button class="quiz-choice" data-value="B">B) To run the test twice in parallel</button>
+<button class="quiz-choice" data-value="C">C) Each Speculos runs one app at a time — swap needs the Exchange app, revoke needs the Ethereum app</button>
+<button class="quiz-choice" data-value="D">D) One handles signing, the other handles broadcasting</button>
 </div>
-<p class="quiz-explanation">Without <code>--silent</code>, pnpm prints a script-resolution preamble line on stdout before the CLI's own output. That preamble breaks any downstream JSON parser. The flag is a pnpm flag, not a wallet-cli flag.</p>
+<p class="quiz-explanation">A single Speculos container loads one app at a time. The swap flow holds state on the Exchange Speculos; the revoke needs an Ethereum Speculos. The snapshot-and-restore pattern lets the test launch a second Speculos for the revoke, then tear it down so the outer swap continues against its original Exchange Speculos.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> Which of these commands does NOT require the sandbox to be disabled when run from a Claude Code Bash tool?</p>
+<p><strong>Q2.</strong> What does <code>unregisterTransportModule("speculos-http-" + port)</code> do?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>account discover ethereum</code></button>
-<button class="quiz-choice" data-value="B">B) <code>send &lt;descriptor&gt; --to 0xABC --amount '0.5 ETH' --dry-run</code></button>
-<button class="quiz-choice" data-value="C">C) <code>receive &lt;descriptor&gt;</code> (default <code>--verify=true</code>)</button>
-<button class="quiz-choice" data-value="D">D) <code>send &lt;descriptor&gt; --to 0xABC --amount '0.5 ETH'</code></button>
+<button class="quiz-choice" data-value="A">A) Stops the Speculos Docker container</button>
+<button class="quiz-choice" data-value="B">B) Removes the named transport entry from the live-common transport registry, preventing later tests from picking up a stale entry pointing at a dead container</button>
+<button class="quiz-choice" data-value="C">C) Closes the WebSocket bridge to the React Native app</button>
+<button class="quiz-choice" data-value="D">D) Resets the SPECULOS_API_PORT env var</button>
 </div>
-<p class="quiz-explanation"><code>--dry-run</code> validates and prepares the transaction (gas estimate, nonce, fee) over HTTPS but never opens the USB transport. No device, no sandbox concern. The other three all open DMK and would time out under sandbox.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> The error <code>Timeout has occurred</code> when running <code>account discover</code> from an agent harness most likely means:</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The device's PIN is incorrect</button>
-<button class="quiz-choice" data-value="B">B) The Ethereum app on the device has crashed</button>
-<button class="quiz-choice" data-value="C">C) The Ledger Explorer API is down</button>
-<button class="quiz-choice" data-value="D">D) The sandbox blocked the USB ioctls — re-run with <code>dangerouslyDisableSandbox: true</code></button>
-</div>
-<p class="quiz-explanation">The CLI cannot tell the difference between "USB cable disconnected" and "sandbox blocked the call" — both manifest as a 60s timeout. In an agent context, the most common cause is the sandbox. SKILL.md documents this explicitly.</p>
+<p class="quiz-explanation">The live-common transport registry maps names like <code>speculos-http-&lt;port&gt;</code> to constructors. <code>unregisterTransportModule</code> removes that mapping so the registry stays clean across tests. Stopping the container is <code>stopSpeculos</code>; the env reset is the third <code>cleanSpeculos</code> step.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> What does <code>--output json</code> do when an error occurs?</p>
+<p><strong>Q3.</strong> What happens if you forget to pass <code>previousSpeculosPort</code> to <code>cleanSpeculos</code> after snapshotting it at launch?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Writes a <code>{ ok: false, error: { command, message } }</code> envelope to stdout and exits with code 1</button>
-<button class="quiz-choice" data-value="B">B) Writes the error to stderr in JSON format and exits with code 0</button>
-<button class="quiz-choice" data-value="C">C) Suppresses the error entirely so the script doesn't fail</button>
-<button class="quiz-choice" data-value="D">D) Logs the error in <code>session.yaml</code> for later inspection</button>
+<button class="quiz-choice" data-value="A">A) The Speculos is correctly stopped, but SPECULOS_API_PORT is left pointing at the dead port; subsequent CLI calls in the outer test connect to a stopped container and time out</button>
+<button class="quiz-choice" data-value="B">B) Nothing — the cleanup is idempotent</button>
+<button class="quiz-choice" data-value="C">C) The Docker container leaks but the test still passes</button>
+<button class="quiz-choice" data-value="D">D) The transport registry is corrupted and the entire suite crashes</button>
 </div>
-<p class="quiz-explanation">In JSON mode, <code>output.ts</code>'s <code>JsonCommandOutput</code> writes the error envelope on stdout (using <code>writeSync(1, ...)</code> to bypass a Bun.spawn stderr-capture quirk on Linux) and calls <code>process.exit(1)</code>. The shape <code>{ ok: false, error: { command, message } }</code> is asserted by tests in <code>balances.test.ts</code> and is intentionally different from the success envelope's <code>{ status: "success", ... }</code>.</p>
+<p class="quiz-explanation">The Speculos itself is fine — <code>stopSpeculos</code> always runs. But the env var restore is gated on <code>previousPort</code> being passed. Without restoration, the next CLI call uses the dead port. The failure happens several lines after the bug, making it tricky to trace.</p>
 </div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> After running <code>account discover ethereum</code>, you can refer to the discovered account as <code>ethereum-1</code> in subsequent commands. Where is that label-to-descriptor mapping stored?</p>
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> What is the role of the <code>specs</code> map in <code>launchSpeculos</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) In an environment variable that lives only for the shell session</button>
-<button class="quiz-choice" data-value="B">B) In a SQLite database under <code>~/.config/ledger-wallet-cli/</code></button>
-<button class="quiz-choice" data-value="C">C) In a YAML file at <code>$XDG_STATE_HOME/ledger-wallet-cli/session.yaml</code></button>
-<button class="quiz-choice" data-value="D">D) Nowhere — labels are derived dynamically from the device on every command</button>
+<button class="quiz-choice" data-value="A">A) It defines test specifications and assertions</button>
+<button class="quiz-choice" data-value="B">B) It is a list of Playwright fixtures used per test</button>
+<button class="quiz-choice" data-value="C">C) It maps test titles to Allure descriptions</button>
+<button class="quiz-choice" data-value="D">D) It maps app names (Ethereum, Bitcoin, etc.) to firmware path, app path, model id, and optional dependencies — the blueprint <code>startSpeculos</code> uses to launch the right device</button>
 </div>
-<p class="quiz-explanation">The session store in <code>session/session-store.ts</code> persists labels to YAML at <code>stateDir(APP_NAME)/session.yaml</code> where <code>stateDir</code> resolves XDG env vars. Tests redirect this with <code>XDG_STATE_HOME=/tmp/...</code> via <code>session-fixture.ts</code>.</p>
+<p class="quiz-explanation">The <code>specs</code> map (imported from <code>@ledgerhq/live-common/e2e/speculos</code>) is the single source of truth for which firmware and app to launch per app name. Updating to a new app version means updating one entry in this map.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> Why is <code>--help</code> more reliable than <code>SKILL.md</code> for the current flag list of a command?</p>
+<p><strong>Q5.</strong> What does <code>process.env.REMOTE_SPECULOS === "true"</code> change in the lifecycle flow?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because <code>--help</code> is fetched live from a remote server and SKILL.md is local</button>
-<button class="quiz-choice" data-value="B">B) Because Bunli generates <code>--help</code> from the live Zod schemas at runtime, so it cannot drift from the source — SKILL.md is hand-maintained and may lag</button>
-<button class="quiz-choice" data-value="C">C) Because SKILL.md is encrypted and only Ledger employees can read it</button>
-<button class="quiz-choice" data-value="D">D) Because <code>--help</code> is generated from the <code>CHANGELOG.md</code> by a CI step</button>
+<button class="quiz-choice" data-value="A">A) It disables Speculos entirely and runs against a real device</button>
+<button class="quiz-choice" data-value="B">B) It routes <code>startSpeculos</code> to the Stargate-managed remote Speculos pool, and adds a <code>waitForSpeculosReady</code> readiness poll because remote allocation has startup latency</button>
+<button class="quiz-choice" data-value="C">C) It enables a verbose debug log mode</button>
+<button class="quiz-choice" data-value="D">D) It runs every test twice for reliability</button>
 </div>
-<p class="quiz-explanation">Bunli's help renderer reads the <code>option(z.&hellip;(), { description })</code> calls in each <code>defineCommand</code> at runtime. Add a flag, recompile, run <code>--help</code>: the new flag is there. SKILL.md is a Markdown doc maintained by hand and is by definition slower to update.</p>
+<p class="quiz-explanation">Local mode (default) spawns Docker; remote mode asks Stargate for a slot. The only branch in the helper code is the <code>waitForSpeculosReady</code> call — port management, transport registration, env vars, and Allure are identical in both modes.</p>
 </div>
 
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> Why must the launch/clean pair be wrapped in <code>try</code>/<code>finally</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Because TypeScript syntax requires it for async functions</button>
+<button class="quiz-choice" data-value="B">B) Because Allure can't write the description otherwise</button>
+<button class="quiz-choice" data-value="C">C) Because if the inner CLI call throws, cleanup must still run — otherwise the Speculos container leaks, the env var stays pointed at a dead port, and the transport registry retains a stale entry</button>
+<button class="quiz-choice" data-value="D">D) Because Docker requires explicit cleanup signals</button>
+</div>
+<p class="quiz-explanation">The <code>finally</code> block guarantees cleanup in both the success and exception paths. Skip the <code>finally</code> and any thrown error from the device-tap or CLI subprocess leaks the container, leaves SPECULOS_API_PORT corrupted, and pollutes the transport registry — symptoms that show up in *later* tests, not this one.</p>
+</div>
+
+<div class="quiz-score"></div>
 </div>
 
 ---
 
-## Testing wallet-cli — Mock DMK and HTTP Intercept
+With the Speculos lifecycle internalised, the next stop is the final piece of the broadcast picture: `DISABLE_TRANSACTION_BROADCAST`, the env-var gate that determines whether a CLI-signed transaction actually hits the network or just produces a signed-bytes envelope. Chapter 5.6 walks through that gate, the discipline of try/finally around it, and why mobile and desktop have different defaults.
+## DISABLE_TRANSACTION_BROADCAST and Broadcast Discipline
 
 <div class="chapter-intro">
-A typical Detox spec opens a simulator, boots the app, taps buttons, and asserts on screen text. A typical Playwright spec opens Electron and asserts on the DOM. <code>wallet-cli</code> has no UI — there is nothing to tap, nothing to render. The same conceptual job (drive the system end to end against deterministic mocks of its hard dependencies) is achieved by a different stack: Bun's native test runner, a CLI runner that spawns the binary as a subprocess, a Mock DMK that pretends to be a USB Ledger, and an HTTP intercept that pretends to be the Ledger Explorer. This chapter is the Speculos-analog walk-through for CLI: every helper, every fixture, every integration test, line by line.
+The previous chapter showed how Speculos runs alongside the CLI subprocess and how the two share an HTTP port via the transport registry. This chapter zooms in on a single environment variable — <code>DISABLE_TRANSACTION_BROADCAST</code> — and on the discipline that surrounds it. The variable is one of the smallest pieces of state in the whole CLI integration, but it is also one of the most consequential: it is the single switch that decides whether a signed transaction lands on a real testnet or evaporates as a string in a CLI log line. Get it right and your tests are deterministic, cheap, and reproducible. Get it wrong and you either pay gas you did not budget for or, worse, leave on-chain state behind that breaks the next test in the suite.
 </div>
 
-<a id="testing-wallet-cli-mock-dmk-and-http-intercept"></a>
+### 5.6.1 Why Broadcast Control Matters in QA
 
-### 5.6.1 Why a separate test pattern
+There is a fundamental tension at the heart of every signing test in Ledger Live's QAA suite. On one side, automated tests want to be **deterministic** — every run should start from the same state and produce the same observable outcome. On the other side, the artefacts that signing tests verify (signed payload bytes, device-screen renderings, intermediate Bridge events) generally do not require the transaction to actually be sent. So the simplest, fastest, cheapest behaviour is: **sign the transaction, capture the signed bytes, throw them on the floor**. No gas, no pending mempool entries, no chain state to worry about.
 
-In Part 3 (Desktop) and Part 4 (Mobile), the test infrastructure is dictated by the runner:
-- Playwright drives a Chromium-or-Electron page and asserts on locators.
-- Detox drives a native simulator and asserts on accessibility IDs.
+Most QAA tests work exactly this way. A send-flow regression checks that the device shows the correct recipient, the correct amount, the correct fee — once the user (Speculos) approves, the test asserts on the signed event and exits. There is no need for the transaction to ever touch a node.
 
-`wallet-cli` is not a UI. There is no DOM, no view hierarchy, no React component tree to query. It's a Unix command: argv in, JSON envelope on stdout, exit code. The test pattern that fits a Unix command is:
-1. Spawn the command as a subprocess with controlled argv and env.
-2. Capture stdout/stderr/exitCode.
-3. Assert on the captured stdout shape and the exit code.
+But a small and important class of tests is fundamentally different. **Allowance state lives on-chain.** When you call `approve(spender, N)` on an ERC-20 contract, the new allowance is written to the token's storage and stays there until another `approve` overwrites it. If your test broadcasts an approve in run #1 and then run #2 starts up expecting `allowance == 0`, you have a stale-state bug that no amount of seed-resetting in your test runner can fix. The seed is local; the allowance is global. The chain remembers.
 
-So the wallet-cli test stack reaches for a different stack:
-- **`bun:test`** — Bun's native test runner. Same `describe` / `it` / `expect` shape as Jest, but it runs under Bun (where the CLI itself runs).
-- **`cli-runner.ts`** — a thin `Bun.spawn` wrapper that runs the actual CLI binary as a subprocess.
-- **`MockDeviceManagementKit`** — a hand-rolled stand-in for DMK that returns canned task results. Lives in production code (`device/mock-dmk.ts`), installed via a test-only seam (`_setTestDmkTransport`).
-- **`http-intercept.ts`** — a runtime patch of `globalThis.fetch`, `node:http`, `node:https`, and axios, redirecting all non-localhost URLs to a `Bun.serve` mock server.
-- **`mock-server.ts`** — a tiny `Bun.serve`-based route table that answers Ledger Explorer / Alpaca / CAL requests with canned responses.
+That is the tension. Most tests want broadcast off so they are cheap and stateless. Allowance-bearing tests need broadcast on so the test seed can actually be reset to a known allowance value (typically zero) between runs. The wrong default for either category breaks the suite.
 
-Together, these replicate the device-and-network environment that the CLI normally needs. A test runs in <2 seconds, deterministically, with no real hardware and no network.
+The way the codebase resolves this tension is **broadcast is off by default per-test (via the env var) and explicitly turned on for the brief window where it is needed (via the helper)**. The helper restores the previous value on its way out so the surrounding test environment is unchanged. This chapter walks through the mechanics: what values mean what, where the variable is read, where it is set, and the try/finally discipline that keeps the whole system honest.
 
-The closest desktop analog is Speculos + a Playwright fixture that intercepts API calls. The closest mobile analog is the Detox bridge mock device + MSW handlers for HTTP. This stack is the same conceptual machine — different parts.
+### 5.6.2 The Env Var Values
 
-### 5.6.2 The test directory map
+`DISABLE_TRANSACTION_BROADCAST` is a string. It can hold three meaningful states:
 
-```
-apps/wallet-cli/src/test/
-├── helpers/
-│   ├── cli-runner.ts          52 lines  Bun.spawn wrapper (runCli, runLocalCli)
-│   ├── constants.ts            8 lines  Fixed addresses and descriptors
-│   ├── dmk-intercept.ts       29 lines  Installs MockDeviceManagementKit
-│   ├── eth-sync-routes.ts     37 lines  Default ETH HTTP fixture routes
-│   ├── http-intercept.ts     146 lines  Patches fetch / node:http / axios
-│   ├── mock-server.ts         58 lines  Bun.serve-based route table
-│   ├── session-fixture.ts     27 lines  XDG_STATE_HOME tmp dir + session.yaml
-│   ├── wrapper.ts              8 lines  Full intercept entrypoint
-│   └── wrapper-local.ts        3 lines  No-HTTP-intercept entrypoint
-└── commands/
-    ├── README.md
-    ├── balances.test.ts       88 lines
-    ├── discover.test.ts       79 lines
-    ├── operations.test.ts    125 lines
-    ├── receive.test.ts        33 lines
-    ├── send.test.ts           72 lines
-    └── session.test.ts        77 lines
-```
+| Value | Meaning | Effect on `send` |
+|---|---|---|
+| `"1"` (or any truthy string except `"0"`) | Broadcast disabled | CLI signs, prints the signed event, **does not** call `bridge.broadcast` |
+| `"0"` | Broadcast enabled | CLI signs, then submits the signed payload via `bridge.broadcast` |
+| `undefined` (unset) | Falsy → broadcast enabled by default | Same as `"0"` |
 
-`helpers/` is the test infrastructure. `commands/` is the per-command integration tests — one file per command. The two `wrapper*.ts` files are the two entrypoints to the CLI under test: `wrapper.ts` enables HTTP intercept (and conditionally DMK intercept); `wrapper-local.ts` does neither (used for `session view` / `session reset` tests that touch only the local session file).
+> **Verify:** the actual coercion is `getEnv("DISABLE_TRANSACTION_BROADCAST")` returning a string that is then evaluated for truthiness in a JavaScript `||` chain. Empty string and `"0"` are both falsy in this context (`!!"0"` is `true` in plain JS, but `live-env`'s typed `getEnv` returns the value coerced through its declared schema, which for boolean-like envs treats `"0"` as `false`). When in doubt, set `"1"` to disable and `"0"` to enable, and never rely on "unset implies disabled".
 
-The matching `tests/commands/README.md` documents the contract:
+The variable lives in two places at once. `live-env`'s internal config registry holds the in-process value that any live-common module reads via `getEnv("DISABLE_TRANSACTION_BROADCAST")`. The OS-level `process.env` holds the value that subprocesses inherit when the test spawns the CLI. The next subsections explain why both matter and which code reads from which.
 
-> Each test treats a CLI command as a black box: given known flags and mocked infrastructure, the command must produce the expected stdout shape (JSON envelope) and exit code.
+The default state — **unset** — means `getEnv` falls back to whatever schema default `live-env` declares. In the QAA suite the practical baseline you see when running locally is "broadcast happens", because tests that need broadcast off set it explicitly to `"1"` and tests that need it on set it explicitly to `"0"`. The unset case is the no-test, no-helper path — a stray `runCli` call from a debug scratchpad would broadcast for real.
 
-This is the wallet-cli analog of "given a Detox spec and a mock device, the screen must show the expected text" — but for stdout instead of a screen.
+### 5.6.3 The End-to-End Flow
 
-### 5.6.3 `cli-runner.ts`
-
-This is the entry seam. Every integration test calls one of two exports: `runCli` (with HTTP intercept) or `runLocalCli` (without). Full text of the file:
+The single most important snippet in this whole chapter is the rxjs gate inside `apps/cli/src/commands/blockchain/send.ts`. It is short enough to quote in full and worth reading line by line:
 
 ```ts
-// src/test/helpers/cli-runner.ts (52 lines)
-import path from "node:path";
-
-const ROOT = path.resolve(import.meta.dir, "../../..");
-const WRAPPER = path.resolve(import.meta.dir, "./wrapper.ts");
-const WRAPPER_LOCAL = path.resolve(import.meta.dir, "./wrapper-local.ts");
-
-export type RunResult = {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-};
-
-async function spawnCli(
-  wrapper: string,
-  args: string[],
-  env: Record<string, string>,
-): Promise<RunResult> {
-  // --cwd (NOT the cwd: subprocess option) makes Bun resolve tsconfig and workspace packages from the wallet-cli root.
-  const proc = Bun.spawn(["bun", "--cwd", ROOT, wrapper, ...args], {
-    env: {
-      ...process.env,
-      NO_COLOR: "1",
-      CLAUDECODE: "1", // triggers isInteractive() === false → disables spinner
-      ...env,
-    },
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-  });
-
-  const [stdout, stderr] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ]);
-  const exitCode = await proc.exited;
-  return { stdout: stdout.trim(), stderr: stderr.trim(), exitCode };
-}
-
-export async function runCli(
-  args: string[],
-  env: Record<string, string> = {},
-): Promise<RunResult> {
-  return spawnCli(WRAPPER, args, env);
-}
-
-/** Like runCli but without HTTP interception — use for commands that make no network calls. */
-export async function runLocalCli(
-  args: string[],
-  env: Record<string, string> = {},
-): Promise<RunResult> {
-  return spawnCli(WRAPPER_LOCAL, args, env);
-}
+.pipe(
+  // ...
+  bridge.signOperation({ account, transaction: t, deviceId: opts.device || "" })
+    .pipe(
+      map(toSignOperationEventRaw),
+      // ── BROADCAST GATE ──
+      ...(opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")
+        ? []
+        : [
+            concatMap((e) => {
+              if (e.type === "signed") {
+                return from(
+                  bridge.broadcast({ account, signedOperation: e.signedOperation })
+                    // ...
+                );
+              }
+              return of(e);
+            }),
+          ]),
+      // ...
+    );
 ```
 
-Walkthrough, line by line:
+**Reading it line by line:**
 
-- `const ROOT = path.resolve(import.meta.dir, "../../..");` — `apps/wallet-cli/`. Used as the **bun --cwd** so that tsconfig and workspace package resolution rooted there work correctly regardless of where the test is invoked from.
-- `const WRAPPER = ...` and `const WRAPPER_LOCAL = ...` — the two wrapper entrypoints. We dive into them in 5.6.7.
-- `Bun.spawn(["bun", "--cwd", ROOT, wrapper, ...args], { ... })` — this is the critical line. **`--cwd` here is the `bun` CLI flag**, not the Bun.spawn `cwd:` option. It tells Bun to resolve tsconfig and workspace packages from `ROOT`, while the subprocess's actual working directory inherits from the test's cwd. This split matters: tests run from the monorepo root, but bun's module resolution must be wallet-cli-rooted.
-- `env: { ...process.env, NO_COLOR: "1", CLAUDECODE: "1", ...env }` — merges three layers in order. `NO_COLOR` disables ANSI codes so stdout assertions are clean. `CLAUDECODE: "1"` triggers `isInteractive() === false` (see `shared/ui.ts`), which makes the spinner a no-op proxy. The caller's `env` overrides anything before it.
-- `stdin: "ignore"` — no stdin attached. The CLI does not prompt for input.
-- `stdout: "pipe"`, `stderr: "pipe"` — both captured. The test asserts on stdout primarily; stderr is captured for diagnostics ("`stderr: ${stderr}`" in failure messages).
-- `Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()])` — drains both pipes concurrently. Bun's `Response`-from-stream conversion is the idiomatic way to read a subprocess pipe to completion.
-- `proc.exited` — awaited last; returns the exit code.
-- `stdout.trim()` and `stderr.trim()` — drops trailing newlines, which simplifies assertions.
+1. `bridge.signOperation({...})` is called first. This produces a stream of events: typically `device-permission-requested`, `device-permission-granted`, `device-streaming` (chunked transmission), and finally `signed`. The signed event carries the signed payload bytes and the optimistic operation. **Signing happens regardless of the broadcast gate.** The gate decides only what happens to the signed bytes after they exist.
 
-**Why in-subprocess, not in-process?** Because the CLI does heavy module-level setup (`embed-usb-native`, `live-common-setup`, `commands.gen` registration, transport hooks, `process.exit` calls) that can't be cleanly torn down after a single invocation. Spawning a subprocess gives each test a clean process state. The `Bun.spawn` cost is ~50-200ms per test — fast enough that running ~100 integration tests stays under a minute.
+2. `.pipe(map(toSignOperationEventRaw), ...)` converts the events into a serialisable shape. This is what the CLI prints to stdout.
 
-### 5.6.4 `mock-dmk.ts` (the test seam) and `dmk-intercept.ts`
+3. The `...(condition ? [] : [...])` is JavaScript's spread-into-an-array trick used to **conditionally include an rxjs operator**. If the condition is truthy, the spread expands `[]` (zero operators added). If the condition is falsy, the spread expands a single-element array containing one `concatMap` operator.
 
-`MockDeviceManagementKit` lives at `src/device/mock-dmk.ts` (191 lines). It's a minimal stand-in for the real DMK that returns canned task results. The test-side installer is `src/test/helpers/dmk-intercept.ts` — full text:
+4. The condition is `opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")`. **Two gates** — the CLI flag `--disable-broadcast` AND the environment variable. Either truthy is enough to skip broadcast. This redundancy is intentional: the flag lets a CLI invocation disable broadcast inline (useful for one-off manual testing), while the env var lets a test harness disable broadcast for every CLI call in a test file without rebuilding the command line for each one.
+
+5. When the gate evaluates as **broadcast skipped** (truthy), the pipeline ends after the `map(toSignOperationEventRaw)`. The signed event is printed and the rxjs observable completes. The signed bytes are never submitted to a node. The CLI exits cleanly.
+
+6. When the gate evaluates as **broadcast enabled** (falsy), the `concatMap` operator is inserted. For each emitted event:
+   - If it is the `signed` event, call `bridge.broadcast({ account, signedOperation: e.signedOperation })`. Convert the resulting promise to an observable with `from(...)`. The downstream pipeline waits for the broadcast to complete before continuing.
+   - Otherwise (any non-signed event — device permissions, streaming, etc.), pass it through unchanged via `of(e)`.
+
+The fact that **the gate is at the operator-injection level, not inside the operator itself**, is why the disabled path produces zero overhead — there is literally no broadcast operator in the pipeline, so there is nothing to short-circuit. This is rxjs idiomatic; it is also the reason a debugger break inside the broadcast block reveals nothing when the gate is closed: that code never ran.
+
+### 5.6.4 Read Sites in live-common
+
+The variable is read in nine places across the monorepo. The CLI reads it once, in the file you just walked through. Live-common reads it in eight more places — every site where signing produces something the consumer might either submit on-chain or hold for later.
+
+**CLI commands:**
+- `apps/cli/src/commands/blockchain/send.ts` — the rxjs gate quoted verbatim above.
+- `apps/cli/src/commands/blockchain/botTransfer.ts` — the bot's transfer command uses the same gate idiom, because the bot also signs first and broadcasts second; QAA does not invoke the bot directly but the symmetry is worth knowing about.
+
+**live-common modules (`libs/ledger-live-common/src/`):**
+- `exchange/swap/setBroadcastTransaction.ts` — the swap-specific path. Inside the swap acceptance flow, after the user signs the on-chain swap transaction, this module is responsible for broadcasting it. It checks `DISABLE_TRANSACTION_BROADCAST` to decide whether to actually call the node or return a simulated success. This is the path mobile swap tests exercise.
+- `wallet-api/react.ts`, `wallet-api/useDappLogic.ts`, `wallet-api/ACRE/server.ts` — three files in the Live Apps signing path. When a Live App requests a transaction signature via the wallet API, these sites consult the env var to decide whether to broadcast or to return only the signed bytes back to the dApp. Broadcast-disabled Live App tests rely on this gate to assert what the dApp would see post-sign without actually sending the transaction.
+- `hooks/useBroadcast.ts` — the React hook used by both desktop and mobile UI for the in-app "broadcast this signed tx" step. The same env-var check exists here so that UI-layer e2e tests can sign through the UI and assert on intermediate state without paying gas.
+- `bot/engine.ts` — the long-running bot engine; same gate, same reasoning as `botTransfer.ts`.
+
+The pattern is consistent: **wherever a signed payload is about to leave the process**, there is an env-var check. There is no central enforcer. Each broadcast-capable site owns the check.
+
+### 5.6.5 Set Sites
+
+Reading is one half; writing is the other. Three groups of code write the variable.
+
+**Canonical helper — `setDisableTransactionBroadcastEnv` in `cliCommandsUtils.ts`.** This is the only setter QAA test code should call. Its signature is:
 
 ```ts
-// src/test/helpers/dmk-intercept.ts (29 lines)
-import type { DeviceManagementKit } from "@ledgerhq/device-management-kit";
-import {
-  MockDeviceManagementKit,
-  type MockDeviceState,
-  type MockAppResults,
-} from "../../device/mock-dmk";
-import { WalletCliDmkTransport } from "../../device/wallet-cli-dmk-transport";
-import { _setTestDmkTransport } from "../../device/register-dmk-transport";
+setDisableTransactionBroadcastEnv(value: string | undefined): string | undefined
+```
 
-const stateEnv = process.env.WALLET_CLI_MOCK_DMK_STATE ?? "connected";
+It writes to **both** `live-env` (via `setEnv`) and `process.env` (so spawned subprocesses inherit the new value). It returns the **previous** value so the caller can restore it. That return value is the cornerstone of the try/finally discipline (next subsection).
 
-// Coin-specific results injected by tests via WALLET_CLI_MOCK_APP_RESULTS (JSON string).
-// Shape: { "<AppName>": { <result fields> }, ... }
-// Example: { "Ethereum": { "publicKey": "...", "address": "0x..." } }
-const appResultsEnv = process.env.WALLET_CLI_MOCK_APP_RESULTS;
-const appResults: MockAppResults = appResultsEnv
-  ? (JSON.parse(appResultsEnv) as MockAppResults)
-  : {};
+**Mobile swap module-load setter — `e2e/mobile/specs/swap/otherTestCases/swap.other.ts`.** Mobile swap tests default-off broadcast at module load:
 
-const mock = new MockDeviceManagementKit({
-  initialState: stateEnv as MockDeviceState,
-  appResults,
+```ts
+setEnv("DISABLE_TRANSACTION_BROADCAST", true);
+```
+
+This is fired once when the spec file is loaded. Every CLI/Bridge call originating from the spec inherits the disabled state. The mobile swap suite is the highest-volume consumer of CLI calls outside the desktop suite, and it relies on this default to keep the suite reproducible without per-test boilerplate.
+
+**The new `revokeTokenCommand` and the existing `approveTokenCommand`.** Both are token-allowance helpers; both **need** broadcast on for their work and **must not** leave broadcast on when they exit. They follow the canonical pattern verbatim:
+
+```ts
+const original = setDisableTransactionBroadcastEnv("0");
+
+const result = runCliTokenApproval({
+  // ...
+  waitConfirmation: true,
 });
 
-const transport = new WalletCliDmkTransport(
-  mock as unknown as DeviceManagementKit,
-  "mock-session-id",
-);
-_setTestDmkTransport(transport);
-```
-
-What this file does, in order:
-
-1. Reads two environment variables:
-   - `WALLET_CLI_MOCK_DMK_STATE` — `"connected"` (default) or `"locked"`. Drives whether `getDeviceSessionState` returns CONNECTED or LOCKED.
-   - `WALLET_CLI_MOCK_APP_RESULTS` — a JSON-encoded `{ "<AppName>": { <result fields> } }` map. The result fields are passed through to whatever `CallTaskInAppDeviceAction` returns. For Ethereum, the typical shape is `{ "Ethereum": { "publicKey": "...", "address": "0x..." } }` — that's what `receive.test.ts` and `discover.test.ts` use.
-2. Builds a `MockDeviceManagementKit` with that initial state.
-3. Wraps it in a `WalletCliDmkTransport` (the same hw-transport-compatible wrapper the production code uses).
-4. Calls `_setTestDmkTransport(transport)` — the test seam exposed by `register-dmk-transport.ts`. From this point on, anywhere in live-common code that does `withDevice("wallet-cli-dmk")(...)` ends up using the mock.
-
-What `MockDeviceManagementKit` actually mocks:
-
-- **`listenToAvailableDevices`** — emits one fake Nano S Plus device.
-- **`connect`** — returns `"mock-session-id"`.
-- **`getDeviceSessionState`** — returns `CONNECTED` or `LOCKED` per `initialState`.
-- **`executeDeviceAction`** — recognizes two action shapes:
-  - `ConnectAppDeviceAction` (input has `application`) — completes immediately. Pretends the app opened.
-  - `CallTaskInAppDeviceAction` (input has `task` function and `appName`) — returns the configured `appResults[appName]` payload. This is where `receive --verify` gets its address: the test sets `appResults.Ethereum.address`, the CLI calls `task(...)` against the EVM signer, the mock returns the configured result.
-- **`sendApdu`** fallback — returns `0x6D00` (INS not supported) when no app result matches; returns `0x5515` (locked) when the state is `locked`.
-
-What it does NOT mock:
-- The XState machine inside DMK (bypassed entirely — `executeDeviceAction` is the seam).
-- The `InternalApi` layer DMK uses internally.
-- The actual APDU exchange. The mock returns canned results at the **task** level, so any logic that relies on intermediate APDU-level state would not be exercised.
-
-The implication: this is good for asserting that "given Ethereum app result X, the receive command returns address X". It's not good for asserting that the CLI handles a malformed APDU response — that path is covered by E2E tests on real hardware (out of scope for this guide).
-
-A concrete example using mock DMK end-to-end (lifted from `receive.test.ts`, which we walk in full in 5.6.9):
-
-```ts
-const { stdout, exitCode } = await runCli(
-  ["receive", "--account", MOCK_ETH_DESCRIPTOR, "--verify", "--output", "json"],
-  {
-    WALLET_CLI_MOCK_PORT: String(server.port),
-    WALLET_CLI_MOCK_DMK: "1",
-    WALLET_CLI_MOCK_APP_RESULTS: JSON.stringify({
-      Ethereum: { publicKey: MOCK_ETH_PUBKEY, address: MOCK_ETH_ADDRESS },
-    }),
-  },
-);
-expect(JSON.parse(stdout).address.toLowerCase()).toBe(MOCK_ETH_ADDRESS.toLowerCase());
-```
-
-The chain: test sets `appResults.Ethereum.address`, wrapper imports `dmk-intercept.ts`, intercept installs the mock, CLI's `receive --verify` opens the (mocked) device, `withCurrencyDeviceSession` runs `connectLedgerApp` (mock returns immediately), bridge calls `bridge.receive({ deviceId, verify: true })`, mock's `CallTaskInAppDeviceAction` returns the configured Ethereum result, address bubbles up to the JSON envelope. End to end, ~1 second.
-
-### 5.6.5 `http-intercept.ts`
-
-This is the most sophisticated helper. It patches three layers — `globalThis.fetch`, `node:http.request`, `node:https.request` — plus axios's adapter, redirecting any non-localhost URL to a local mock server. Full text walkthrough:
-
-```ts
-// src/test/helpers/http-intercept.ts (146 lines, excerpts)
-import path from "node:path";
-
-const mockPort = process.env.WALLET_CLI_MOCK_PORT;
-if (!mockPort) {
-  throw new Error("[http-intercept] WALLET_CLI_MOCK_PORT is not set");
+try {
+  await approveToken();
+} finally {
+  setDisableTransactionBroadcastEnv(original);
 }
-const mockBase = `http://localhost:${mockPort}`;
+return await result;
 ```
 
-Step 1: read the mock-server port from `WALLET_CLI_MOCK_PORT`. If unset, throw immediately — the helper refuses to silently no-op.
+The pattern in plain English:
+1. Capture the previous value while flipping to `"0"` (broadcast enabled). The return value of `setDisableTransactionBroadcastEnv` gives you the previous value in one call.
+2. Kick off the CLI subprocess (which will sign and, because broadcast is enabled, submit the transaction).
+3. In parallel, drive Speculos through the device-tap dance via `approveToken()`.
+4. Once the device tap is done — or even if it threw — restore the previous value in `finally`.
+5. Return the awaited CLI result.
+
+The order matters. The CLI process is started *before* the try block so that `approveToken()` and the CLI subprocess race in parallel. If you started the CLI inside the try, you would serialise them and the test would deadlock — the CLI would block waiting for a device confirmation that no one is performing.
+
+### 5.6.6 The Try/Finally Discipline
+
+Every flip of `DISABLE_TRANSACTION_BROADCAST` must be paired with a restore in a `finally` block. Not after the try. Not in a side-effect callback. **In `finally`.**
+
+The reason becomes obvious once you walk through the failure scenarios.
+
+**Scenario 1 — `approveToken()` throws because the device tap fails.** Speculos misses a screen, `pressUntilTextFound` times out, an exception bubbles up. Without `finally`:
 
 ```ts
-const liveCommonDir = path.dirname(require.resolve("@ledgerhq/live-common/package.json"));
-const axiosPkgDir = path.dirname(require.resolve("axios/package.json", { paths: [liveCommonDir] }));
-// Patch CJS axios instance
-(require(path.join(axiosPkgDir, "dist/node/axios.cjs")) as any).defaults.adapter = "fetch";
-// Patch ESM axios instance
-((await import(path.join(axiosPkgDir, "index.js"))) as any).default.defaults.adapter = "fetch";
+const original = setDisableTransactionBroadcastEnv("0");
+const result = runCliTokenApproval({...});
+await approveToken();              // <-- throws here
+setDisableTransactionBroadcastEnv(original);  // <-- never runs
 ```
 
-Step 2: force axios to use its **fetch adapter** instead of its default node:http adapter. The reason is in the comment at the top of the file: under Bun, axios's auto-detection picks the http adapter (because `process` is defined), but we want axios calls to go through the `globalThis.fetch` patch we install below — so we forcibly set `defaults.adapter = "fetch"` on **both** the CJS and ESM instances. (Bun resolves ESM imports to one path and `require()` to another, creating two separate axios singletons; both must be patched.)
+The throw escapes; the restore never runs. `DISABLE_TRANSACTION_BROADCAST` stays at `"0"` for the rest of the process lifetime. Every subsequent CLI call in the same Jest/Playwright worker silently broadcasts when it was supposed to be off. Allowance state leaks; the next test that asserts "expected zero allowance" sees the residue and fails for unrelated-looking reasons.
+
+**Scenario 2 — `runCliTokenApproval` rejects because the CLI subprocess crashes.** Same problem in reverse: the await on the result inside the function rejects, the finally still gets the restore, but only because there is a `finally`.
+
+**Scenario 3 — a test runner abort signal mid-flow.** If Jest or Playwright sends a SIGTERM, the JS runtime executes `finally` blocks before exiting. If you used a plain post-await line, the runtime exits without running it.
+
+The pattern that handles all three correctly is the one in `revokeTokenCommand`:
 
 ```ts
-function isLocal(urlStr: string): boolean {
-  return (
-    urlStr.startsWith("http://localhost") ||
-    urlStr.startsWith("https://localhost") ||
-    urlStr.startsWith("http://127.0.0.1") ||
-    urlStr.startsWith("https://127.0.0.1")
-  );
+const original = setDisableTransactionBroadcastEnv("0");
+const result = runCliTokenApproval({...});
+try {
+  await approveToken();
+} finally {
+  setDisableTransactionBroadcastEnv(original);
 }
+return await result;
 ```
 
-Step 3: helper that decides whether a URL is local (`http://localhost`, `127.0.0.1`, etc.). Local URLs are passed through unchanged — important because `Bun.serve` itself listens on localhost, and we don't want infinite redirection.
+Note the **second** `await result` outside the try/finally. The CLI subprocess promise is awaited *after* the env has been restored. If `runCliTokenApproval` rejects, the rejection propagates after the env is already restored, so the restore is guaranteed regardless of which side fails. If you put the `await result` inside the try, the same restore semantics still hold, but you risk re-entering the env-restore logic if you wrap the whole thing in another try elsewhere. The current shape is the conservative one and it is what the codebase consistently uses.
+
+> **Tip:** when you write a new helper that flips broadcast, copy the existing pattern character-for-character. The cost of getting this wrong is a flaky suite that nobody knows is flaky because the symptoms surface in unrelated tests two hours later.
+
+### 5.6.7 Speculos Interaction
+
+Broadcast off does **not** mean signing off. Speculos still receives the unsigned transaction, walks through its normal "review transaction → sign" UI flow, and emits the signed bytes back over the speculos-http transport. The signed bytes travel up the device → transport → bridge stack and surface in the rxjs pipeline as a `signed` event. From there:
+
+- **Broadcast disabled:** the `signed` event is the terminal state of the pipeline. The CLI prints it (in `default` or `json` format) and exits. The signed bytes are visible in CLI stdout but go nowhere. They are dropped on the floor. No `bridge.broadcast`, no node submission, no on-chain effect.
+- **Broadcast enabled:** the `signed` event triggers the `concatMap` operator. `bridge.broadcast({ account, signedOperation: e.signedOperation })` ships the bytes to a node (the configured RPC endpoint for that currency). The node returns a transaction hash (or an error). The optimistic operation is updated with the hash; the CLI prints `✔️ broadcasted! optimistic operation: ...` and exits.
+
+This is why a `--mode revokeApproval` call with broadcast disabled is **useful for nothing in production tests** — the revoke needs to land on chain or it has not happened. It is, however, useful for debugging. Run the same revoke command with `DISABLE_TRANSACTION_BROADCAST=1` and you can verify that signing works, the device-tap automation walks the right screens, the data field is the right calldata, and so on, all without spending a single cent of testnet ETH. Once that local validation passes, set the variable to `"0"` and let the broadcast happen for real.
+
+The decoupling also means Speculos and the broadcast gate are orthogonal concerns. Speculos always emulates a hardware device; the broadcast gate decides what happens to the device's output. Tests that need to assert on device-screen content (for clear-signing audits, e.g.) run with broadcast off so they are cheap; tests that need to verify on-chain state changes run with broadcast on. The choice is per-test and per-helper, not global.
+
+### 5.6.8 `--wait-confirmation` Interaction (a Gotcha)
+
+`runCliTokenApproval` builds its CLI command with `--wait-confirmation` whenever its `waitConfirmation` option is true. The flag exists on `send.ts` and adds a final step to the rxjs pipeline: after the broadcast resolves, wait for the transaction to be confirmed on-chain (via `waitForTransactionConfirmation`) before exiting.
+
+Critically, `waitForTransactionConfirmation` lives **inside the broadcast block** in the rxjs pipe. Looking back at the gate from §5.6.3:
 
 ```ts
-const origFetch = globalThis.fetch;
-(globalThis as Record<string, unknown>).fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  const urlStr =
-    typeof input === "string" ? input : input instanceof URL ? input.href : (input as Request).url;
-  if (urlStr && !isLocal(urlStr)) {
-    const u = new URL(urlStr);
-    const redirected = `${mockBase}${u.pathname}${u.search}`;
-    if (input instanceof Request) {
-      // Preserve the original request's method/headers/body; apply caller's init on top.
-      return origFetch(new Request(redirected, input), init);
-    }
-    return origFetch(redirected, init);
-  }
-  return origFetch(input, init);
-};
-```
-
-Step 4: Layer 1 — patch `globalThis.fetch`. Any non-local URL gets redirected to `http://localhost:${WALLET_CLI_MOCK_PORT}${pathname}${search}`. The path-and-query are preserved (so the mock server can route on path), but the host is replaced. When `input` is a `Request` instance, we wrap it with `new Request(redirected, input)` to preserve method, headers, and body.
-
-```ts
-const http = require("node:http");
-const https = require("node:https");
-const origHttpRequest = http.request.bind(http);
-// (... helpers buildMockOptions, isExternalOptions, resolveHttpArgs ...)
-(http as any).request = function (options: any, ...rest: any[]) {
-  if (isExternalOptions(options)) {
-    const [mockOpts, cb] = resolveHttpArgs(buildMockOptions(options), options, rest);
-    return origHttpRequest(mockOpts as unknown as Parameters<typeof http.request>[0], cb);
-  }
-  return origHttpRequest(options, ...rest);
-};
-(https as any).request = function (options: any, ...rest: any[]) {
-  const [mockOpts, cb] = resolveHttpArgs(buildMockOptions(options), options, rest);
-  return origHttpRequest(mockOpts as unknown as Parameters<typeof http.request>[0], cb);
-};
-```
-
-Step 5: Layer 2 — patch `node:http.request` and `node:https.request`. Same redirection logic, but at the Node http layer. **HTTPS requests are routed to plain HTTP on the mock port** — the mock server doesn't speak TLS, and we don't need it to since everything is localhost-loopback under the test runner. This layer catches anything that goes around `globalThis.fetch` (rare, but possible — direct `http.request()` callers exist in some live-common modules).
-
-The two `resolveHttpArgs` and `buildMockOptions` helpers reconcile Node's two `http.request` overload shapes (`(options[, callback])` and `(url[, options][, callback])`) — they're plumbing details, not test concepts.
-
-The net effect: any HTTP traffic the CLI emits (Ledger Explorer, Alpaca, CAL, gas tracker, anything) lands on the mock server, regardless of which HTTP client (fetch, axios, node:http) the live-common code happens to use under the hood.
-
-### 5.6.6 `mock-server.ts`
-
-The mock server is a `Bun.serve`-based route table. Full text:
-
-```ts
-// src/test/helpers/mock-server.ts (58 lines)
-export type Route = {
-  method?: string;
-  /** URL path pattern to match (string = substring, RegExp = test against pathname+search) */
-  match: RegExp | string;
-  response: unknown;
-  status?: number;
-  headers?: Record<string, string>;
-};
-
-export class MockServer {
-  private _server: ReturnType<typeof Bun.serve> | null = null;
-  private _port = 0;
-
-  constructor(private readonly routes: Route[]) {}
-
-  start(): void {
-    const { routes } = this;
-    const server = Bun.serve({
-      port: 0,
-      fetch(req) {
-        const url = new URL(req.url);
-        const pathAndQuery = url.pathname + url.search;
-
-        for (const route of routes) {
-          const matches =
-            typeof route.match === "string"
-              ? url.pathname.includes(route.match)
-              : route.match.test(pathAndQuery);
-
-          if (matches && (!route.method || route.method === req.method)) {
-            return Response.json(route.response, {
-              status: route.status ?? 200,
-              headers: { "Content-Type": "application/json", ...(route.headers ?? {}) },
-            });
-          }
+...(opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")
+  ? []
+  : [
+      concatMap((e) => {
+        if (e.type === "signed") {
+          return from(
+            bridge.broadcast({ account, signedOperation: e.signedOperation })
+              // ── waitForTransactionConfirmation lives in HERE ──
+          );
         }
+        return of(e);
+      }),
+    ]),
+```
 
-        console.warn(`[mock-server] UNMATCHED: ${req.method} ${url.pathname}`);
-        return new Response(`[mock-server] 404 Not Found: ${req.method} ${url.pathname}`, {
-          status: 404,
-        });
-      },
-    });
-    this._server = server;
-    this._port = server.port ?? 0;
-  }
+The `--wait-confirmation` step only runs when the broadcast block is part of the pipeline. If broadcast is disabled, the broadcast block is replaced with an empty operator list and `waitForTransactionConfirmation` never runs — there is no transaction hash to poll for, so there is nothing meaningful to wait on.
 
-  stop(): void {
-    this._server?.stop();
-    this._server = null;
-    this._port = 0;
-  }
+**This is a silent no-op**, not an error. The CLI does not warn that `--wait-confirmation` was supplied with broadcast disabled. It simply exits as soon as the signed event is printed. This is fine in normal flows — `revokeTokenCommand` and `approveTokenCommand` always set broadcast on before invoking, so the `--wait-confirmation` is honoured. The gotcha shows up only when someone copy-pastes a CLI command for manual debugging and forgets to clear `DISABLE_TRANSACTION_BROADCAST`.
 
-  get port(): number {
-    if (!this._server) throw new Error("MockServer not started");
-    return this._port;
+> **Tip:** if you are debugging a CLI invocation by hand and `--wait-confirmation` seems to do nothing, check `echo $DISABLE_TRANSACTION_BROADCAST`. A leftover `1` from a previous shell session is the most common culprit.
+
+### 5.6.9 `setEnv` (live-env) vs `process.env`
+
+There are two parallel environment registries in play, and the `setDisableTransactionBroadcastEnv` helper writes to both. Understanding why is essential for reasoning about test isolation.
+
+**`live-env`'s typed registry.** The package `@ledgerhq/live-env` exports `setEnv(key, value)` and `getEnv(key)` functions backed by an internal `EnvName → typed value` map. Every live-common module that reads an env var goes through `getEnv`, not `process.env`. The benefits are: type safety (each env name has a declared type — boolean, string, number — and `getEnv` returns the typed value), declared defaults (the schema declares the default for unset keys), and centralised validation (invalid values throw at registration time).
+
+**`process.env`.** Plain Node.js OS-level environment. Subprocesses inherit it. Unrelated to live-env's registry.
+
+The two are normally in sync because live-common's bootstrap reads `process.env` once and pushes the values into live-env. After bootstrap, however, modifying one does not modify the other. This is where the asymmetry matters:
+
+- **Internal callers** (anything inside live-common, including `useBroadcast`, `setBroadcastTransaction`, the wallet-api gates) read via **`getEnv`**, so they see the live-env registry's value. To change what they see, you must call `setEnv`.
+- **CLI subprocesses** are spawned by `runCliCommand` via `child_process.spawn` with `env: process.env`. The spawned `node apps/cli/bin/index.js ...` process inherits **`process.env`**, not the parent's live-env registry. Inside the CLI, `getEnv` will re-read `process.env` and rebuild its own live-env registry from those values. So to change what the CLI sees, you must mutate **`process.env`** before spawning.
+
+Hence `setDisableTransactionBroadcastEnv` writes both:
+
+```ts
+export function setDisableTransactionBroadcastEnv(value: string | undefined) {
+  const previous = process.env.DISABLE_TRANSACTION_BROADCAST;
+  setEnv("DISABLE_TRANSACTION_BROADCAST", value === "1");  // typed boolean for live-env
+  if (value === undefined) {
+    delete process.env.DISABLE_TRANSACTION_BROADCAST;
+  } else {
+    process.env.DISABLE_TRANSACTION_BROADCAST = value;
   }
+  return previous;
 }
 ```
 
-Walkthrough:
+> **Verify:** the precise body of `setDisableTransactionBroadcastEnv` may evolve. The principle — write both sides defensively — is stable.
 
-- A `Route` is `{ method?, match, response, status?, headers? }`. `match` is either a string (treated as substring of pathname) or a `RegExp` (tested against `pathname + search`).
-- `start()` creates a `Bun.serve` on port 0 (kernel picks an available port). The server's `fetch` handler iterates routes in order; first match wins.
-- On a match, it returns `Response.json(route.response, { status, headers })`. Default status is 200, default content-type is `application/json`.
-- On no match, it logs `[mock-server] UNMATCHED: ...` to stderr (so you see what was missed during a failing test) and returns 404.
-- `port` is exposed once the server is listening — tests pass it via `WALLET_CLI_MOCK_PORT` to the CLI subprocess.
+If you only set live-env, the parent process's internal callers see the new value but the spawned CLI subprocess inherits the unchanged `process.env` and ignores it. If you only set `process.env`, the CLI sees the new value but the parent process's live-common modules (the ones that decide whether to broadcast in `useBroadcast`, for example) read from live-env and see the stale value. Both must move together for the abstraction to hold.
 
-**`mock-server` vs `http-intercept` — when to use which:**
+### 5.6.10 Verifying Broadcast Happened
 
-- `http-intercept.ts` is **always loaded** when a test uses `runCli` (not `runLocalCli`). It's the patch layer that **redirects** all non-local HTTP to the mock server.
-- `mock-server.ts` is the **server** that answers the redirected requests.
+Once a test has flipped broadcast on, run the helper, and flipped it back, how do you actually confirm the transaction landed? The answer is layered.
 
-You always need both for any HTTP-touching command. The split exists so the patching is one-time global and the routing is per-test programmable.
+**Layer 1 — CLI stdout.** When broadcast succeeds, the CLI emits a line like:
 
-When you might prefer `mock-server` alone (without `http-intercept`): never, in practice. The patches are what make redirection automatic. If you wrote a test that wanted to `fetch('http://localhost:<port>/...')` directly, you wouldn't need the patches — but no test does that, because the production code under test doesn't.
-
-When you might prefer `http-intercept` with **stateful** mock-server behavior: when you want to inspect what the CLI actually requested, or you need the response to depend on the request body. The simple `Route.response: unknown` shape is static, but you can pass a function-as-response in production code, or stand up your own `Bun.serve` with custom logic per the same pattern. No test does this today; all of them use the static route table.
-
-### 5.6.7 `wrapper.ts` and `wrapper-local.ts`
-
-These two files are the "bootstrap" that the test subprocess actually executes. They are intentionally minimal — they exist so module-level side effects of the CLI (`embed-usb-native`, `live-common-setup`, `commands.gen` registration) run **after** the intercepts are installed, not before.
-
-`wrapper.ts` (full text):
-
-```ts
-// src/test/helpers/wrapper.ts (8 lines)
-import "./http-intercept";
-
-// When WALLET_CLI_MOCK_DMK=1, install the mock DMK transport before the CLI starts.
-if (process.env.WALLET_CLI_MOCK_DMK) {
-  await import("./dmk-intercept");
-}
-
-await import("../../cli");
+```
+✔️ broadcasted! optimistic operation: { hash: "0xabc...", value: "0", ... }
 ```
 
-Order matters:
+This is your immediate signal. The optimistic operation is the local representation of the transaction; the `hash` field is the transaction hash that was returned by the node. If you see this line, the broadcast call returned without error.
 
-1. `import "./http-intercept";` — top-level, synchronous. Patches `globalThis.fetch`, `node:http`, `node:https`, axios. **This must run before the CLI imports anything**, because the CLI's module-level code path may already have axios instances created (live-common eager loads), and the patch only takes effect if it runs first.
-2. `if (process.env.WALLET_CLI_MOCK_DMK) await import("./dmk-intercept");` — conditional. Only installs the mock DMK when the env var is set. Tests that need the device set `WALLET_CLI_MOCK_DMK: "1"` (see `send.test.ts`, `receive.test.ts`, `discover.test.ts`); tests that only need HTTP (like `balances.test.ts`, `operations.test.ts`) leave it unset.
-3. `await import("../../cli");` — finally, import the CLI itself. Its module-level setup runs now. By the time it reaches `createCLI(bunliConfig).run()`, both intercepts are in place.
+**Layer 2 — `--wait-confirmation`.** When the helper passes `waitConfirmation: true` (the default for `revokeTokenCommand` and `approveTokenCommand`), the CLI also waits for the transaction to be confirmed before exiting. A successful confirmation typically appears in stdout as a confirmed-operation log; a timeout will throw. So if your helper returns at all, the transaction was both broadcast and confirmed within the timeout window.
 
-`wrapper-local.ts` (full text):
+**Layer 3 — the next test's allowance read.** The most important layer in practice. After a revoke, the next test that calls `getEvmTokenAllowance` (via `tokenAllowance` CLI or via `isTokenAllowanceSufficientCommand`) should see the allowance you just set. If revoke set it to zero, the next call returns zero; if approve set it to N, the next call returns N. This is the **after-the-fact verification** pattern and it is the only one that proves chain state. Layers 1 and 2 prove the broadcast call returned; only layer 3 proves the chain saw it.
 
-```ts
-// src/test/helpers/wrapper-local.ts (3 lines)
-// No HTTP interception — only for commands that do not make network calls.
-export {};
-await import("../../cli");
-```
+**Layer 4 — out-of-band tools.** For one-off audits (Chapter 5.3), open `revoke.cash` or Etherscan's read-contract tab on the testnet you broadcast to, plug in the seed's address, and read the allowance directly. This bypasses the test harness entirely and is useful when something feels wrong and you want to know what the chain actually says.
 
-This is for `session view` and `session reset` — commands that only read/write `session.yaml` and never hit the network. Loading `http-intercept` would force a `WALLET_CLI_MOCK_PORT` requirement that doesn't make sense for these tests. `runLocalCli` in `cli-runner.ts` points at this wrapper.
+The four layers form a verification ladder. In automated tests, layers 1 and 3 are the everyday signals — layer 1 fails fast if the broadcast did not return, layer 3 confirms the state actually changed. Layer 2 catches confirmation timeouts. Layer 4 is the manual escape hatch.
 
-The `export {}` is just a TypeScript convention to mark this file as a module. The real work is the dynamic `await import("../../cli")`.
-
-### 5.6.8 `constants.ts`
-
-The fixture seeds. Tiny but load-bearing:
-
-```ts
-// src/test/helpers/constants.ts (8 lines)
-export const ETH_ADDRESS = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
-export const ETH_DESCRIPTOR = `account:1:address:ethereum:main:${ETH_ADDRESS}:m/44h/60h/0h/0/0`;
-
-// Ethereum m/44'/60'/0'/0/0 derived from the standard Hardhat/Foundry test mnemonic
-// ("test test … junk") — a well-known constant in the Ethereum developer ecosystem.
-export const MOCK_ETH_ADDRESS = "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266";
-export const MOCK_ETH_PUBKEY = "038318535b54105d4a7aae60c08fc45f9687181b4fdfc625bd1a753fa7397fed75";
-export const MOCK_ETH_DESCRIPTOR = `account:1:address:ethereum:main:${MOCK_ETH_ADDRESS}:m/44h/60h/0h/0/0`;
-```
-
-Two address pairs. Why two?
-
-- **`ETH_ADDRESS` / `ETH_DESCRIPTOR`** — an arbitrary hard-coded Ethereum address, used by tests that **don't** go through the mock device. `balances.test.ts` and `operations.test.ts` both use this, because their test path is "fetch from Ledger Explorer (mocked HTTP) given the descriptor" — no device is opened.
-- **`MOCK_ETH_ADDRESS` / `MOCK_ETH_PUBKEY` / `MOCK_ETH_DESCRIPTOR`** — the well-known **Hardhat/Foundry** test mnemonic's first Ethereum derivation. The mnemonic is `"test test test test test test test test test test test junk"`. The first ETH address derived from it (`m/44'/60'/0'/0/0`) is a famous constant in the Ethereum developer ecosystem. Tests that go through the mock device (`receive.test.ts`, `send.test.ts`, `discover.test.ts`) use this because the mock returns this address as the configured result — and we want the test's expected address to match.
-
-The pubkey field is needed when the test sets `WALLET_CLI_MOCK_APP_RESULTS={"Ethereum":{"publicKey":"...","address":"..."}}`. Both fields go into the JSON-encoded env var.
-
-There's also `eth-sync-routes.ts`, which provides the default Ethereum sync route fixtures (block, balance, txs, erc20 balances, CAL `/v1/currencies`). It's not in `constants.ts` but plays the same "default test data" role for HTTP. Quick reference:
-
-```ts
-// src/test/helpers/eth-sync-routes.ts — the routes any ETH bridge sync needs
-export const ETH_SYNC_ROUTES: Route[] = [
-  { method: "GET", match: /\/block\/current$/, response: { hash: "0x...", height: 20_000_000, time: "...", txs: [] } },
-  { method: "GET", match: /\/address\/[^/]+\/balance$/, response: { balance: "0" } },
-  { method: "GET", match: /\/address\/[^/]+\/txs/, response: { data: [], token: null } },
-  { method: "POST", match: /erc20\/balances/, response: [] },
-  { method: "GET", match: /\/v1\/currencies/, response: [{ id: "ethereum" }],
-    headers: { "X-Ledger-Commit": "mock-sync-hash-0000000000000000" } },
-];
-```
-
-The `/v1/currencies` route is subtle — without it (or with an empty body), the CAL store throws `LedgerAPI4xx` because an empty array is interpreted as a 404 by the CAL client. The non-empty body plus the `X-Ledger-Commit` header is what makes it valid.
-
-### 5.6.9 A sample test end-to-end — `balances.test.ts`
-
-This is the simplest non-trivial integration test. It exercises the HTTP intercept layer, the mock server, and the JSON envelope contract — without involving the device. Full file:
-
-```ts
-// src/test/commands/balances.test.ts (88 lines)
-import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { MockServer } from "../helpers/mock-server";
-import { runCli } from "../helpers/cli-runner";
-import { makeSessionDir } from "../helpers/session-fixture";
-import { ETH_DESCRIPTOR, ETH_ADDRESS } from "../helpers/constants";
-
-// 1.5 ETH in wei
-const ETH_BALANCE_WEI = "1500000000000000000";
-
-describe("balances command", () => {
-  const server = new MockServer([
-    {
-      method: "GET",
-      match: /\/address\/[^/]+\/balance$/,
-      response: { address: ETH_ADDRESS, balance: ETH_BALANCE_WEI },
-    },
-    {
-      method: "GET",
-      match: /\/address\/[^/]+\/txs/,
-      response: { data: [], token: null },
-    },
-    {
-      method: "POST",
-      match: /erc20\/balances/,
-      response: [],
-    },
-  ]);
-
-  let sessionCleanup: (() => void) | undefined;
-  beforeAll(() => server.start());
-  afterAll(() => server.stop());
-  afterEach(() => { sessionCleanup?.(); sessionCleanup = undefined; });
-
-  it("human output: prints ETH balance line", async () => {
-    const { stdout, exitCode, stderr } = await runCli(["balances", "--account", ETH_DESCRIPTOR], {
-      WALLET_CLI_MOCK_PORT: String(server.port),
-    });
-    expect(exitCode, `stderr: ${stderr}`).toBe(0);
-    expect(stdout).toMatch(/ETH/i);
-    expect(stdout).toMatch(/1\.5/);
-  });
-
-  it("json output: returns a valid balances envelope", async () => {
-    const { stdout, exitCode, stderr } = await runCli(
-      ["balances", "--account", ETH_DESCRIPTOR, "--output", "json"],
-      { WALLET_CLI_MOCK_PORT: String(server.port) },
-    );
-    expect(exitCode, `stderr: ${stderr}`).toBe(0);
-
-    const data = JSON.parse(stdout);
-    expect(data.command).toBe("balances");
-    expect(data.network).toBe("ethereum:main");
-    expect(Array.isArray(data.balances)).toBe(true);
-    expect(data.balances.length).toBeGreaterThanOrEqual(1);
-
-    const native = data.balances.find((b: { asset: string }) => b.asset === "ethereum");
-    expect(native).toBeDefined();
-    expect(native.amount).toMatch(/1\.5/);
-  });
-
-  it("can resolve a session label to the matching account", async () => {
-    const fixture = makeSessionDir([{ label: "ethereum-1", descriptor: ETH_DESCRIPTOR }]);
-    sessionCleanup = fixture.cleanup;
-    const { stdout, exitCode, stderr } = await runCli(
-      ["balances", "--account", "ethereum-1", "--output", "json"],
-      { WALLET_CLI_MOCK_PORT: String(server.port), ...fixture.env },
-    );
-    expect(exitCode, `stderr: ${stderr}`).toBe(0);
-    const data = JSON.parse(stdout);
-    expect(data.command).toBe("balances");
-    expect(data.network).toBe("ethereum:main");
-    const native = data.balances.find((b: { asset: string }) => b.asset === "ethereum");
-    expect(native?.amount).toMatch(/1\.5/);
-  });
-
-  it("json output: invalid descriptor exits with code 1", async () => {
-    const { stdout, exitCode } = await runCli(
-      ["balances", "--account", "not-a-valid-descriptor", "--output", "json"],
-      { WALLET_CLI_MOCK_PORT: String(server.port) },
-    );
-    expect(exitCode).toBe(1);
-    // JSON mode routes all output to stdout; errors have { ok: false, ... }.
-    const err = JSON.parse(stdout);
-    expect(err.ok).toBe(false);
-    expect(err.error.command).toBe("balances");
-    expect(err.error.message).toStartWith("No account labeled");
-  });
-});
-```
-
-Walkthrough, top to bottom:
-
-**Imports (lines 1-5).** `bun:test` is Bun's native test API. `MockServer`, `runCli`, `makeSessionDir`, and the constants come from the helpers. Note: no `dmk-intercept` import — `balances` is a no-device command.
-
-**Fixture constants (line 7-8).** `ETH_BALANCE_WEI = "1500000000000000000"` is 1.5 ETH in wei. The bridge sync layer divides by `10^18` to render the human amount.
-
-**`describe("balances command", ...)` (line 10).** A single describe block with shared mock-server fixture across four `it`s.
-
-**`new MockServer([...])` (lines 11-27).** Three routes:
-- `GET /address/.../balance` — returns 1.5 ETH for any address. The regex `[^/]+` matches any address segment (the actual address is parameterized by descriptor).
-- `GET /address/.../txs` — empty transaction history. Required by the bridge sync to determine token sub-accounts (token detection scans recent txs).
-- `POST /erc20/balances` — empty array. The Alpaca direct-API path for token balances.
-
-**Lifecycle hooks (lines 29-32).** `beforeAll` starts the server (so all `it`s share one port). `afterAll` stops it. `afterEach` cleans up the per-test session-dir fixture if one was set.
-
-**`it("human output: prints ETH balance line", ...)` (lines 34-41).** The simplest assertion. Spawns the CLI with `["balances", "--account", ETH_DESCRIPTOR]` and `WALLET_CLI_MOCK_PORT=<server.port>` in env. Checks:
-- `exitCode === 0`. The second arg to `expect(... , msg)` is the failure message — including stderr in the message means a failing test gets you the device-handshake / error messages for free.
-- `stdout matches /ETH/i` — the human formatter prints the asset symbol.
-- `stdout matches /1\.5/` — and the human-readable amount.
-
-**`it("json output: returns a valid balances envelope", ...)` (lines 43-59).** Same but with `--output json`. Asserts the envelope shape:
-- `data.command === "balances"`.
-- `data.network === "ethereum:main"`.
-- `data.balances` is a non-empty array.
-- The "ethereum" asset entry has `amount` matching `/1\.5/` — the formatter's human-readable string `"1.5 ETH"`.
-
-**`it("can resolve a session label to the matching account", ...)` (lines 61-74).** Tests the session-label resolver:
-1. `makeSessionDir([{ label: "ethereum-1", descriptor: ETH_DESCRIPTOR }])` creates a temp `XDG_STATE_HOME` containing a `session.yaml` mapping `ethereum-1` → the descriptor.
-2. The CLI is run with `--account ethereum-1` (no `:`, so the resolver looks up the label).
-3. `XDG_STATE_HOME` is forwarded via `env` so the CLI's session store hits the temp dir.
-4. Same assertions as the previous test — proves that label resolution produces the same descriptor-driven path.
-
-**`it("json output: invalid descriptor exits with code 1", ...)` (lines 76-87).** Negative path. Passes a label that doesn't exist in any session. Asserts:
-- `exitCode === 1`.
-- stdout (NOT stderr — JSON mode writes errors on fd 1 too) is parseable JSON with `{ ok: false, error: { command, message } }` shape.
-- The error message starts with `"No account labeled"` — the exact prefix from `commands/inputs.ts::resolveAccountInput`.
-
-This last test is the canonical "JSON error envelope contract" assertion. It documents in code that:
-1. Errors exit with non-zero code.
-2. Errors land on stdout in JSON mode (not stderr).
-3. The shape is `{ ok: false, error: { command, message } }` — note the absence of `status: "success"`.
-
-Anyone consuming wallet-cli JSON in a hook script can parse `data.ok === false` to detect errors uniformly across commands.
-
-### 5.6.10 A complex test — `send.test.ts`
-
-This one exercises the full stack: HTTP intercept, mock DMK, route fixtures for gas estimation, all the way through `prepareTransaction`. It's the densest example in the repo. Full file:
-
-```ts
-// src/test/commands/send.test.ts (72 lines)
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { MockServer } from "../helpers/mock-server";
-import { runCli } from "../helpers/cli-runner";
-import { ETH_SYNC_ROUTES } from "../helpers/eth-sync-routes";
-import { MOCK_ETH_DESCRIPTOR, MOCK_ETH_ADDRESS, MOCK_ETH_PUBKEY } from "../helpers/constants";
-
-// Routes needed by prepareTransaction (gas estimation, nonce, fee data) in addition to sync.
-// The balance route is placed first (before ETH_SYNC_ROUTES) so it overrides the default
-// zero-balance route — the send command requires sufficient balance to avoid NotEnoughBalance.
-const SEND_ROUTES = [
-  {
-    method: "GET",
-    match: /\/address\/[^/]+\/balance$/,
-    response: { balance: "1000000000000000000" }, // 1 ETH
-  },
-  ...ETH_SYNC_ROUTES,
-  {
-    method: "GET",
-    match: /\/address\/[^/]+\/nonce$/,
-    response: { address: MOCK_ETH_ADDRESS, nonce: 0 },
-  },
-  {
-    method: "POST",
-    match: /\/tx\/estimate-gas-limit/,
-    response: { estimated_gas_limit: "21000" },
-  },
-  {
-    method: "GET",
-    match: /\/gastracker\/barometer/,
-    response: { low: "1", medium: "2", high: "3", next_base: "1" },
-  },
-];
-
-describe("send --dry-run command", () => {
-  const server = new MockServer(SEND_ROUTES);
-
-  beforeAll(() => server.start());
-  afterAll(() => server.stop());
-
-  it("json output: exits 0 and returns a dry-run send envelope for ETH", async () => {
-    const { stdout, exitCode, stderr } = await runCli(
-      [
-        "send",
-        "--account",
-        MOCK_ETH_DESCRIPTOR,
-        "--to",
-        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
-        "--amount",
-        "0.001 ETH",
-        "--dry-run",
-        "--output",
-        "json",
-      ],
-      {
-        WALLET_CLI_MOCK_PORT: String(server.port),
-        WALLET_CLI_MOCK_DMK: "1",
-        WALLET_CLI_MOCK_APP_RESULTS: JSON.stringify({
-          Ethereum: { publicKey: MOCK_ETH_PUBKEY, address: MOCK_ETH_ADDRESS },
-        }),
-      },
-    );
-    expect(exitCode, `stderr: ${stderr}`).toBe(0);
-
-    const data = JSON.parse(stdout);
-    expect(data.command).toBe("send");
-    expect(data.network).toBe("ethereum:main");
-    expect(data.dry_run).toBe(true);
-    expect(typeof data.recipient).toBe("string");
-    expect(typeof data.amount).toBe("string");
-    expect(typeof data.fee).toBe("string");
-  });
-});
-```
-
-The dance, line by line:
-
-**`SEND_ROUTES` (lines 10-32).** This is the route table for the entire EVM `prepareTransaction` flow. Five routes:
-
-1. `GET /address/.../balance` — returns 1 ETH (1e18 wei). **Placed before `ETH_SYNC_ROUTES`** so it shadows the default zero-balance route. Why ordering matters: `MockServer` iterates routes in declaration order, first match wins. Without this override, the bridge sync would see balance=0 and the send would fail with `NotEnoughBalance` before even reaching the gas estimate step.
-2. `...ETH_SYNC_ROUTES` — block, txs, erc20, CAL. The standard ETH sync background.
-3. `GET /address/.../nonce` — returns nonce 0. Required by the EVM bridge to set the transaction's nonce field.
-4. `POST /tx/estimate-gas-limit` — returns `21000` (the standard ETH transfer gas limit). Bridge calls this during `prepareTransaction`.
-5. `GET /gastracker/barometer` — returns fee tiers (low/medium/high/next_base). The bridge picks one based on the user's selected fee strategy (default: medium).
-
-**`describe("send --dry-run command", ...)` (line 34).** Note the test is `--dry-run` only. The actual signing path is **not** covered by an integration test in the repo today — the comment in R1 flags this as a gap.
-
-**The `runCli` call (lines 41-62).** The CLI args:
-- `send --account <descriptor> --to 0x70997970... --amount '0.001 ETH' --dry-run --output json`.
-- The `--to` address is the second derivation of the same Hardhat mnemonic — another well-known testnet address.
-- `--amount '0.001 ETH'` is the canonical "send a small amount" pattern.
-- `--dry-run` skips the device-signing step but still builds the validated transaction.
-
-The env:
-- `WALLET_CLI_MOCK_PORT` — points the HTTP intercept at the mock server.
-- `WALLET_CLI_MOCK_DMK: "1"` — installs the mock DMK transport.
-- `WALLET_CLI_MOCK_APP_RESULTS` — JSON-encoded `{ Ethereum: { publicKey, address } }`. Even in dry-run, the CLI's `withCurrencyDeviceSession` stage runs (it opens the Ethereum app on device for signing), so the mock needs to know the Ethereum app result. Note: the test predicate `--dry-run` short-circuits **after** prepareTransaction but **before** signOperation — so the mock's CallTaskInApp is configured but the task that would actually use it (sign) is never reached.
-
-Wait — looking more carefully at the source, the `send.ts` handler in the dry-run branch **does** call `wallet.prepareSend(descriptor, intent)` without entering `withCurrencyDeviceSession`. So in this specific test, the mock DMK env is set defensively (in case the dry-run path ever changes to require device prep), but it isn't strictly exercised. The HTTP routes are the load-bearing fixtures here.
-
-**Assertions (lines 63-69).** The dry-run envelope:
-- `command === "send"`.
-- `network === "ethereum:main"`.
-- `dry_run === true`.
-- `recipient`, `amount`, `fee` are all strings (the human-readable amount formatting — `"0.001 ETH"`, `"0.0003 ETH"`).
-
-What this test does NOT cover (and what an extended `revoke` test would need to cover, per Section 12 of R1):
-- The actual signing path (CallTaskInApp returning a signed-tx blob).
-- The broadcast step (POST to `/tx/send`).
-- The `tx_hash` in the success envelope.
-
-Adding integration coverage for the post-sign path is its own piece of work; the current test stops at the prepareTransaction boundary. For a future `revoke` command (the QAA-615 spike), a richer test would mock the EVM signer's `signTransaction` task to return a canned signed-tx blob and intercept the `tx/send` POST to assert the calldata starts with `0x095ea7b3` (the `approve` selector) and the second 32-byte word is zero.
-
-### 5.6.11 Coverage and `bun test --coverage`
-
-The `coverage` script in `apps/wallet-cli/package.json` is:
-
-```bash
-bun test src/ --coverage
-```
-
-`bunfig.toml` sets the reporter:
-
-```toml
-[test]
-coverageReporter = ["lcov"]
-coverageDir = "coverage"
-```
-
-Run from `apps/wallet-cli/`:
-
-```bash
-pnpm coverage
-# or directly:
-bun test src/ --coverage
-```
-
-What it does:
-- Discovers every `*.test.ts` under `src/`.
-- Runs each test under coverage instrumentation.
-- Writes `lcov.info` to `apps/wallet-cli/coverage/`.
-
-The Nx target wraps this:
-
-```bash
-pnpm --filter @ledgerhq/wallet-cli coverage
-```
-
-CI consumes the lcov file and produces a coverage badge / report. There is no explicit threshold gate in `bunfig.toml` today — coverage is informational, not enforced. (If you want to add a gate, you'd extend the script with `--coverage-threshold=NN`; Bun supports this flag but the project hasn't opted in.)
-
-A useful local pattern: combine coverage with a single test file:
-
-```bash
-bun test src/test/commands/balances.test.ts --coverage
-```
-
-This shows you the coverage delta from one test only — handy when authoring a new test and you want to see what lines you've started covering.
-
-### 5.6.12 Common assertion shapes
-
-Across the six integration tests, three assertion shapes recur. Recognize them and you can author new tests by template.
-
-**Shape 1 — JSON success envelope:**
-
-```ts
-expect(exitCode, `stderr: ${stderr}`).toBe(0);
-const data = JSON.parse(stdout);
-expect(data.command).toBe("<command-name>");
-expect(data.network).toBe("ethereum:main");
-expect(data.<payload-key>).toBeDefined();
-```
-
-This is the canonical happy-path assertion. The `stderr: ${stderr}` failure message is **important** — when the test fails on a CI machine, you want stderr in the failure log immediately. Without it, you'd have to add console logs and re-run.
-
-**Shape 2 — JSON error envelope:**
-
-```ts
-expect(exitCode).toBe(1);
-const err = JSON.parse(stdout); // not stderr — see 5.5.6
-expect(err.ok).toBe(false);
-expect(err.error.command).toBe("<command-name>");
-expect(err.error.message).toStartWith("<expected-prefix>");
-// or:
-expect(err.error.message).toMatch(/<regex>/);
-```
-
-The `ok: false` shape is the agreed contract. The error message comes from the source — usually a Zod validation error or a hand-raised `Error()` in the command handler.
-
-**Shape 3 — Side effect on the file system (session-yaml tests):**
-
-```ts
-const fixture = makeSessionDir([]); // or with seed entries
-cleanup = fixture.cleanup;
-await runCli([...], { ...env, ...fixture.env });
-const sessionPath = join(fixture.env.XDG_STATE_HOME, "ledger-wallet-cli", "session.yaml");
-const session = YAML.parse(await Bun.file(sessionPath).text()) as { accounts: ... };
-expect(session.accounts).toEqual(...);
-```
-
-This pattern reads the YAML written by the CLI and asserts on its content. Used by `discover.test.ts` for the "session persistence" tests. Bun's `YAML.parse` is built-in (`import { YAML } from "bun"`) — no third-party dep needed.
-
-**Shape 4 — human-mode pattern matching:**
-
-```ts
-expect(stdout).toMatch(/ETH/i);
-expect(stdout).toMatch(/1\.5/);
-expect(stdout).toContain("ethereum-1");
-```
-
-For human-mode assertions you don't pin to exact strings (formatting may change). You assert that the **expected substrings** are present. The `i` flag is common — case-insensitive matching for asset tickers.
-
-### 5.6.13 The "no e2e/cli/" rationale
-
-Detox tests live under `e2e/mobile/`. Playwright tests live under `e2e/desktop/`. There's a strong precedent in this monorepo for "E2E tests are a peer workspace alongside the app they test". So why aren't the wallet-cli integration tests under `e2e/cli/`?
-
-The answer is what they actually test:
-
-- **`e2e/desktop/`** — drives the real Electron binary against a real Speculos. Real native build, real Speculos container, end-to-end UI flows.
-- **`e2e/mobile/`** — drives the real native simulator via Detox. Real build, real bridge, end-to-end UI flows.
-- **`apps/wallet-cli/src/test/`** — spawns the CLI in-process under Bun.spawn, with a **mock** DMK and a **mock** HTTP server. No real device, no real network.
-
-The wallet-cli tests are **integration tests**, not E2E. They cover the command-handler-to-output contract with all hard dependencies replaced. That's a different category from desktop/mobile E2E:
-
-| Layer | Real Speculos? | Real device-or-USB? | Real HTTP? | Workspace location |
-|---|---|---|---|---|
-| `e2e/desktop/` | Yes | Speculos | Yes (test endpoints) | peer to `apps/ledger-live-desktop/` |
-| `e2e/mobile/` | Yes (when `--e2e`) | Speculos / mock-bridge | Yes | peer to `apps/ledger-live-mobile/` |
-| `apps/wallet-cli/src/test/` | No | Mock DMK | Mock server | colocated with source |
-
-So the wallet-cli tests live **alongside the source** under `apps/wallet-cli/src/test/`, not under a peer `e2e/cli/` workspace. The ownership model matches: the wallet-cli package owns these tests, and they ship in the same package's `bun test src/` invocation.
-
-If a real-USB-device E2E suite ever materializes for wallet-cli — for instance, a CI pipeline with a USB-attached Speculos box driving wallet-cli through real DMK — that suite **would** warrant an `e2e/cli/` peer workspace. It would have:
-- A separate `package.json` with its own dependencies.
-- An entry in the root `pnpm-workspace.yaml`.
-- A CI job that requires a USB-bus runner.
-- Tests that **don't** mock DMK (the whole point of having a real-device E2E layer).
-
-That's a significant infrastructure investment, and as of QAA-615 it doesn't exist. The current strategy is "fast deterministic mocks under `bun test`", and the source-tree colocation reflects that.
-
-> **Tip:** If you ever find yourself wanting to write a "real-device" wallet-cli test (driving an actual Nano X), do not add it to `apps/wallet-cli/src/test/`. That directory is the mock-DMK contract layer; mixing real-device tests there confuses the contract. Either propose a new `e2e/cli/` workspace, or test through the bash hook itself (see Chapter 5.7 for the hook pattern).
-
-### 5.6.14 Chapter 5.6 Quiz
-
-<!-- ── Chapter 5.6 Quiz ── -->
+### 5.6.11 Chapter 5.6 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz</h3>
-<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<h3>Chapter 5.6 Quiz</h3>
+<p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> Why does <code>cli-runner.ts</code> spawn the CLI as a subprocess instead of importing it in-process?</p>
+<p><strong>Q1.</strong> What does <code>DISABLE_TRANSACTION_BROADCAST="1"</code> mean for a <code>send</code> CLI invocation?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because <code>bun:test</code> doesn't support in-process imports</button>
-<button class="quiz-choice" data-value="B">B) Because the CLI is written in JavaScript and the tests are written in TypeScript</button>
-<button class="quiz-choice" data-value="C">C) Because the CLI does heavy module-level setup (USB native embed, live-common-setup, command registration, <code>process.exit</code>) that can't be cleanly torn down between tests — a fresh subprocess gives each test a clean process state</button>
-<button class="quiz-choice" data-value="D">D) Because Bun cannot import its own <code>.ts</code> files at runtime</button>
+<button class="quiz-choice" data-value="A">A) The CLI skips signing entirely and exits with code 0</button>
+<button class="quiz-choice" data-value="B">B) The CLI signs and broadcasts but does not wait for confirmation</button>
+<button class="quiz-choice" data-value="C">C) The CLI signs (Speculos still walks the device flow), but the rxjs broadcast operator is not added to the pipeline, so the signed bytes are printed to stdout and never submitted to a node</button>
+<button class="quiz-choice" data-value="D">D) Equivalent to passing <code>--ignore-errors</code> — broadcast is attempted, errors are swallowed</button>
 </div>
-<p class="quiz-explanation">The CLI calls <code>process.exit</code>, registers transport modules globally in live-common, embeds a native USB addon, and runs Bunli's command-store registration as a side effect. None of that survives an in-process re-import cleanly. <code>Bun.spawn</code> per test costs ~50-200ms but guarantees isolation.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q2.</strong> What does <code>WALLET_CLI_MOCK_DMK=1</code> do?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Tells <code>wrapper.ts</code> to import <code>dmk-intercept.ts</code>, which installs a <code>MockDeviceManagementKit</code> via the <code>_setTestDmkTransport</code> seam</button>
-<button class="quiz-choice" data-value="B">B) Disables all device output entirely</button>
-<button class="quiz-choice" data-value="C">C) Switches the CLI to JSON-only output mode</button>
-<button class="quiz-choice" data-value="D">D) Forces the real DMK to use a deterministic random seed</button>
-</div>
-<p class="quiz-explanation"><code>wrapper.ts</code> conditionally <code>await import("./dmk-intercept")</code> when <code>WALLET_CLI_MOCK_DMK</code> is set. The intercept builds a <code>MockDeviceManagementKit</code> from <code>WALLET_CLI_MOCK_APP_RESULTS</code> and calls <code>_setTestDmkTransport</code> on the production module's test seam.</p>
+<p class="quiz-explanation">The gate is at the rxjs operator-injection level. When the env var (or the CLI flag) is truthy, the spread expands to <code>[]</code> — no broadcast operator is part of the pipeline at all. Signing still happens; the signed bytes are emitted and the pipeline ends.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> Why does <code>http-intercept.ts</code> patch axios's adapter to <code>"fetch"</code>?</p>
+<p><strong>Q2.</strong> You pass <code>--wait-confirmation</code> to <code>send</code> but also have <code>DISABLE_TRANSACTION_BROADCAST=1</code> in the environment. What happens?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because <code>fetch</code> is faster than <code>node:http</code> for benchmark-driven tests</button>
-<button class="quiz-choice" data-value="B">B) Because under Bun, axios auto-detects <code>node:http</code> as its default adapter (<code>process</code> is defined), but the helper's <code>globalThis.fetch</code> patch only catches fetch traffic — forcing axios to <code>"fetch"</code> routes its calls through the patch</button>
-<button class="quiz-choice" data-value="C">C) Because Bun does not implement <code>node:http.request</code> at all</button>
-<button class="quiz-choice" data-value="D">D) Because the mock server only speaks fetch protocol</button>
+<button class="quiz-choice" data-value="A">A) The CLI errors out with "cannot wait for confirmation while broadcast is disabled"</button>
+<button class="quiz-choice" data-value="B">B) The flag is a silent no-op — <code>waitForTransactionConfirmation</code> lives inside the broadcast block, which is replaced by <code>[]</code> when broadcast is disabled, so there is no transaction to wait on; the CLI exits as soon as the signed event is printed</button>
+<button class="quiz-choice" data-value="C">C) The CLI waits for any pending transaction on the account, regardless of whether the current run broadcast one</button>
+<button class="quiz-choice" data-value="D">D) The flag forces broadcast back on, overriding the env var</button>
 </div>
-<p class="quiz-explanation">Axios picks an adapter at config time. Under Node, it's the http adapter. Under Bun, it's still the http adapter (because Bun emulates <code>process</code>). The fetch patch wouldn't catch axios traffic without forcing <code>defaults.adapter = "fetch"</code> on both the CJS and ESM axios instances. The node:http patch is the second, redundant layer for anything that still bypasses fetch.</p>
+<p class="quiz-explanation">The confirmation wait is part of the broadcast block in the rxjs pipeline. Disable broadcast and the entire block (including the confirmation wait) is omitted. No warning is printed — this is the gotcha.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> Why is the env-restore call placed in <code>finally</code> rather than after the <code>try</code> block in <code>revokeTokenCommand</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) If <code>approveToken()</code> throws (e.g., a Speculos screen-tap timeout), a post-try restore would never run, leaving <code>DISABLE_TRANSACTION_BROADCAST</code> stuck at <code>"0"</code> for the rest of the process and silently corrupting subsequent tests</button>
+<button class="quiz-choice" data-value="B">B) <code>finally</code> is just a stylistic preference — the two forms are equivalent</button>
+<button class="quiz-choice" data-value="C">C) The TypeScript compiler emits a warning if you place state-restoration outside <code>finally</code></button>
+<button class="quiz-choice" data-value="D">D) <code>finally</code> blocks run before the awaited promise resolves, which is what the test needs</button>
+</div>
+<p class="quiz-explanation"><code>finally</code> guarantees execution even on throw. Without it, an exception escapes the try block and the restore line never runs — broadcast stays enabled for the rest of the worker, and subsequent CLI calls broadcast unintentionally. This produces flake that surfaces in tests unrelated to the original failure.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> In <code>send.test.ts</code>, why is the balance route placed BEFORE <code>ETH_SYNC_ROUTES</code> in <code>SEND_ROUTES</code>?</p>
+<p><strong>Q4.</strong> Why does <code>setDisableTransactionBroadcastEnv</code> write to both <code>live-env</code>'s registry (via <code>setEnv</code>) and <code>process.env</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because routes are matched in alphabetical order by path</button>
-<button class="quiz-choice" data-value="B">B) Because <code>ETH_SYNC_ROUTES</code> is read-only and cannot be modified</button>
-<button class="quiz-choice" data-value="C">C) Because Bun.serve only matches the first route that responds successfully</button>
-<button class="quiz-choice" data-value="D">D) Because <code>MockServer</code> matches routes in declaration order, first match wins — and <code>ETH_SYNC_ROUTES</code> includes a default zero-balance route. Placing the 1-ETH override first shadows the default so the send doesn't fail with <code>NotEnoughBalance</code></button>
+<button class="quiz-choice" data-value="A">A) Defensive duplication for backwards compatibility with an old env-loading library</button>
+<button class="quiz-choice" data-value="B">B) <code>process.env</code> is read-only inside ESM modules, so live-env is the canonical store</button>
+<button class="quiz-choice" data-value="C">C) Only one of the two writes actually matters; the other is dead code from a refactor</button>
+<button class="quiz-choice" data-value="D">D) Internal live-common consumers read via <code>getEnv</code> (live-env's typed registry), but spawned CLI subprocesses inherit <code>process.env</code> only — both must change so that both audiences see the new value</button>
 </div>
-<p class="quiz-explanation"><code>MockServer.start</code> iterates the <code>routes</code> array in order. The 1-ETH balance route must come first to override the default zero-balance route in <code>ETH_SYNC_ROUTES</code>; otherwise the bridge sync sees balance=0 and fails the dry-run with <code>NotEnoughBalance</code>.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> What's the difference between <code>runCli</code> and <code>runLocalCli</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>runCli</code> uses <code>wrapper.ts</code> (which loads <code>http-intercept</code>); <code>runLocalCli</code> uses <code>wrapper-local.ts</code> (no HTTP intercept) — used for commands that make no network calls (<code>session view</code>, <code>session reset</code>)</button>
-<button class="quiz-choice" data-value="B">B) <code>runCli</code> runs against the production CLI; <code>runLocalCli</code> runs against a stripped-down local fork</button>
-<button class="quiz-choice" data-value="C">C) <code>runCli</code> requires a real USB device; <code>runLocalCli</code> uses the mock DMK</button>
-<button class="quiz-choice" data-value="D">D) They're identical and only differ in name</button>
-</div>
-<p class="quiz-explanation"><code>runCli</code> spawns the CLI through <code>wrapper.ts</code>, which always loads <code>http-intercept</code> and conditionally loads <code>dmk-intercept</code>. <code>runLocalCli</code> uses <code>wrapper-local.ts</code>, which loads neither. The latter is for tests that only touch the local <code>session.yaml</code> — loading <code>http-intercept</code> would require <code>WALLET_CLI_MOCK_PORT</code> to be set, which doesn't make sense for those tests.</p>
+<p class="quiz-explanation">The two registries are independent after bootstrap. Modules inside the parent process read live-env; the CLI subprocess re-bootstraps live-env from <code>process.env</code> on startup. Setting both keeps internal and subprocess consumers aligned.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q6.</strong> Why don't the wallet-cli integration tests live under <code>e2e/cli/</code>, the way Detox tests live under <code>e2e/mobile/</code>?</p>
+<p><strong>Q5.</strong> A QAA test runs a revoke helper, asserts no errors are thrown, and moves on. Two test runs later, an unrelated allowance test fails because the seed has a non-zero allowance. What is the most likely root cause?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because <code>e2e/cli/</code> is reserved for the legacy <code>apps/cli</code> tests</button>
-<button class="quiz-choice" data-value="B">B) Because Bun cannot run tests outside the package they live in</button>
-<button class="quiz-choice" data-value="C">C) Because they are integration tests with all hard dependencies mocked (no real DMK, no real network) — that's a different category from <code>e2e/desktop</code>/<code>e2e/mobile</code>, which exercise real Speculos/devices. They live colocated with the source under <code>apps/wallet-cli/src/test/</code> and the wallet-cli package owns them. A real-USB E2E suite would warrant a peer <code>e2e/cli/</code> workspace, but that doesn't exist today</button>
-<button class="quiz-choice" data-value="D">D) Because the wallet-cli has no CLI to test — it's only a library</button>
+<button class="quiz-choice" data-value="A">A) The CLI subprocess crashed silently during signing</button>
+<button class="quiz-choice" data-value="B">B) Speculos lost its Docker container between runs and replayed a stale signature</button>
+<button class="quiz-choice" data-value="C">C) The revoke broadcast either failed (no <code>✔️ broadcasted!</code> line in stdout) or was a silent no-op because <code>DISABLE_TRANSACTION_BROADCAST</code> was not flipped to <code>"0"</code> for that run — the after-the-fact <code>getEvmTokenAllowance</code> read is the only true verification of state change</button>
+<button class="quiz-choice" data-value="D">D) <code>--wait-confirmation</code> timed out and the test should retry</button>
 </div>
-<p class="quiz-explanation">The <code>apps/wallet-cli/src/test/commands/README.md</code> and the test stack itself make this explicit: every external dependency (DMK, HTTP) is replaced. That's an integration-test category, not E2E. Colocation with the source matches the ownership model. If a real-USB E2E suite ever materializes (Speculos-on-USB driving the real DMK transport), it would justify a peer <code>e2e/cli/</code> workspace at that point — until then, the colocated <code>src/test/</code> tree is the right location.</p>
-</div>
-
-</div>
-
----
-## Daily CLI Workflow
-
-<a id="daily-cli-workflow"></a>
-
-<div class="chapter-intro">
-You have read the architecture (Ch 5.1), inspected every command (Ch 5.4), absorbed the descriptor V1 schema (Ch 5.4), traced the device session lifecycle through DMK (Ch 5.5), and walked the test harness end to end (Ch 5.6). This chapter ties all of that into the <strong>workflow</strong> &mdash; the exact, repeatable sequence you will run every time you touch <code>apps/wallet-cli/</code>. It mirrors Chapter 4.9 (Daily Mobile Workflow) but tracks the CLI realities: a Bunli command tree under <code>src/commands/</code>, a codegen step that CI enforces, a <code>cli-runner</code> Bun.spawn harness with mocked DMK, an <code>oxlint</code> + <code>oxfmt</code> lint pair, and the device-touching subset of work that needs <code>dangerouslyDisableSandbox: true</code> to run through the agent shell. Follow this every time. The steps do not change just because the change feels small.
-</div>
-
-### 5.7.1 The Ticket Lifecycle for CLI Work
-
-Every piece of work on `apps/wallet-cli/` starts in Jira and ends in either an Xray traceability update or, more commonly today, a CI gate on `pnpm generate:check` plus `pnpm test`. The lifecycle has the same **three ticket shapes** as Part 4, with one CLI-specific nuance.
-
-| Ticket type | Project | Example | Purpose |
-|---|---|---|---|
-| **QAA ticket** | `QAA` | `QAA-615` | A QA work item &mdash; "spike: add revoke command", "add hook to clean allowance state". |
-| **LIVE ticket** | `LIVE` | `LIVE-29495` | A platform-side ticket &mdash; the wallet-cli is co-developed with the Wallet XP team, who track work in `LIVE`. CLI bugs (e.g. `LIVE-29404` &mdash; `--dry-run` silently dropped) live there. |
-| **B2CQA test case** | `B2CQA` | `B2CQA-2844` | An Xray scenario &mdash; rare for CLI work today (no Xray plan exists yet for wallet-cli, see R4 §7.5), but used when a CLI change unblocks a previously un-automatable B2CQA scenario. |
-
-The CLI-specific nuance: **your QAA ticket is often _infrastructure_, not test code**. QAA-615 ("spike: revoke token approval using CLI") is not a test &mdash; it's a tool that future tests will call from a `before`/`after` hook. That distinction shapes the AC: you are not writing assertions, you are exposing a primitive. Reviewers expect a working command, a JSON envelope shape, mocked tests, and (when applicable) a smoke against a real device.
-
-```
-QAA-615 (QA infrastructure ticket)
-   │
-   │ enables
-   ▼
-QAA-613 (nightly token-approval flow)            ◄── consumes the new revoke
-   │
-   │ runs against
-   ▼
-apps/wallet-cli/src/commands/revoke.ts
-   │
-   │ tested in
-   ▼
-apps/wallet-cli/src/test/commands/revoke.test.ts (mocked DMK)
-   │
-   │ wired through
-   ▼
-.bunli/commands.gen.ts (codegen committed)
-```
-
-Skip the codegen commit and CI fails on `pnpm generate:check`. Skip the mocked test and CI fails on `pnpm test`. Skip the Xray link &mdash; if your QAA has one &mdash; and your work is invisible coverage, same cardinal sin called out in Ch 4.9.
-
-### 5.7.2 Orientation &mdash; The Five-Minute Recon
-
-You have been assigned the ticket. Before opening any source file, do the **five-minute recon**. It catches more "I wrote it twice" mistakes than any other habit in this part.
-
-```bash
-# 0. Land in the workspace
-cd apps/wallet-cli
-
-# 1. Read the package.json scripts top to bottom
-cat package.json | jq '.scripts'
-
-# 2. Get the live command tree from the binary, not from your memory
-pnpm --silent wallet-cli start -- --help
-pnpm --silent wallet-cli start -- account --help
-pnpm --silent wallet-cli start -- send --help
-
-# 3. Scan src/commands/ to confirm the file layout matches the help tree
-ls src/commands/
-ls src/commands/account/
-ls src/commands/session/
-
-# 4. Has a recent PR touched the area you are about to touch?
-git log --oneline --since="3 weeks" -- src/commands/
-
-# 5. Are the codegen and tests currently green on dev?
-pnpm test --silent | tail -20
-pnpm generate:check
-```
-
-The answers shape the day:
-
-- **Help shows your command already exists** &rarr; you are extending it, not creating it. Open the existing file; do not start a new one.
-- **Help shows a sibling close to what you need** (e.g. `send` exists, you want `revoke`) &rarr; copy the canonical shape from that file, do not invent one.
-- **`pnpm generate:check` is dirty before you've changed anything** &rarr; stop. `dev` is broken. Fix that first, or rebase off the green commit.
-- **`pnpm test` is red** &rarr; same. Do not pile your work on top of a red baseline.
-
-Write the outcome of the recon as 5 bullets in the Jira ticket. Your reviewer reads those bullets and immediately knows why your diff looks the way it does.
-
-### 5.7.3 How the Test Suites Already Use the CLI
-
-Before you decide what shape your change should take, understand the seam your work will plug into. The Desktop and Mobile E2E suites already invoke a CLI — the legacy `apps/cli` for now, with `wallet-cli` slated to take over piece by piece. They go through a shared facade so individual specs never touch `child_process` directly.
-
-**The two-file integration layer**, both inside `libs/ledger-live-common/src/e2e/`:
-
-- **`runCli.ts`** &mdash; the spawning engine. Resolves `LEDGER_LIVE_CLI_BIN = "../../../../apps/cli/bin/index.js"` and uses `child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])` to run the legacy CLI as a subprocess. Public helpers include `runCliLiveData`, `runCliGetAddress`, `runCliGetTokenAllowance`, and `runCliTokenApproval` &mdash; the last two are the read and write halves of allowance management, already shipped in the legacy CLI.
-- **`cliCommandsUtils.ts`** &mdash; the typed wrapper layer. Exposes higher-level helpers: `liveDataCommand(account)` (seeds an account into Live's `app.json`), `liveDataWithAddressCommand`, `getAccountAddress`, `parseTokenAllowanceCliOutput`, `isTokenAllowanceSufficientCommand(account, spenderAddress, minAmount)`. These are the helpers specs actually import.
-
-**How specs consume the layer**:
-
-- *Desktop:* `e2e/desktop/tests/specs/earn.v2.spec.ts` and `newSendFlow.tx.spec.ts` import the helpers directly: `import { liveDataCommand, liveDataWithAddressCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";` and pass them as fixture data — `{ cliCommands: [liveDataCommand(account)] }`. The desktop fixture engine consumes that array and calls each helper before the test starts.
-- *Mobile:* `e2e/mobile/jest.environment.ts:138` does `Object.assign(this.global, cliCommandsUtils);` — every helper becomes a global. `types/global.d.ts:104-110` mirrors that as ambient type declarations. So a mobile spec can just write `await liveDataCommand(account)(userdataPath)` without an import statement, because the Jest environment has injected the function before the spec runs.
-
-**Why this matters for your change**:
-
-1. *If your ticket adds a new wallet-cli command* — for example QAA-615's `revoke` — the test integration is not "done" when the binary works. There is a wire-up step where you add a `runWalletCliRevoke` to `runCli.ts` (or a sibling `runWalletCli.ts` if the team prefers separating the two transports), and a `revokeAllowanceCommand(account, spender)` wrapper to `cliCommandsUtils.ts`. *Then* desktop and mobile specs can use it via the existing fixture mechanisms.
-2. *If your ticket touches a flow that already has a legacy-CLI helper* — for example anything calling `liveDataCommand` — note that today's traffic still goes through `apps/cli`. Don't quietly break that. Until the wallet-cli wrapper lands, both transports may need to coexist for a release or two.
-3. *If your ticket is wallet-cli-only* — a feature that legacy CLI doesn't have and isn't supposed to gain — you can skip the wire-up step. Document explicitly in the spike report that no test-integration is in scope.
-
-**The migration trajectory**: as wallet-cli grows feature parity, helpers in `cliCommandsUtils.ts` migrate one at a time to point at the new transport. Migration is per-helper, never wholesale. The end state is `runCli.ts` deprecated, `cliCommandsUtils.ts` fully wallet-cli-backed, legacy `apps/cli` still on disk for the handful of niche features it owns (Speculos `bot`, app management, firmware ops). That migration is gradual and — explicitly — out of scope for any single QAA ticket.
-
-When you size your work, remember the integration layer is its own scope. A "small" CLI command change can imply a non-trivial test-integration update if specs already consume the helper you're touching.
-
-### 5.7.4 Picking the Change Shape &mdash; Decision Tree
-
-Most CLI tickets fit into one of three shapes. Pick the smallest that satisfies the AC. Anything bigger is over-engineered.
-
-```
-                         ┌─────────────────────────────────────────┐
-                         │  Does the command you need already exist? │
-                         └─────────────┬───────────────────────────┘
-                                       │
-                ┌──────────────────────┴──────────────────────┐
-              YES                                              NO
-                │                                              │
-                ▼                                              ▼
-      ┌──────────────────────┐                  ┌──────────────────────────┐
-      │ Is a flag missing?   │                  │ Is the change shape a    │
-      └──────┬───────────────┘                  │ thin wrapper around an   │
-             │                                  │ existing command?        │
-       ┌─────┴──────┐                           └────────┬─────────────────┘
-      YES           NO                                   │
-       │             │                            ┌──────┴──────┐
-       ▼             ▼                          YES            NO
-  ┌─────────┐  ┌──────────┐                      │              │
-  │ Add to  │  │ Add to   │                      ▼              ▼
-  │ command │  │ inputs.ts│            ┌─────────────────┐  ┌────────────┐
-  │ options │  │ if       │            │ New file under  │  │ New leaf   │
-  │ block.  │  │ shared   │            │ src/commands/   │  │ command +  │
-  │         │  │ across   │            │ that calls into │  │ family     │
-  │         │  │ commands.│            │ existing send/  │  │ intent     │
-  │         │  │          │            │ balances logic. │  │ (heaviest) │
-  └─────────┘  └──────────┘            └─────────────────┘  └────────────┘
-```
-
-Concrete examples:
-
-| Ticket shape | Example | Surface | Effort |
-|---|---|---|---|
-| Add a flag to one command | `--abort-timeout` on `send` | Modify `send.ts` options schema, plumb to `wallet-cli-dmk-transport.ts`. | ~20 LOC + 1 unit test |
-| Add a flag shared across commands | `--rpc-url <url>` on every device-free command | Add to `src/commands/inputs.ts`, import from each leaf. | ~30 LOC + 1 unit test |
-| Wrapper command | `revoke` &rarr; calls `send --data 0x095ea7b3...` | New file `src/commands/revoke.ts`, calls into the same EVM intent builder. No new APDU code. | ~80 LOC + 1 mocked + 1 smoke |
-| Net-new family-aware leaf | `stake delegate` on a new chain | New file, new family entry in `wallet/intents/families/`, new bridge mapping. | ~250 LOC + tests |
-
-QAA-615's sweet spot is the third row (wrapper). The EVM intent already accepts `--data` (see Ch 5.4); a `revoke` wrapper builds the calldata and forwards. That's why R1's headline finding stands: revoke is a thin wrapper, not new infrastructure.
-
-### 5.7.5 Local Iteration Loop
-
-The CLI's edit-run-edit cycle is the fastest of any surface in this guide. There is no Metro bundler, no app to relaunch, no Detox build &mdash; just `bun run`. Aim for **sub-second feedback**.
-
-```bash
-# Tight loop, no device, no network
-pnpm --silent start -- balances ethereum-1 --output json | jq .
-
-# With debug logging
-DEBUG=wallet-cli pnpm --silent start -- balances ethereum-1
-
-# Hot-reload mode (Bunli)
-pnpm dev
-```
-
-The `--output json | jq .` pipe is the single most useful habit you can build. Three reasons:
-
-1. **JSON is parseable.** Visual diffs of two runs are trivial with `jq`.
-2. **Human output is for humans.** The spinner, colors, and aligned columns are TTY-mode noise &mdash; they make grepping hard.
-3. **CI talks JSON.** Every hook future-you writes will pipe wallet-cli output to `jq`. Train the muscle now.
-
-Inside an AI-agent shell (Claude Code, Cursor, Codex), `isInteractive()` from `src/shared/ui.ts` returns `false` because of the `CLAUDECODE` / `CURSOR_AGENT` / `CODEX_ENABLED` env detection. Spinners no-op, output is clean. That is intentional; the test runner relies on it (Ch 5.6).
-
-A productive cycle looks like:
-
-```bash
-# Tab 1: keep the help/output handy
-watch -n 1 'pnpm --silent start -- revoke --help 2>&1 | tail -30'
-
-# Tab 2: run the test you're writing
-bun test src/test/commands/revoke.test.ts --watch
-
-# Tab 3: edit the source file
-$EDITOR src/commands/revoke.ts
-```
-
-If a single change requires more than 30 s to validate, you are doing too much per iteration. Shrink the change.
-
-### 5.7.6 Writing Tests as You Go &mdash; TDD-Lite
-
-The wallet-cli test harness is mature enough that **mocked tests must come first**. The pattern is canonical TDD-lite (red &rarr; green &rarr; refactor) but tightened for CLI:
-
-1. **Write the failing test against the mock harness.** `Bun.spawn` spawns the CLI with `WALLET_CLI_MOCK_DMK=1` and your mock app result. Assert the JSON envelope shape you want.
-2. **Watch it fail meaningfully.** The error should be "command not found" or "missing flag X" &mdash; not a JSON parse error or a sandbox crash. If it crashes, fix the harness first.
-3. **Make it pass with the smallest change.** One option, one handler stub, the JSON envelope correct.
-4. **Refactor.** Move shared helpers to `src/commands/inputs.ts`. Extract the calldata builder into a pure function. Move the test fixtures to `test/helpers/constants.ts`.
-
-```bash
-# The TDD-lite loop
-bun test src/test/commands/revoke.test.ts --watch
-```
-
-**No real device for steps 1&ndash;3.** The mock DMK seam (`src/device/mock-dmk.ts` &mdash; see Ch 5.6) returns whatever you put in `WALLET_CLI_MOCK_APP_RESULTS`. For a `revoke` test, that's the same Ethereum app shape `send` uses today (`{ "Ethereum": { signature: "0x..." } }`). Lift the fixture from `test/commands/send.test.ts` &mdash; it already wires the routes, the http-intercept, and the session.
-
-The `test/commands/README.md` line is the contract:
-
-> Each test treats a CLI command as a black box: given known flags and mocked infrastructure, the command must produce the expected stdout shape (JSON envelope) and exit code. All external I/O is replaced &mdash; no real device or network needed.
-
-Assert exactly two things per test, no more:
-
-1. The exit code (0 for success, 1 for the failure case under test).
-2. The JSON envelope: `command`, `network`, `account`, plus the command-specific fields (`tx_hash`, `dry_run`, `removed`, etc.).
-
-Three or more assertions per test is a smell &mdash; split the test.
-
-### 5.7.7 Smoke Against a Real Device
-
-Only after the mocked tests are green do you plug a device in. Real-device smoke is **not a substitute** for mocked tests; it is the final acceptance check that the APDU shape your mock asserted matches what the embedded app actually expects.
-
-Pre-conditions, every time:
-
-1. Real Ledger plugged in via USB (Nano S Plus, Nano X, Stax, or Flex).
-2. Device unlocked with PIN.
-3. The relevant coin app **manually opened** on device. For Base, that's the Ethereum app &mdash; the `withCurrencyDeviceSession()` helper maps `evm` family &rarr; `ethereum` managerAppName regardless of the EVM chain.
-4. **Only one wallet-cli command at a time.** Two parallel device commands fight over the USB session and one will hang. The internal-testing page (R4 §A.2) is explicit: "Always run device commands one by one &mdash; never in parallel."
-
-Running through Bash with the agent harness is sandboxed by default. USB is outside the sandbox, so a device-touching command will fail with a misleading "Timeout has occurred" error. Set `dangerouslyDisableSandbox: true` for that single Bash call, no more:
-
-```text
-Bash command:           pnpm --silent wallet-cli start -- send ethereum-1 --to 0x... --amount '0.001 ETH'
-dangerouslyDisableSandbox: true
-```
-
-The pattern is: every device-touching invocation gets the flag; every mocked test does not. Do not blanket-enable the flag for the whole session &mdash; the sandbox is your safety net for the 95 % of work that doesn't need it.
-
-After the run, **verify the clear-sign content on device**. The Ethereum app should display the calldata fields decoded by the ERC-7730 metadata service (DMK fetches them; see Ch 5.5 and the DMK overview in R4 §A.3). If the device shows a raw hex blob, that's blind-sign mode &mdash; either the metadata is missing for the contract or the origin token is not embedded. Note it in the ticket; do not silently approve.
-
-### 5.7.8 Codegen Check
-
-If you added or removed a command file under `src/commands/`, you **must** run codegen and commit the result:
-
-```bash
-pnpm generate
-git add .bunli/commands.gen.ts
-```
-
-The generated file (`.bunli/commands.gen.ts`, ~215 lines today) statically imports every command module and registers it before `cli.run()` executes. The CI gate is `pnpm generate:check`, which runs `bunli generate` and then `git diff --exit-code -- .bunli/commands.gen.ts`. If your local generated file disagrees with the committed one, the build fails.
-
-Common gotchas:
-
-- **Adding a new file but forgetting `pnpm generate`** &rarr; CI red.
-- **Renaming an existing file** &rarr; codegen import path changes; you must commit the regenerated file.
-- **Editing `.bunli/commands.gen.ts` by hand** &rarr; the file's first line says "DO NOT EDIT". Your edit will be overwritten on the next `pnpm generate`. Do not.
-- **Adding a flag to an existing command but not changing the file structure** &rarr; you do **not** need to rerun `pnpm generate`. The codegen captures the command tree, not flag-level details (those live in the source).
-
-Treat `pnpm generate` like an autoformatter: run it whenever you change command file structure, commit the result, never edit the output by hand.
-
-### 5.7.9 Lint and Typecheck
-
-The wallet-cli uses `oxlint` (linter) and `oxfmt` (formatter) &mdash; the Rust-toolchain replacements for ESLint and Prettier. They are 10&ndash;100x faster, which is why the workspace adopted them, and they share a config with the rest of the monorepo (`.oxlintrc.json` and `.oxfmtrc.json` at the package root, plus a shared `../../.oxfmtrc.json`).
-
-```bash
-# In apps/wallet-cli/
-pnpm lint           # oxlint src bunli.config.ts
-pnpm lint:fix       # oxfmt + oxlint --fix
-pnpm format         # oxfmt apply
-pnpm format:check   # oxfmt check (CI gate)
-pnpm typecheck      # tsc --noEmit -p tsconfig.json
-```
-
-Run the full triplet before you push:
-
-```bash
-pnpm lint && pnpm typecheck && pnpm test
-```
-
-If `lint` complains and you genuinely cannot fix it (rare &mdash; the rules are deliberate), prefer a single-line `// oxlint-disable-next-line <rule>` over disabling at file scope. Reviewers will ask why you disabled the rule.
-
-### 5.7.10 Session Storage and Labels &mdash; Currently In Flight
-
-This subsection is **informational, not load-bearing**. The wallet-cli's persistent state layout is in active flux between two designs. Do not depend on either path in tests &mdash; the tests redirect via `XDG_STATE_HOME` and a tmpdir (see `test/helpers/session-fixture.ts`, Ch 5.6).
-
-**What ships today (LIVE-29495).** The `session.yaml` file is written via `@bunli/utils stateDir(APP_NAME)` where `APP_NAME = "ledger-wallet-cli"`. On Linux/macOS that resolves to:
-
-```
-$XDG_STATE_HOME/ledger-wallet-cli/session.yaml
-   default:  ~/.local/state/ledger-wallet-cli/session.yaml
-```
-
-Schema (Zod-validated):
-
-```yaml
-accounts:
-  - label: ethereum-1
-    descriptor: account:1:address:ethereum:main:0x71C7...:m/44h/60h/0h/0/0
-  - label: bitcoin-native-1
-    descriptor: account:1:utxo:bitcoin:main:xpub6BosfCn...:m/84h/0h/0h
-```
-
-This is what `account discover` writes after a successful run, what `session view` reads, and what `resolveAccountInput()` in `src/commands/inputs.ts` consults whenever a flag value lacks a `:` (label lookup mode).
-
-**What the ADR proposes (TA/6978928805, "ADR &mdash; CLI Storage", _Proposed_).** A different path:
-
-```
-~/.ledger/cli/<file>.yaml
-```
-
-with an open question about whether `deviceId` lives inside the descriptor (Solution 1) or in a context file (Solution 2). The ADR is **proposed**, not accepted. R4 §A.6 captures the divergence:
-
-> "Two competing storage layouts in flight."
-
-**What this means for you, today.**
-
-- For tests: never read `~/.local/state/...` directly. Use `makeSessionDir(...)` from `test/helpers/session-fixture.ts` and pass the returned `XDG_STATE_HOME` env to the subprocess. That isolates each test.
-- For commands: read/write through `Session.read()` / `session.write()` in `src/session/session-store.ts`. Never hard-code the path.
-- For docs: cite "session storage layout" without committing to a directory. When the ADR lands, one find-and-replace updates the guide.
-- For PR review: if a reviewer asks "why is the path not `~/.ledger/cli/`?", the answer is "LIVE-29495 shipped first; the ADR is proposed; we await the consolidation ticket."
-
-This is an **honest gap**, not a bug. The codebase has the right indirection (`stateDir(APP_NAME)`) so that flipping to the ADR path is a one-line change.
-
-### 5.7.11 Commit and PR
-
-Conventional Commits, scoped to `cli`:
-
-| Type | Use for |
-|---|---|
-| `feat(cli):` | A new command or a new user-visible flag. |
-| `fix(cli):` | A bug fix on an existing command. |
-| `test(cli):` | Adding or improving tests, no production change. |
-| `refactor(cli):` | Restructure without behavior change (e.g. extract a calldata builder). |
-| `chore(cli):` | Tooling, config, codegen-only commits, dependency bumps. |
-| `docs(cli):` | Documentation-only (README, in-source comments, agents skill). |
-
-Branches follow the global rules from `git-workflow.md` (kebab-case, prefix indicates type):
-
-```bash
-# New command
-git checkout -b feat/cli-qaa-615-revoke-command
-
-# Bug fix
-git checkout -b fix/cli-live-29404-dry-run-flag
-
-# Test additions only
-git checkout -b test/cli-revoke-mocked-coverage
-
-# Refactor
-git checkout -b refactor/cli-extract-calldata-builder
-```
-
-The `cli-` segment in the branch name (paralleling Part 4's `llm-`, Part 3's `lld-`) tells reviewers the surface without opening the diff.
-
-PR description checklist (paraphrased from the global PR template):
-
-1. **Title** &mdash; `feat(cli): add revoke command (QAA-615)`. One line, references the ticket.
-2. **Jira link** at the top of the description.
-3. **Acceptance Criteria** restated, with each item checkbox-ticked.
-4. **Approach summary** &mdash; one paragraph: "I added `revoke.ts` as a thin wrapper around `send`'s EVM intent. The calldata is built by `buildErc20RevokeCalldata(spender)`. New mocked test passes; smoke against a Nano S Plus + Ethereum app v1.16 succeeded; clear-sign content showed `Approve` with amount 0."
-5. **Test evidence** &mdash; output of `pnpm test`, screenshot of the device clear-sign screen if relevant, CI run link.
-6. **CODEOWNERS** auto-requests &mdash; sanity-check the list (see 5.7.11).
-
-For ticket flow detail (assignee transitions, "In Code Review" status moves, the `/create-pr` skill), see Part 0 Ch 0.5.
-
-### 5.7.12 Reviewer Routing
-
-Always look up the live owners in `.github/CODEOWNERS` &mdash; do not paste a stale list from this guide.
-
-```bash
-# From the monorepo root
-grep -nE "^/?apps/wallet-cli/" .github/CODEOWNERS
-grep -nE "^/?apps/cli/" .github/CODEOWNERS
-grep -nE "wallet-cli|live-dmk-shared" .github/CODEOWNERS
-```
-
-The wallet-cli owners (verify before opening the PR &mdash; this list is a snapshot, not the contract):
-
-| Path | Likely owners |
-|---|---|
-| `apps/wallet-cli/` | wallet-ci team + Wallet XP (`@ledgerhq/wallet-xp`) |
-| `apps/wallet-cli/src/device/` | DMK platform owners (often `@ledgerhq/wallet-xp` or a dedicated DMK team) |
-| `apps/cli/` (legacy) | live-common platform owners |
-| `libs/live-dmk-shared/` | DMK platform owners |
-
-GitHub's branch protection auto-requests owners. Sanity-check that the list contains, at minimum, the wallet-ci team. If your diff bleeds into `libs/ledger-live-common/src/families/evm/` (e.g. you needed a new helper in `getTokenAllowance.ts`), expect the EVM coin module owners to be added &mdash; that team's review takes longer; budget for it.
-
-If the auto-request misses an owner you know should be there (because their CODEOWNERS rule is stale or your diff is novel), add them manually. Reviewers prefer being added explicitly to discovering a stealth diff three days later.
-
-### 5.7.13 Chapter 5.7 Quiz
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz &mdash; Daily CLI Workflow</h3>
-<p class="quiz-subtitle">6 questions &middot; 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> You added a new file <code>src/commands/revoke.ts</code> and your mocked tests pass locally. CI still fails. What is the most likely cause?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The Ethereum app version on the CI device differs from yours</button>
-<button class="quiz-choice" data-value="B">B) <code>oxfmt</code> auto-formatted your file differently in CI</button>
-<button class="quiz-choice" data-value="C">C) You forgot to run <code>pnpm generate</code> and commit <code>.bunli/commands.gen.ts</code> &mdash; the <code>generate:check</code> gate fails</button>
-<button class="quiz-choice" data-value="D">D) <code>bun test</code> behaves differently under Linux</button>
-</div>
-<p class="quiz-explanation">Adding or removing a file under <code>src/commands/</code> changes the codegen output. <code>generate:check</code> runs <code>bunli generate</code> in CI and fails if the committed file disagrees. This is the single most common red CI cause for wallet-cli PRs.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> You want to test a new <code>revoke</code> command. The first test you write is:</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Plug a device, open Ethereum app, run the command live, and snapshot the output</button>
-<button class="quiz-choice" data-value="B">B) A <code>bun test</code> file under <code>src/test/commands/revoke.test.ts</code> using <code>cli-runner</code> + mocked DMK + http-intercept; assert the JSON envelope shape and exit code</button>
-<button class="quiz-choice" data-value="C">C) A unit test of <code>buildErc20RevokeCalldata()</code> only, no end-to-end</button>
-<button class="quiz-choice" data-value="D">D) Run it through the agent shell with <code>dangerouslyDisableSandbox: true</code> and pipe to <code>jq</code></button>
-</div>
-<p class="quiz-explanation">Mocked-DMK integration tests are the canonical first artifact (see Ch 5.6 and the contract in <code>test/commands/README.md</code>). Real-device smoke is the final acceptance check, not the first iteration. Pure unit tests (C) are useful but do not verify the JSON envelope or exit code &mdash; they cover only one layer.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> You run a device-touching command through the agent's Bash tool and get <code>Timeout has occurred</code>. Most likely cause?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The Bash call ran inside the sandbox, which blocks USB. Re-run with <code>dangerouslyDisableSandbox: true</code></button>
-<button class="quiz-choice" data-value="B">B) The wallet-cli is hanging on a metadata fetch from the CAL service</button>
-<button class="quiz-choice" data-value="C">C) The DMK transport is not registered</button>
-<button class="quiz-choice" data-value="D">D) The Ethereum app is too old for ERC-7730</button>
-</div>
-<p class="quiz-explanation">The sandbox blocks USB device access. Without <code>dangerouslyDisableSandbox: true</code>, DMK can't open the device session and times out after the connect timeout (60s). This is exercise 5.9.6 below &mdash; reproducing the error consciously is the best way to internalize the rule.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Where does <code>session.yaml</code> live today?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>~/.ledger/cli/session.yaml</code></button>
-<button class="quiz-choice" data-value="B">B) <code>~/.config/ledger-wallet-cli/session.yaml</code></button>
-<button class="quiz-choice" data-value="C">C) <code>./session.yaml</code> (relative to the working directory)</button>
-<button class="quiz-choice" data-value="D">D) <code>$XDG_STATE_HOME/ledger-wallet-cli/session.yaml</code> (default <code>~/.local/state/ledger-wallet-cli/session.yaml</code>) &mdash; LIVE-29495 via <code>@bunli/utils stateDir()</code></button>
-</div>
-<p class="quiz-explanation">LIVE-29495 ships the XDG state path. The ADR (TA/6978928805) proposes <code>~/.ledger/cli/</code> but is still <em>Proposed</em>. The codebase reads/writes through <code>stateDir(APP_NAME)</code> so a future flip to the ADR layout is a one-line change. Do not depend on the literal path in tests &mdash; use <code>makeSessionDir(...)</code> from the test helpers.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> You need to add a flag <code>--abort-timeout</code> shared across <code>send</code>, <code>receive</code>, and <code>account discover</code>. Where do you put the flag definition?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Inline the same option block into all three command files</button>
-<button class="quiz-choice" data-value="B">B) Define it once in <code>src/commands/inputs.ts</code> and import it into the three commands</button>
-<button class="quiz-choice" data-value="C">C) Add it to <code>.bunli/commands.gen.ts</code></button>
-<button class="quiz-choice" data-value="D">D) Add it as an environment variable handled at process start</button>
-</div>
-<p class="quiz-explanation"><code>src/commands/inputs.ts</code> is the canonical home for shared option helpers (the briefing called this <code>shared-options.ts</code>; the file was renamed). Three duplicated blocks (A) drift; <code>commands.gen.ts</code> (C) is generated; an env-var (D) bypasses the help system. The shared helper keeps <code>--help</code> consistent across commands.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q6.</strong> You open a PR titled <code>add revoke command</code>. The reviewer asks for a Conventional Commits-style title. Which is correct?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>add(cli): revoke command</code></button>
-<button class="quiz-choice" data-value="B">B) <code>WALLET-CLI: add revoke command</code></button>
-<button class="quiz-choice" data-value="C">C) <code>feat(cli): add revoke command (QAA-615)</code></button>
-<button class="quiz-choice" data-value="D">D) <code>[QAA-615] add revoke</code></button>
-</div>
-<p class="quiz-explanation">Type (<code>feat</code>) + scope (<code>cli</code>) + imperative description + Jira ID in parens. <code>add</code> is not a Conventional Commits type. <code>WALLET-CLI:</code> and bracketed prefixes are not the convention. The format is enforced by Lerna semantic-release rules.</p>
+<p class="quiz-explanation">The verification ladder from §5.6.10 — CLI stdout, wait-confirmation, follow-up allowance read, manual revoke.cash — exists exactly because "no thrown error" is not proof of on-chain state change. If the revoke ran with broadcast disabled (env var still <code>"1"</code>, or the helper's flip-to-<code>"0"</code> was bypassed), the signed bytes were dropped and the chain was unchanged.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway.</strong> The CLI workflow is: pick a QAA ticket &rarr; recon the workspace in 5 minutes &rarr; pick the smallest change shape that satisfies the AC &rarr; tight loop with <code>--output json | jq</code> &rarr; mocked tests first, real device only after green &rarr; <code>pnpm generate</code> if you touched the command tree &rarr; lint, typecheck, test &rarr; <code>feat(cli):</code> commit &rarr; PR with the wallet-ci team auto-requested. The same dance, every ticket. Sub-second feedback is the design goal &mdash; if you're waiting more than 30 s per iteration, shrink the iteration.
+You now know what <code>DISABLE_TRANSACTION_BROADCAST</code> does, where it is read, where it is written, and why the try/finally restore is non-negotiable. The next chapter zooms back out from the single env var to the full daily workflow — pick up a ticket, orient yourself in the codebase, choose the right change shape, iterate locally, and ship a PR. The broadcast discipline you just learned is one of the moving parts; the workflow is the assembly line that keeps it moving.
 </div>
 
 ---
 
-
-## Walkthrough QAA-615 — Implementing wallet-cli revoke
+## Daily CLI Workflow
 
 <div class="chapter-intro">
-Your CLI capstone, but with a twist. Earlier walkthroughs (Part 4 Ch 4.10, Part 5 Ch 5.4) shipped a complete solution and asked you to follow along. This chapter is different: <strong>you will write the code yourself</strong>. The chapter walks you to the door of every phase — ticket context, architecture, helpers in the monorepo, path tradeoffs, test plan, PR shape — but the final lines of TypeScript are yours to compose. Each phase ends with a question to resolve or a skeleton to fill, not a finished file to copy. Treat it as a Software Carpentry tutorial: scaffolded, not pre-baked. The reward is that when you finish, you will <em>understand</em> the wallet-cli stack the way you understand the desktop and mobile stacks — by having built something inside it.
+Chapters 5.1 through 5.6 covered the architecture, the primitives, the env discipline, and the moving parts. This chapter is the assembly line: the exact, repeatable sequence you will follow every time a CLI-related QAA ticket lands in your queue. It mirrors the daily-workflow chapters in Parts 3 and 4 (desktop and mobile) but tracks the realities of CLI work — the legacy <code>apps/cli</code>, the five-layer architecture, the Speculos lifecycle, and the four change shapes that cover almost every ticket. Follow it every time. Even small tickets benefit from the recon pass; especially small tickets, because that is when you are most tempted to skip it and most likely to misjudge scope.
 </div>
 
-> **A note on tone.** This chapter assumes you have read Chapter 5.1 (wallet-cli landscape), Chapter 5.2 (Bunli + DMK + bridge adapter), and at least skimmed the QAA-702 walkthrough in Part 4 Ch 4.10. If you skipped those, the helper names and Bunli idioms below will look unfamiliar. Bounce back, then return.
+### 5.7.1 Workflow at a Glance
+
+Every CLI ticket follows the same backbone:
+
+```
+pick a ticket
+   │
+   │ read AC, find linked B2CQA, identify scope
+   ▼
+orient yourself (5-min recon)
+   │
+   │ where does the change land in the 5-layer model?
+   ▼
+decide change shape
+   │  (one of four — see 5.7.3)
+   ▼
+branch from develop
+   │
+   │ support/qaa-XXX-... or feat/qaa-XXX-...
+   ▼
+iterate locally
+   │
+   │ tight inner loop on Speculos, sub-minute per turn
+   ▼
+smoke against a real device (only if needed)
+   │
+   │ REMOTE_SPECULOS=true or USB-connected Ledger
+   ▼
+typecheck / lint / clean up commits
+   │
+   ▼
+PR + reviewer routing
+```
+
+The only step that varies in size is "decide change shape". The rest is the same shape whether you are adding a one-line spec change or a brand-new typed helper. Treat the backbone as muscle memory and reserve mental bandwidth for the change-shape decision and the actual implementation.
+
+### 5.7.2 Orientation — The 5-Minute Recon
+
+Before writing a single line of code, run the recon. Five minutes spent here saves hours of going down the wrong path.
+
+**Step 1 — Branch off `develop`.** Never `main`. Never the previous feature branch.
+
+```bash
+git checkout develop
+git pull
+git checkout -b support/qaa-XXX-add-revoke-helper
+```
+
+**Step 2 — Refresh dependencies.** `pnpm i` is typically a no-op when no `package.json` has changed, but it is cheap and it surfaces lockfile drifts before they bite you mid-iteration.
+
+```bash
+pnpm i
+```
+
+**Step 3 — Read the ticket end-to-end.** Twice. The first pass to get the gist; the second pass to spot the precise verb in the AC. "Add a helper" and "wire an existing helper into a fixture" sound similar but land in different layers. The verb tells you which layer.
+
+**Step 4 — Identify the layer.** Use the table from Chapter 5.4 as a mental sieve:
+
+| Verb in AC | Likely layer |
+|---|---|
+| "Add a CLI command for X" | Layer 1 (apps/cli) + Layer 2 + Layer 3 |
+| "Add a typed helper for X" | Layer 3 (`cliCommandsUtils.ts`) |
+| "Wire helper into the swap POM" | Layer 5 (`swap.page.ts`) |
+| "Add a regression test for X" | Spec file only (`tests/specs/...`) |
+| "Fix the device-tap dance for X" | Layer 4 (`families/evm.ts`) |
+
+Most tickets land squarely in one layer. Tickets that span multiple layers (a brand-new CLI command, e.g.) are the ones to flag with your lead before starting.
+
+**Step 5 — Open the relevant file.** Whatever layer you identified, open the file in your editor and skim it for context. For most QAA tickets, that means:
+
+```bash
+code libs/ledger-live-common/src/e2e/cliCommandsUtils.ts
+```
+
+Read the existing helpers. Note the naming conventions. Note the curried-function pattern (`liveDataCommand` returns a function that takes `userdataPath`). Note that `approveTokenCommand` and `revokeTokenCommand` set broadcast on, while `liveDataCommand` does not (because liveData has no on-chain side-effect).
+
+**Step 6 — Find existing usage.** Search for the helpers you will likely interact with:
+
+```bash
+grep -rn "approveTokenCommand\|isTokenAllowanceSufficientCommand\|revokeTokenCommand" e2e/
+```
+
+Read three or four usage sites. The patterns repeat — most consumers are POM methods in `swap.page.ts` or fixture entries in `tests/specs/*.spec.ts`. After fifteen minutes of grep + read, you have a mental map of where your change fits.
+
+> **Tip:** if a CLI helper does not yet exist for the operation you are automating, do not invent one in the spec or the POM. Add the helper to `cliCommandsUtils.ts` first, then call it from the higher layers. Specs that build their own CLI commands inline are a maintenance bomb.
+
+### 5.7.3 Picking the Change Shape
+
+Almost every CLI-related QAA ticket maps to one of four change shapes. Identifying yours up front is the single most important framing decision of the day.
+
+#### Shape A — New CLI command needed
+
+The ticket needs an operation that no `apps/cli` command supports today. Example: a hypothetical "register a domain on ENS" ticket would need a brand-new `apps/cli/src/commands/blockchain/registerEnsDomain.ts` because none of the 16 existing commands cover it.
+
+**Layers touched:** 1 (CLI), 2 (engine helper in `runCli.ts`), 3 (typed wrapper in `cliCommandsUtils.ts`), and possibly 4 (if the new operation needs a new device-tap helper).
+
+**Who to talk to first:** the wallet-ci team. They own `apps/cli`. New CLI commands need their review and there is often architectural prior art ("this overlaps with `signMessage` — extend that instead of adding a new command"). Do not start implementing without that conversation; you will rewrite half of it.
+
+**Frequency:** rare. Maybe one or two tickets per quarter.
+
+#### Shape B — New typed helper needed
+
+The CLI command exists but no `cliCommandsUtils.ts` wrapper does. The senior's QAA-615 work — adding `revokeTokenCommand` — is exactly this shape. The underlying `send --mode revokeApproval` already worked; the helper layer needed a new typed entry point.
+
+**Layers touched:** 3 only.
+
+**Who to talk to first:** wallet-xp owns `cliCommandsUtils.ts` (it lives in `libs/ledger-live-common/src/e2e/`). A passing review here is straightforward as long as the new helper follows the existing naming and try/finally conventions.
+
+**Frequency:** common. Most "automate this on-chain operation" tickets land here.
+
+#### Shape C — New POM method needed
+
+The CLI command and helper both exist but the POM method that orchestrates Speculos + helper for a particular UI flow does not. Example: a swap-cleanup hook that needs to revoke an allowance before each test. The senior's `revokeTokenApproval` POM method on `swap.page.ts` is exactly this shape.
+
+**Layers touched:** 5 only (the relevant page object). Possibly a fixture file in `e2e/desktop/tests/fixtures/` if the new method should be invoked declaratively from `cliCommands: [...]`.
+
+**Who to talk to first:** the team that owns the page (wallet-xp for `swap.page.ts`; PTX for swap-specific fixtures).
+
+**Frequency:** common. Pairs naturally with shape B — sometimes the same PR adds the helper *and* the POM method.
+
+#### Shape D — Just a new spec using existing POMs
+
+The CLI command, helper, and POM method all exist. You are writing a regression spec under `tests/specs/` that consumes them. This is the lowest-cost change shape and the most common.
+
+**Layers touched:** spec file only.
+
+**Who to talk to first:** the test owners for the relevant area (wallet-xp for desktop e2e; mobile QA for mobile e2e).
+
+**Frequency:** very common. The bread and butter of QAA work.
+
+#### The decision tree
+
+```
+Does the operation exist as a CLI command?
+   no  → Shape A (new CLI command, talk to wallet-ci)
+   yes ↓
+Does a cliCommandsUtils.ts helper wrap it?
+   no  → Shape B (new helper)
+   yes ↓
+Does the relevant POM expose a method that calls the helper?
+   no  → Shape C (new POM method)
+   yes ↓
+Are you adding new test coverage that consumes existing POM methods?
+   yes → Shape D (spec only)
+```
+
+Walk the tree top-to-bottom. When you reach a "no", stop — that is your shape. Do not pre-emptively add layers below your stopping point unless the ticket explicitly needs them.
+
+### 5.7.4 Local Iteration Loop
+
+Once you have branched, identified the shape, and started writing, your inner loop is what determines how productive the day is. The target is **sub-minute per iteration** for spec changes and **under two minutes** for changes that touch live-common (which require a TypeScript rebuild of the library).
+
+The canonical command to run a single test that uses the CLI:
+
+```bash
+cd e2e/desktop
+pnpm run test:e2e --grep "B2CQA-XXXX"
+```
+
+`--grep` is Playwright's filter against the test title. Every test title carries the B2CQA tag, so this is the single-test filter you use 90% of the time. Variants:
+
+- `--debug` — opens Playwright Inspector, lets you step through actions, see DOM at each step. Good for the first run on a new test.
+- `--ui` — interactive UI mode. Tree view of all tests, click to run, watch artifacts in real-time. Good for exploratory debugging.
+- `--reuse-context` — reuses the Electron context across tests if you have multiple in the grep. Saves ~30s per spec on Speculos boot but can mask state-leak bugs, so use only when the tests are independent.
+- `--workers=1` — force serial. Useful when you suspect a Speculos port collision.
+
+When the test runs, three things happen behind the scenes:
+
+1. Playwright starts Electron (the desktop binary).
+2. The fixture engine sees `cliCommands: [...]` in the test data and runs each curried function. If your helper is in there, this is when it fires.
+3. The test body runs; POM methods that call CLI helpers fire as the test progresses.
+
+For the first run on a fresh repo, expect ~30 seconds of Speculos Docker container boot. Subsequent runs reuse the container and start in 2–5 seconds.
+
+> **Verify:** the exact root pnpm script for desktop e2e tests is `pnpm desktop e2e:test --grep ...` from the monorepo root, or the path-prefixed `cd e2e/desktop && pnpm run test:e2e --grep ...` from the workspace. Both invoke the same Playwright config. If neither resolves, check `e2e/desktop/package.json` for the current script name on your branch.
+
+#### Watching artifacts in real-time
+
+Each run writes to `e2e/desktop/artifacts/<run-id>/`. Tail it in a second terminal:
+
+```bash
+cd e2e/desktop
+ls -lt artifacts/ | head -5
+# pick the latest run-id
+tail -f artifacts/<run-id>/test-name/output.log
+```
+
+For CLI invocations specifically, the spawn engine (`runCli.ts`) prints `[CLI] Executing: ledger-live <command>` to stderr; that line shows up in the run log and is your single-best signal that the CLI is being invoked with the args you expect.
+
+#### When the loop is broken
+
+If a single test takes more than two minutes per iteration, something is wrong. Common culprits:
+
+- **Speculos won't start.** Docker daemon is down, or a previous Speculos container is wedged on the port. `docker ps` and `docker rm -f $(docker ps -aq --filter ancestor=ghcr.io/ledgerhq/speculos)` clears it.
+- **Live-common changes not picked up.** If you edited `cliCommandsUtils.ts`, the desktop test imports the compiled output. `pnpm common:build` (or `pnpm -w build:libs` depending on which scripts your branch has) recompiles.
+- **You are accidentally running the full suite.** `--grep` requires a string; if you forget the value Playwright runs everything. Always quote the B2CQA tag.
+
+### 5.7.5 Running a Single Test That Uses the CLI
+
+The most common iteration command, in full:
+
+```bash
+cd e2e/desktop
+pnpm run test:e2e --grep "B2CQA-1234"
+```
+
+What you should see, in order:
+
+1. `[CLI] Executing: ledger-live liveData --currency ethereum ...` — the fixture seeding the account.
+2. The Electron window opening (or running headless, depending on your config).
+3. Optionally `[CLI] Executing: ledger-live tokenAllowance ...` if the test pre-checks an allowance.
+4. The Speculos device window — either as a Docker container's HTTP UI on a local port, or virtualised entirely.
+5. `[CLI] Executing: ledger-live send --mode revokeApproval ...` if the test invokes a revoke.
+6. `✔️ broadcasted! optimistic operation: { hash: ... }` if broadcast was enabled.
+7. The spec asserting on UI state and either passing or failing.
+
+If you do not see step 1, the fixture wiring is broken. If you see step 1 but not step 2, Electron failed to start. If you see step 5 but not step 6, the broadcast did not return — likely a Speculos device-tap timeout or a node connectivity issue. Each missing step points to a different layer; learning to read the sequence is half the debugging skill.
+
+#### Docker prerequisite
+
+Speculos runs in Docker by default. If Docker is not running, the test fails almost immediately with a transport-registration error. Start Docker Desktop (or `dockerd` on Linux) before iterating. The first Speculos boot pulls the image; subsequent boots reuse it.
+
+### 5.7.6 Smoke Against a Real Device
+
+Most QAA work stays on Speculos. But before merging changes that affect signing flows for high-stakes coins (ETH mainnet via testnet, BTC, etc.), run a smoke against a real device once. The pyramid:
+
+1. **Speculos local Docker** — the everyday default. Fast, deterministic, isolated.
+2. **Speculos remote pool** — `REMOTE_SPECULOS=true` plus `SPECULOS_ADDRESS=<pool-host>:<port>`. Same protocol, different host. Useful when your laptop's Docker is misbehaving or when you want to mirror what CI does. Most of the time, identical-looking results to local Speculos.
+3. **Real Ledger device wired via USB.** The final smoke. Open Ledger Live's developer-mode "use real device" path (or set the appropriate env to bypass Speculos), connect a Nano X / S+ / Stax / Flex with the relevant app installed, and run the same test. The device will physically buzz and ask for confirmation; you tap; the test should pass identically to Speculos.
+
+Real-device smokes are slow (you are physically pressing buttons) and not scriptable — they are a final manual sanity check, not part of the inner loop. Do them once before PR, not once per commit.
+
+> **Tip:** the most common surprise on real-device smoke is screen-text mismatch. Speculos uses the same `DeviceLabels` registry as a real device, but firmware-version drift can introduce wording differences. If your test passes on Speculos and fails on a real device with a `pressUntilTextFound` timeout, the device is on a different app version. Update the app on the device (Ledger Live's Manager) and retry.
+
+### 5.7.7 Reading Existing Usage
+
+The fastest way to learn the right shape for your change is to read three or four existing examples. Open these specs and scan the `cliCommands: [...]` lines:
+
+**`e2e/desktop/tests/specs/earn.v2.spec.ts`** (around line 86):
+
+```ts
+test.describe.configure({ mode: "serial" });
+test.use({
+  cliCommands: [liveDataCommand(account)],
+});
+```
+
+The fixture engine sees `liveDataCommand(account)` (the curried function). When the test starts, the engine calls it with the userdataPath argument the fixture supplies. The result is a seeded account ready in the test environment before the test body runs.
+
+**`e2e/desktop/tests/specs/delegate.spec.ts`** (around line 110):
+
+Same pattern, different account. The test data is different but the fixture mechanic is identical. Reading multiple specs that use the same helper makes the contract obvious — `liveDataCommand` always returns a curried function, the fixture engine always hands it `userdataPath`.
+
+**`e2e/desktop/tests/specs/provider.swap.spec.ts`** (line 11):
+
+```ts
+test.use({
+  cliCommands: [liveDataWithAddressCommand(account)],
+});
+```
+
+Same shape, but the helper is `liveDataWithAddressCommand` — same as `liveDataCommand` plus it caches the device address on the `account` object. Useful when the test body needs the address (`account.address`) without making a separate `getAddress` call.
+
+**`e2e/desktop/tests/page/swap.page.ts`**:
+
+```ts
+async revokeTokenApproval(fromAccount, provider) {
+  // ...
+  const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+  // ...
+}
+```
+
+This is the **other** way to consume CLI helpers — directly from a POM method, not through the fixture engine. Use this shape when the CLI call must happen in the middle of a test (e.g., between assertions on UI state), not just as setup. The senior's QAA-615 commit added exactly this pattern.
+
+### 5.7.8 Writing Tests as You Go (TDD-Lite)
+
+Once you know the shape, you can iterate effectively in a TDD-lite loop:
+
+1. **Stub the POM method first.** Add the method signature and body (with a `console.log` inside) to the POM file.
+2. **Write the spec calling it.** Or modify the existing spec to call it.
+3. **Run with `.only` to isolate.** Playwright's `test.only` (or `test.describe.only`) limits the run to one test — combine with `--grep` for a stable single-target run.
+4. **Watch it fail.** The console.log from step 1 should appear in stdout. If it does not, the wiring (import, instantiation, fixture) is broken. Fix that before doing any real work.
+5. **Fill in the POM method.** Replace `console.log` with the actual `revokeTokenCommand(...)` call (or whatever your helper is).
+6. **Watch it go green.** If the test now passes, you are done — refactor as needed and remove `.only`.
+
+The advantage over write-everything-then-run is that you isolate the wiring problem (import, fixture, instantiation) from the logic problem (what the CLI actually does). Two small failures are much faster to debug than one big one.
+
+> **Warning:** Always remove `test.only` before pushing. CI runs it as you wrote it, and a stray `.only` will reduce the entire run to one test, which can mask real failures elsewhere. Most repos lint against `.only` in CI; the lint catches it before it merges, but the failed CI run still wastes time.
+
+### 5.7.9 Codegen, Lint, Typecheck
+
+Unlike wallet-cli (which has a `bunli generate` step), the legacy `apps/cli` has **no codegen step** in the QAA workflow. There is a build step (`pnpm --filter live-cli build`, ultimately `zx ./scripts/build.mjs`) that you run only if you actually edited an `apps/cli` source file. For changes confined to `cliCommandsUtils.ts`, page objects, fixtures, or specs, no rebuild is needed — TypeScript compiles on demand via the test runner's transformer.
+
+Before pushing, run the standard quality checks:
+
+```bash
+# Workspace-local typecheck
+pnpm --filter ledger-live-common typecheck
+pnpm --filter ledger-live-desktop-e2e typecheck
+
+# Lint your changed files
+pnpm lint
+```
+
+The exact filter names vary by branch; check `package.json` at the workspace root for the canonical scripts. The typecheck is non-negotiable — it catches the kind of error (a renamed type, a missing export) that would otherwise blow up CI five minutes after you push.
+
+> **Verify:** if `pnpm typecheck` does not exist as a root-level script on your branch, run the workspace-specific equivalents instead. The point is to typecheck both `live-common` (where helpers live) and `desktop-e2e` (where they are consumed) before opening a PR.
+
+### 5.7.10 Commit and PR
+
+Commits follow the global Conventional Commits convention (see `git-workflow.md` in the global rules). For CLI work, the typical scopes are `desktop`, `mobile`, `coin`, or `common`.
+
+The senior's commit on QAA-615 was in this style:
+
+```
+test(desktop): add token approval command in e2e
+```
+
+The verb is imperative, lowercase. The scope identifies the area (`desktop` since the change ultimately serves the desktop e2e suite). The description names the new capability concretely.
+
+**Branch naming:**
+
+| Prefix | When to use |
+|---|---|
+| `support/qaa-XXX-...` | Test helpers, refactors, fixture additions, infra tweaks |
+| `feat/qaa-XXX-...` | New test capability that did not exist before (e.g., the first-ever revoke helper) |
+| `bugfix/qaa-XXX-...` | Fixing a flake, fixing a broken existing helper |
+| `chore/qaa-XXX-...` | Tooling, configs, dependency bumps |
+
+Names use kebab-case. Keep them short and action-oriented. For QAA-615, `support/qaa_add_revoke_token` (the senior used underscores; the global convention prefers kebab — pick what your team's recent branches use).
+
+**Pushing and opening a PR:**
+
+```bash
+git push -u origin support/qaa-XXX-add-revoke-helper
+gh pr create --base develop --title "test(desktop): add revoke token command in e2e" \
+  --body "$(cat <<'EOF'
+## Summary
+- Adds `revokeTokenCommand` to `cliCommandsUtils.ts`.
+- Adds `revokeTokenApproval` POM method to `swap.page.ts`.
+- Wires QAA-615 acceptance test.
+
+## Test plan
+- [x] `pnpm test:e2e --grep "B2CQA-XXXX"` passes locally on Speculos
+- [x] Typecheck passes for `ledger-live-common` and `desktop-e2e`
+- [x] Lint passes
+EOF
+)"
+```
+
+Cross-reference Part 0 Chapter 0.4 for the broader release flow — how `develop` rolls into `main` via the weekly release branches, where Xray sees your test results, and how the changelog is auto-generated.
+
+### 5.7.11 Reviewer Routing
+
+Open `.github/CODEOWNERS` near each file you touched and note the owners. The recurring routes for CLI work:
+
+| Path | Owner |
+|---|---|
+| `apps/cli/**` | `@ledgerhq/wallet-ci` (and the relevant coin-module team for coin-specific changes) |
+| `libs/ledger-live-common/src/e2e/**` | `@ledgerhq/wallet-xp` |
+| `libs/ledger-live-common/src/families/<coin>/**` | the coin-module team for that coin (e.g., `@ledgerhq/coin-evm` for EVM) |
+| `e2e/desktop/**` | `@ledgerhq/wallet-xp` |
+| `e2e/desktop/tests/specs/*.swap.spec.ts`, `swap.page.ts` | `@ledgerhq/wallet-xp` + `@ledgerhq/ptx` (PTX owns swap product) |
+| `e2e/mobile/**` | `@ledgerhq/wallet-xp` (mobile QA shares this owner) |
+
+For a change that adds a swap-related helper plus a swap POM method plus a swap regression spec, you will end up with two reviewers (`wallet-xp` for the e2e workspace, `ptx` for the swap-specific paths). Tag both in the PR description if they are not auto-added by CODEOWNERS.
+
+> **Tip:** if your change touches `apps/cli` even in passing (e.g., you added a flag to an existing command), wallet-ci review is non-optional. Ping them in the PR thread early — they review CLI changes carefully because the CLI is shared infra used by the bot, by QAA, and by manual operators.
+
+### 5.7.12 Common Debugging Recipes
+
+Even with the best discipline, things break. Here are the recurring failure modes and what they look like.
+
+#### Speculos won't start
+
+```
+Error: Failed to start Speculos: port 5000 already in use
+```
+
+A previous Speculos container did not clean up. Either:
+
+```bash
+docker ps                                # find the orphan
+docker rm -f <container-id>              # kill it
+# or, blanket clean:
+docker rm -f $(docker ps -aq --filter ancestor=ghcr.io/ledgerhq/speculos)
+```
+
+If Docker itself is not running:
+
+```bash
+# macOS
+open -a "Docker"
+# Linux
+systemctl start docker
+```
+
+Re-run after Docker is healthy.
+
+#### CLI subprocess hangs
+
+The CLI command is printed but never returns:
+
+```
+[CLI] Executing: ledger-live send --currency ethereum --mode approve ...
+(no output for 2 minutes, then test times out)
+```
+
+Usually a missed Speculos screen tap. The CLI is blocked waiting for `bridge.signOperation` to emit `signed`, which depends on the device confirming the transaction, which depends on `approveToken()` walking the right screens. If `approveToken()` is racing the CLI and failing silently, increase the test's `waitConfirmation` timeout temporarily and retry — if it now passes, the device-tap dance was just slow, not broken.
+
+If a longer timeout does not help, dump the Speculos screen during the hang. Open the Speculos web UI (the port is logged on container start) and see what screen is currently displayed. If it is stuck on a screen `pressUntilTextFound` doesn't recognise (e.g., a new "Scam token warning" page), the device-tap helper in `families/evm.ts` needs a new label.
+
+#### Allowance check returns the wrong value
+
+`isTokenAllowanceSufficientCommand` returns 0 even though you just approved. Three possibilities:
+
+1. **Wrong spender.** The approve was for `0xRouterA`; the read is against `0xRouterB`. Double-check the `provider.contractAddress` you passed both ways.
+2. **Wrong owner.** The approve was on account index 0; the read is on index 1. The two indices have different addresses. Check the `account` object passed to both helpers — make sure it is the same one.
+3. **The approve didn't actually broadcast.** Re-check `DISABLE_TRANSACTION_BROADCAST` — if it was `"1"` during the approve, the transaction was signed but never sent. Verification ladder from §5.6.10 applies — look for `✔️ broadcasted!` in CLI stdout.
+
+#### Broadcast didn't happen
+
+You ran a revoke; no error was thrown; the next test still sees a non-zero allowance.
+
+Most likely the env var was not flipped. Either the helper's `setDisableTransactionBroadcastEnv("0")` was bypassed (a copy-paste regression that omits the line) or a parent test left `DISABLE_TRANSACTION_BROADCAST="1"` in `process.env` and the helper's flip-and-restore is restoring it back to `"1"` after the call.
+
+Confirm by running with verbose CLI output and looking for the broadcast line. If it is missing, the gate from §5.6.3 evaluated truthy and the broadcast operator was never injected.
+
+If the helper looks correct, check whether some module-load hook in the spec set the var globally. Mobile swap's `swap.other.ts` does this (§5.6.5); a desktop spec that imports a mobile helper transitively might inherit the same hook. Search: `grep -rn 'DISABLE_TRANSACTION_BROADCAST' e2e/ libs/`.
+
+#### Test passes locally but fails in CI
+
+The classic e2e symptom. Order of suspects, in increasing rarity:
+
+1. **Allowance state from a previous CI run is stale.** Check on-chain via Etherscan; if there is residual allowance, the suite needs a revoke `beforeEach`.
+2. **Different Speculos image.** CI pins a specific Speculos commit; locally you have whatever Docker pulled most recently. If your test depends on a behaviour that changed between versions, this manifests.
+3. **Network flake to the testnet RPC.** Less common — most QAA tests use stable RPC endpoints — but a transient testnet outage can drop a broadcast. Re-run the CI job once before assuming the test is broken.
+4. **Race between fixture seeding and the test body.** If the fixture's CLI call is async and the test body assumes seeding is done, the assumption can hold locally (where fixtures finish faster than the test starts) and break on a slower CI runner. Check the fixture engine's `await` discipline.
+
+### 5.7.13 Chapter 5.7 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Chapter 5.7 Quiz</h3>
+<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> A QAA ticket asks you to "wire <code>revokeTokenCommand</code> into the swap before-each cleanup hook". Which change shape is this?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Shape A — new CLI command needed (talk to wallet-ci first)</button>
+<button class="quiz-choice" data-value="B">B) Shape B — new typed helper needed in <code>cliCommandsUtils.ts</code></button>
+<button class="quiz-choice" data-value="C">C) Shape C — new POM method on <code>swap.page.ts</code> (or fixture-engine wiring) — the helper already exists, you are just orchestrating it</button>
+<button class="quiz-choice" data-value="D">D) Shape D — spec only</button>
+</div>
+<p class="quiz-explanation"><code>revokeTokenCommand</code> is the helper. Wiring it into a before-each is a POM/fixture concern, not a helper or CLI concern. Shape C — touch <code>swap.page.ts</code> (or the relevant fixture file) and invoke the existing helper. The CLI command is unchanged; the helper is unchanged; only the orchestration moves.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> You need a brand-new typed helper to wrap an existing <code>tokenAllowance</code> CLI invocation with a slightly different shape (returns a structured object rather than a raw string). Where do you start?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>apps/cli/src/commands/blockchain/tokenAllowance.ts</code> — change the CLI output format</button>
+<button class="quiz-choice" data-value="B">B) <code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code> — add a new helper that calls <code>runCliGetTokenAllowance</code> and post-processes the output</button>
+<button class="quiz-choice" data-value="C">C) <code>e2e/desktop/tests/page/swap.page.ts</code> — bake the parsing into the POM method</button>
+<button class="quiz-choice" data-value="D">D) Inline a parser in the spec file that needs the structured object</button>
+</div>
+<p class="quiz-explanation">Layer 3 is the right home for a new typed helper that wraps an existing CLI command. The CLI is unchanged (so wallet-ci review is not needed); the POM should not contain parsing logic (the POM is for UI orchestration); inlining in a spec is a maintenance bomb. <code>cliCommandsUtils.ts</code> with a thin parsing function is the canonical pattern.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> What does <code>cliCommands: [liveDataWithAddressCommand(account)]</code> in a Playwright test config achieve, mechanically?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The fixture engine receives a curried function; before the test body runs, the engine calls it with the lifecycle's <code>userdataPath</code>; the call seeds the account via the CLI and caches the device address on <code>account.address</code></button>
+<button class="quiz-choice" data-value="B">B) It registers a Playwright project named <code>liveDataWithAddressCommand</code> and runs only that project</button>
+<button class="quiz-choice" data-value="C">C) It synchronously calls the CLI at module load time, before Playwright spins up</button>
+<button class="quiz-choice" data-value="D">D) It marks the test as requiring a real device, skipping it on Speculos</button>
+</div>
+<p class="quiz-explanation">The curried-function pattern is the contract between fixture-declarable CLI helpers and the fixture engine. The engine sees a function, calls it with the userdataPath, awaits the result. The test body then runs against a world where the CLI seeding has already happened.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> Your local iteration loop is running a single test in 30+ seconds even though only one TypeScript file changed. What is the most likely cause?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Playwright re-installs node_modules on every run</button>
+<button class="quiz-choice" data-value="B">B) Speculos reboots between test runs by design — there is no way to make it faster</button>
+<button class="quiz-choice" data-value="C">C) The CLI subprocess re-bundles itself on every invocation</button>
+<button class="quiz-choice" data-value="D">D) Speculos is booting fresh because no <code>--reuse-context</code> is set, or the previous Speculos container was killed; subsequent runs with reused state are 2–5 seconds, fresh boots are ~30 seconds</button>
+</div>
+<p class="quiz-explanation">The first Speculos container boot dominates the loop time on a cold cache. Reuse the container or the test context across runs to stay in the sub-minute zone. If you are restarting Docker every iteration, you are paying the full boot cost every time.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> When does a CLI-related QAA ticket need wallet-ci as a reviewer?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Always — wallet-ci reviews every PR that touches e2e tests</button>
+<button class="quiz-choice" data-value="B">B) Never — wallet-ci is a different team that does not touch QAA work</button>
+<button class="quiz-choice" data-value="C">C) When the PR touches anything under <code>apps/cli/</code> (a new command, a new flag, a behavioural tweak to an existing command). Pure changes to <code>cliCommandsUtils.ts</code>, page objects, or specs are routed to wallet-xp instead</button>
+<button class="quiz-choice" data-value="D">D) Only when the change affects the bot</button>
+</div>
+<p class="quiz-explanation">CODEOWNERS routes <code>apps/cli/**</code> to wallet-ci; <code>libs/ledger-live-common/src/e2e/**</code> and <code>e2e/desktop/**</code> route to wallet-xp. A PR that changes the CLI itself needs wallet-ci review; a PR that only adds a typed helper and a spec does not.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q6.</strong> You signed off locally on a test that broadcasts a revoke on Sepolia and want to confirm the transaction actually landed before opening the PR. Which is the most reliable verification?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The CLI exited with code 0 — that is sufficient</button>
+<button class="quiz-choice" data-value="B">B) Run a follow-up <code>tokenAllowance</code> call (or open <code>revoke.cash</code> on the seed's address) and read the actual on-chain allowance — if it is now zero, the revoke landed</button>
+<button class="quiz-choice" data-value="C">C) Re-run the same revoke; if it is idempotent it must have worked the first time</button>
+<button class="quiz-choice" data-value="D">D) Check the local Speculos logs for a "transaction signed" line</button>
+</div>
+<p class="quiz-explanation">Layer 3 of the verification ladder (Chapter 5.6.10) — the after-the-fact allowance read — is the only one that proves chain state changed. Exit code 0 means the broadcast call returned, but a failed broadcast can also exit 0 in some configurations. Speculos logs prove signing, not broadcast. Re-running tells you nothing about the first run.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+<div class="chapter-outro">
+You now have the full daily workflow — recon, change shape, iteration loop, smoke, commit, PR — and the debugging vocabulary to read the failure modes that show up in practice. The next chapter takes a real ticket end-to-end: <strong>QAA-615</strong>, the senior's commit that introduced <code>revokeTokenCommand</code>, walked line-by-line through every file changed, every choice made, every alternative considered. After you have followed that walkthrough, the architecture, the env discipline, and the workflow will all click into a single coherent picture you can reproduce on your own tickets.
+</div>
+## Walkthrough QAA-615 — Line-by-Line
+
+<div class="chapter-intro">
+This is your Part 5 capstone. Unlike the QAA-702 (Part 4) and QAA-1136 (Part 6) walkthroughs — where you start from a green baseline and add a missing scenario — QAA-615 is a <strong>spike that already has a starting commit</strong>. A senior engineer (Abdurrahman SASTIM) pushed branch <code>support/qaa_add_revoke_token</code> with commit <code>4fa4868a35</code>: 3 files, 37 lines. The wiring works; the shape is incomplete; one of the lines contains a copy-paste bug. Your job is to read every one of those lines, understand <em>why</em> the senior wrote them, then identify what is still missing before this can be merged. By the end of this chapter you will be able to take the senior's branch, finish the work, and ship the spike report.
+</div>
 
 ### 5.8.1 Understanding the Ticket
 
-**Jira ticket:** QAA-615 — *Spike: Revoke token approval using CLI*
-**Type:** Task (Spike) · **Status:** In Progress · **Assignee:** Jerome PORTIER · **Reporter:** Gabriel BECERRA
-**Parent epic:** QAA-919 *"SWAP regression coverage automation"*
-**Linked to:** QAA-613 *(Discovery — Connected)*
-**Labels:** `LLD`, `LLM`, `UI`
+**Jira ticket:** QAA-615 — *[CLI] Add revoke-approval helper for the swap regression suite*
+**Parent epic:** QAA-919 — *Swap regression coverage automation*
+**Type:** Spike
+**Status:** In Progress (the senior's branch is the spike's draft deliverable)
+**Branch:** `support/qaa_add_revoke_token`
+**Commit:** `4fa4868a35` by Abdurrahman SASTIM, dated 2026-04-27
 
-The ticket text, verbatim:
+The ticket asks one specific question:
 
-> Hey team. As we have the objectif of testing the whole flow with token approval + swap, we need to find a way to revoke the approval to be able to run the test again. This will be helpful for automatic regression testing and not nighlty executions.
+> Find the smallest, lowest-risk way to revoke an existing ERC-20 allowance from inside an E2E test, so that the broadcast-enabled regression suite can clean up provider allowances between iterations.
 
-Read it twice. Three things are worth pausing on before you write a line of code.
+**What "spike" means in this team's vocabulary.** A spike is a time-boxed investigation whose deliverable is a written answer plus a code proof-of-concept. The PR that closes it does not need to be production-perfect — it needs to demonstrate that the chosen path works and document why the alternatives were rejected. The QAA-615 senior's commit is exactly that: a working PoC, not a final shape.
 
-**This is a spike, not a feature ticket.** The QAA team uses the word "spike" the way most engineering teams do — a time-boxed investigation whose deliverable is *understanding plus a proof of concept*, not necessarily a polished, fully reviewed shippable feature. A spike answers the question *"is this possible, how would we do it, and what are the tradeoffs?"* before the team commits to a fully-scoped ticket. The PR you will eventually open for QAA-615 will include working code, but its primary deliverable is the **written report** (Section 5.8.12 below). The code is evidence; the report is the deliverable.
+**Pavlo's "2 flows" comment.** Pavlo OKHONKO commented on QAA-615 on 2026-03-12:
 
-**The labels are mismatched with the work.** This is a CLI-only investigation, but the ticket carries `LLD` (Ledger Live Desktop), `LLM` (Ledger Live Mobile), and `UI` labels. Welcome to real Jira hygiene — labels were inherited from the parent epic at creation time and nobody re-labeled. Don't let it confuse you: the work lives entirely inside `apps/wallet-cli/`. If a reviewer asks why a CLI spike has `UI` on it, point them at the parent epic's labels.
+> "Two flows to keep separate: nightly (broadcast off, no revoke needed) vs regression (broadcast on, revoke required between tests). Don't try to make one helper serve both."
 
-**The "regression" word matters.** The reporter explicitly contrasts *automatic regression testing* with *nightly executions*. That single distinction is the load-bearing constraint of the whole spike — see Section 5.8.2 for why.
+That comment is the architectural seed for the work. It tells the senior: the new helper is not a general-purpose utility; it exists to serve the broadcast-enabled regression flow specifically. The nightly suite already runs deterministically with `DISABLE_TRANSACTION_BROADCAST=1` and does not need cleanup, because the device signs but never sends — on-chain state never changes.
 
-**Pavlo's "2 flows + edge cases" comment.** On the parent ticket QAA-919, Pavlo OKHONKO commented that the regression suite needs to exercise *two distinct swap flows* (provider routes — Thorchain, Uniswap, LiFi) plus their edge cases. Each flow opens with an `approve(spender = router, amount = N)` and ends with the swap itself. To run any single flow more than once on the same address, you must reset the allowance — which is exactly what `wallet-cli revoke` is for. The hook is per-flow, not per-suite: each flow's `beforeEach` revokes its own router's allowance before retrying.
+**Why the parent epic matters.** QAA-919 *Swap regression coverage automation* is the umbrella for moving the swap suite from synthetic-fixture nightly runs to broadcast-enabled regression runs. Each child ticket addresses one infrastructure prerequisite: QAA-613 the test hooks, QAA-614 the seed-funding workflow, QAA-615 the revoke helper, and so on. The pieces are designed to land separately.
 
-### 5.8.2 Why This Matters — the regression-suite vs nightly distinction
+### 5.8.2 Why This Matters
 
-The architectural picture is simple: a token approve only needs to happen *once* per address-spender pair. After it's set, every subsequent test that exercises the approval flow finds the allowance already in place and produces a different on-device screen than a first-time approval. The fix is a before/after hook (around the test, not inside it) that sets the allowance back to zero between runs. The CLI is the right tool for that hook — small, scriptable, fast, and free of any GUI dependency.
+The broadcast distinction (Chapter 5.6) is the core context. To recap:
 
-Two suites, two behaviours:
+- **Nightly suite** — `DISABLE_TRANSACTION_BROADCAST=1`. The CLI signs locally but never sends. On-chain allowance never changes. No revoke needed; no real money at risk; ~10 minutes of run time.
+- **Regression suite** — `DISABLE_TRANSACTION_BROADCAST=0`. The CLI signs and broadcasts. Allowances are real; the QAA test seed actually changes state on Sepolia/Holesky. Without a revoke hook, run #2 sees whatever allowance run #1 left behind.
 
-1. **The nightly suite (QAA-613)** — broadcast disabled. The Detox/Speculos test boots, fakes its way through the approve+swap signature flow on a synthetic chain that never receives the broadcast. On-chain allowance is never actually mutated. The next nightly run starts from the same on-chain state because nothing was published. **Revoke is not strictly necessary here** — the test starts each night from a clean slate by virtue of broadcast=off.
-2. **The broadcast-enabled regression suite** — broadcast on. The same test code, but pointing at a real testnet (or, occasionally, mainnet on a test seed) where the broadcast actually publishes. The first run leaves an `approve(router, N)` on chain. The second run's `approve` no-ops on the device's UI ("you already approved this") and the test misreads the state. The suite is no longer deterministic. **Revoke is the cleanup hook** that pulls the on-chain allowance back to zero so the next iteration is identical to the first.
+**Without QAA-615**, the broadcast-enabled regression suite has a state-leak problem:
 
-The CLI is **test-data infrastructure**, not test code. It is not invoked by the spec; it is invoked by the harness *around* the spec. Pseudo-code:
+1. Test A approves spender X for 100 USDT to perform a swap.
+2. Test A passes; the test runner moves on without cleanup.
+3. Test B starts. Its `ensureTokenApproval` pre-check sees `currentAllowance >= minAmount` and skips the approve flow entirely.
+4. Test B passes for the wrong reason — it never exercised the device confirmation it was supposed to.
+
+In a worst case, the leak hides a real regression: the approve screen rendering changes, but Test B never asks for it because the leftover allowance is enough. Coverage looks green; the device-tap path silently rotted.
+
+**Revoke restores determinism.** A `revoke` hook in `beforeEach` zeroes the allowance before every test. Test B's pre-check now correctly sees `currentAllowance == 0`, runs the approve flow, and exercises the screens it is supposed to.
+
+Cross-references:
+- Chapter 5.6 — broadcast discipline and the env-flip pattern
+- Chapter 5.5 — Speculos lifecycle and the snapshot/restore pattern
+- Chapter 5.4 — the 5-layer architecture that makes the wrapper trivial
+
+### 5.8.3 The Senior's Branch
 
 ```bash
-beforeEach() {
-  wallet-cli revoke ethereum-1 --token USDC --spender $UNISWAP_V3_ROUTER --output json
-  wait_for_confirmation
-}
-runSpec()
+cd /path/to/ledger-live
+git fetch origin support/qaa_add_revoke_token
+git checkout -b support/qaa_add_revoke_token origin/support/qaa_add_revoke_token
+git show 4fa4868a35
 ```
 
-That hook is the entire reason this command exists. Every other concern — pretty output, JSON envelope, dry-run mode — bends to that contract.
+Three files, 37 lines added, 1 line edited (commented out).
 
-#### ERC-20 approval primer (compressed)
+| File | Lines | Purpose |
+|---|---|---|
+| `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | +20 | New `revokeTokenCommand` typed wrapper (Layer 3) |
+| `e2e/desktop/tests/page/swap.page.ts` | +15 | New `revokeTokenApproval` POM method (Layer 5) |
+| `e2e/desktop/tests/specs/provider.swap.spec.ts` | +1 / -1 | Dev-loop swap: comment out `ensureTokenApproval`, call `revokeTokenApproval` instead |
 
-If you have already read Chapter 0.5 or Chapter 4.10's intro, skim this. Otherwise, the 80-line version:
+The commit message is one line:
 
-ERC-20 tokens do not "live" at user addresses the way native ETH does. The ledger is the token contract: a mapping from address → balance, indexed by the user's address. To move USDC, the user signs a transaction whose `to` is the USDC contract and whose calldata is `transfer(recipient, amount)`. The contract checks the sender's balance and updates two ledger entries.
-
-A **decentralised exchange** (Uniswap, Thorchain, LiFi) cannot move the user's tokens directly — the user holds them, the DEX does not. Instead, the DEX needs *permission* to pull tokens out of the user's address into its own router. The ERC-20 standard exposes this as `approve(spender, amount)`: the user signs an `approve(router_address, N)` transaction telling the token contract "the address `router_address` may withdraw up to `N` of my tokens, on my behalf." The router records the allowance in another mapping inside the contract. Then the swap transaction calls the router's `swap()` function, which internally calls the token's `transferFrom(user, router, amount)` — succeeds because the allowance is in place.
-
-So a real swap is **two device signatures, in sequence**: first the approve, then the swap. Each provider has its own router contract, so the same user must approve once per (token, router) pair before any swap through that router will succeed.
-
-To **revoke** an approval, the user signs `approve(spender = same_router, amount = 0)`. Same calldata shape, same selector (`0x095ea7b3`), only the amount field changes from N to 0. The contract overwrites the previous allowance entry with zero. Subsequent `transferFrom` calls from that router fail with `ERC20: insufficient allowance`.
-
-The clear-sign UX on Ledger devices recognises the `approve` selector specifically and renders a friendly "Type: Approve / Amount: 0 USDC / Address: 0x...router" screen instead of raw hex. That is true for any token in the cryptoassets registry — no per-token plugin work needed.
-
-`wallet-cli revoke` is therefore a single function call: build the calldata `approve(spender, 0)`, hand it to the existing send pipeline as a transaction whose `to` is the token contract, sign and broadcast. The hard parts are not the cryptography — they are the **plumbing** (where to slot the command, how to resolve the token contract address from a ticker, what the JSON envelope should look like for the hook).
-
-### 5.8.3 What's Already in the Monorepo
-
-Before you write any new code, inventory what already exists. Every helper below is a file you should open in your editor as you read this section.
-
-**The ERC-20 calldata builder — already shipped.**
-`libs/coin-modules/coin-evm/src/logic/getErc20Data.ts:10-14`
-
-```ts
-export function getErc20ApproveData(spender: string, amount: bigint): Buffer {
-  const contract = new ethers.Interface(ERC20ABI);
-  const data = contract.encodeFunctionData("approve", [spender, amount]);
-  return Buffer.from(data.slice(2), "hex");
-}
+```
+test: add token approval command in e2E
 ```
 
-Pure function. Returns the 4-byte selector `0x095ea7b3` followed by 64 bytes of ABI-encoded `(spender, amount)`. Total 68 bytes. For revoke, call it with `amount = 0n`.
+That message is *deliberately understated* — the senior is signalling "this is the spike PoC; the polished commit message will land with the final PR". Don't echo the same message when you ship; rewrite it for the final PR.
 
-**The allowance reader — already shipped.**
-`libs/ledger-live-common/src/families/evm/getTokenAllowance.ts:29-71`
+**One thing the commit does not contain:** mobile parity, the spike report, the corrected `@step` description, the proper hook ordering. Those four items are your work.
 
-```ts
-export async function getEvmTokenAllowance(
-  account: Account,
-  tokenId: string,
-  spender: string,
-): Promise<GetEvmTokenAllowanceResult>
-```
+### 5.8.4 File 1 — `cliCommandsUtils.ts` Line by Line
 
-Resolves the token via the cryptoassets store, validates the chain match, calls the unified node API's `getTokenAllowance` (which under the hood routes to Ledger's `/blockchain/v4/.../contract/read` endpoint or — for local dev — to a JSON-RPC `eth_call` against `allowance(owner, spender)`). Returns `{ allowance, unit, symbol, tokenId, owner, spender, contractAddress }`.
-
-You will need this in Section 5.8.9 when you build the optional `wallet-cli allowance` companion command.
-
-**The legacy CLI's revoke — your reference implementation.**
-
-- `apps/cli/src/commands/blockchain/tokenAllowance.ts` — read command (`commander`-style). The legacy equivalent of what you'll build for verification.
-- `libs/coin-modules/coin-evm/src/cli-transaction.ts:10` — declares `const modes = ["send", "revokeApproval", "approve"] as const;`
-- `libs/coin-modules/coin-evm/src/cli-transaction.ts:95-130` — `inferTransactions` for the revoke/approve modes. The shape it produces is your blueprint:
+The new function lives next to its existing twin `approveTokenCommand`. Read it as a unit:
 
 ```ts
-return {
-  ...rest,
-  mode: "send" as const,            // EVM "send" + custom data == arbitrary contract call
-  recipient: tokenContractAddress,  // tx.to = the token contract, NOT the spender
-  amount: new BigNumber(0),         // no native value
-  useAllAmount: false,
-  data,                             // ERC-20 approve(spender, amount) calldata
+// libs/ledger-live-common/src/e2e/cliCommandsUtils.ts
+export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
+  const original = setDisableTransactionBroadcastEnv("0");
+
+  const result = runCliTokenApproval({
+    currency: account.currency.speculosApp.name,
+    index: account.index,
+    spender,
+    token: account.currency.id,
+    mode: "revokeApproval",
+    waitConfirmation: true,
+  });
+
+  try {
+    await approveToken();
+  } finally {
+    setDisableTransactionBroadcastEnv(original);
+  }
+  return await result;
 };
 ```
 
-Three load-bearing facts in that block:
+Walk it line by line.
 
-1. `tx.to` is the **token contract address**, not the spender, not the owner.
-2. `tx.value` is **zero** — revoke moves no native ETH.
-3. `tx.data` is the bytes from `getErc20ApproveData(spender, amountApproved)`.
-4. The high-level `mode` flattens to `"send"`. coin-evm's transaction shape only knows `send | erc721 | erc1155`. The CLI mode names (`approve`, `revokeApproval`) are pure UX affordances; they collapse to `send` before signing because the device decides what to render based on the calldata selector, not the wallet-side mode.
-
-> **Verify:** open `libs/coin-modules/coin-evm/src/cli-transaction.ts` in your editor and confirm the lines above match what you see. Research notes were captured at one moment in time; the file may have moved or been refactored. If the structure shifted, the principles above still hold — only the line numbers change.
-
-**The wallet-cli send pipeline — already accepts custom calldata.**
-
-- `apps/wallet-cli/src/commands/send.ts` — the command shape you will mirror.
-- `apps/wallet-cli/src/wallet/intents/families/evm.ts` — the EVM intent schema. Already has an optional `data?: "0x..."` field. R5's audit calls it *"the only extensibility hook on the EVM intent today"* — which means the plumbing for arbitrary contract calls is already wired through, and revoke just rides on top.
-- `apps/wallet-cli/src/wallet/compatibility/bridge.ts:194-198` — converts hex `data` from the intent into a `Buffer` and patches it onto the live-common transaction:
+#### Line 1 — the signature
 
 ```ts
-case "evm":
-  if (intent.data) {
-    const hexData = intent.data.slice(2);              // strip 0x
-    if (hexData.length > 0) patch.data = Buffer.from(hexData, "hex");
-  }
-  break;
+export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
 ```
 
-That is the seam. Anything you put in `intent.data` rides through the bridge unmodified, gets RLP-encoded inside `signOperation`, and lands as the calldata field of the on-chain transaction.
-
-**The signing path — also already in place.** `apps/wallet-cli/src/wallet/compatibility/bridge.ts:151-184` walks `signOperation` → `broadcast`. wallet-cli does *not* call DMK's `signEthereumTransaction` directly; it goes through the live-common AccountBridge abstraction, which internally drives the DMK signer. You inherit clear-sign, gas estimation, nonce management, EIP-1559 fees, and broadcast for free.
-
-**The interactive-debugging escape hatch — already exists.**
-
-`send.ts`'s `--data 0x...` flag, today, can already produce a valid revoke transaction. Try this in a terminal (do not run it yet — read first):
-
-```bash
-wallet-cli send ethereum-1 \
-  --to 0xdAC17F958D2ee523a2206206994597C13D831ec7 \
-  --amount '0 ETH' \
-  --data 0x095ea7b300000000000000000000000058df81bababd293aaca0a3a76d70d3b69b25c1cf0000000000000000000000000000000000000000000000000000000000000000
-```
-
-That command builds and broadcasts an approve(0x58df…, 0) on USDT mainnet. If you wonder *why are we even writing a revoke command then?* — keep reading. Section 5.8.4 unpacks why this is fine for a debugging session and unfit for a regression-suite hook.
-
-**The test-integration layer — already wired in for the legacy CLI.**
-
-Both `e2e/desktop/` and `e2e/mobile/` already shell out to the legacy `apps/cli` through a shared facade:
-
-- `libs/ledger-live-common/src/e2e/runCli.ts` — spawns `node apps/cli/bin/index.js <args>`. Public helpers include `runCliLiveData`, `runCliGetAddress`, `runCliGetTokenAllowance`, **`runCliTokenApproval`** (yes — the legacy CLI already has approve and revoke modes; that's where the spike's reference implementation comes from).
-- `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` — the typed wrapper layer specs actually import. Exposes `liveDataCommand(account)`, `getAccountAddress(account)`, `parseTokenAllowanceCliOutput(output)`, `isTokenAllowanceSufficientCommand(account, spender, minAmount)`. The `parse*` helper is your blueprint for the JSON-envelope-aware revoke companion in 5.8.9.
-- Desktop specs import from `@ledgerhq/live-common/e2e/cliCommandsUtils` and pass commands as fixture data: `{ cliCommands: [liveDataCommand(account)] }`. See `e2e/desktop/tests/specs/earn.v2.spec.ts` for a working example.
-- Mobile specs do not import — `e2e/mobile/jest.environment.ts:138` does `Object.assign(this.global, cliCommandsUtils)`, making every helper a global. `types/global.d.ts:104-110` mirrors this with ambient types.
-
-This layer is the **integration target for your `wallet-cli revoke`**. Once Path C lands, the next step (separately scoped — flag in your spike report) is to add a `runWalletCliRevoke` to `runCli.ts` (or a parallel `runWalletCli.ts` if reviewers prefer separating the two transports), then expose a `revokeAllowanceCommand(account, spender)` wrapper from `cliCommandsUtils.ts`. Desktop fixtures pick it up via the existing `cliCommands: [...]` array; mobile picks it up via the global injection. Specs migrate one helper at a time. Don't try to migrate the whole layer in this PR — keep it scoped to revoke.
-
-### 5.8.4 Picking the Implementation Path
-
-R2's spike report compares three paths. Read it in full at `_r2_revoke_spike.md` before committing — these are summaries, not substitutes. The three options:
-
-**Path A — dedicated `revoke` subcommand.** New file `commands/revoke.ts`, new entry in `cli.ts`, full prepare→sign→broadcast plumbing duplicated locally. Cleanest UX, most code. Estimated ~150 LOC + ~80 tests.
-
-**Path B — generalize `send` with raw `--calldata`.** Already shipped; the example at the end of 5.8.3 works today. Zero new code in wallet-cli. Tradeoff: every E2E hook has to construct 68 bytes of hex by hand. Easy to mistype `0x095ea7b3` as `0x095ea7b30` (one stray digit shifts the entire ABI offset). Output logs are coupled to hex, making `grep` patterns in the test harness brittle. Estimated 0 LOC of code, ~30 LOC of doc.
-
-**Path C — `revoke` thin wrapper over `send`.** New file `commands/revoke.ts`, but its handler is a near-clone of `send.ts`'s handler that internally constructs the EVM `TransactionIntent` (with `recipient = tokenContract`, `amount = "0 <ticker>"`, `data = approveCalldata`) and delegates to the same `WalletAdapter.send` path. Zero changes to the bridge, the intent schema, or live-common. Estimated ~150 LOC code + ~80 LOC tests, **~225 LOC total**.
-
-R2's recommendation: **Path C**. Rationale:
-
-- ✓ Justified — Path B is implemented but its UX is unfit for unattended hooks (long hex strings, no semantic logging, easy footgun). The before/after-hook framing is the load-bearing constraint and rules out B.
-- ✓ Justified — Path C reuses 100% of the signing/broadcast plumbing. The new code is a *command shell*, not a new wallet path.
-- ~ Contestable — Paths A and C are technically equivalent; the distinction is whether you also factor out a shared `runEvmContractCall(intent)` helper. R2 defers that until `approve` lands so the abstraction is informed by 3 callers (send, approve, revoke), not 2.
-- ✗ Unjustified — adding a new EVM transaction `mode` discriminator (`"approve"` | `"revoke"`) to either coin-evm or the wallet-cli intent schema. The clear-sign decoder already keys off the calldata selector and the bridge already routes `data` correctly. A new `mode` would be premature uniformity with no UX gain.
-
-**Now think for yourself.** Before adopting Path C wholesale, steelman the alternatives:
-
-- *What's the strongest argument for Path B?* (Hint: zero new code, zero review surface, shipped today. Forces the hook author to understand the calldata, which has pedagogical value.)
-- *What's the strongest argument for Path A?* (Hint: a dedicated command is testable in isolation; you can mock `WalletAdapter.send` and verify revoke calls it with the right intent. With Path C, the test surface is a near-clone of `send.test.ts`.)
-- *Is there a fourth path you haven't seen?* (E.g. a single command that takes `--mode revoke|approve` and dispatches internally — the legacy CLI's shape. Why didn't R2 list it?)
-
-> **Decision exercise.** Before you read on, write a one-paragraph note in your scratchpad explaining which path you would ship and why. If your reasoning matches Path C, fine. If you land somewhere else, *write down* what would have to be true for your choice to be the right one. That note is the seed of the spike report you will produce in Section 5.8.12.
-
-The rest of this chapter assumes Path C. If you decide to ship Path A or Path B instead, the phases below still apply with minor renaming.
-
-### 5.8.5 Phase 1 — Read the Legacy Precedent
-
-Before you sketch the new file, open the legacy CLI's revoke implementation in your editor. This is homework, not reading material — answer the questions below as you go.
-
-**Files to open:**
-
-- `apps/cli/src/commands/blockchain/tokenAllowance.ts` — the read-side allowance command.
-- `apps/cli/src/commands/blockchain/send.ts` — the legacy send command, which dispatches `--mode revokeApproval`.
-- `libs/coin-modules/coin-evm/src/cli-transaction.ts` — the EVM family's CLI handler that produces the actual `Transaction`.
-
-**Questions to answer (write the answers in your scratchpad):**
-
-1. **What's the input shape for a revoke vs an approve in the legacy CLI?** Find where `mode === "revokeApproval"` is checked. Note the difference between revoke (no `--approveAmount` needed) and approve (parses `--approveAmount`, supports the literal string `"unlimited"` mapping to `2^256 - 1`).
-2. **What does the legacy CLI do about gas estimation?** Does it pass an explicit `gasLimit`, or does it leave it to `bridge.prepareTransaction`? What does this tell you about how much you need to manage in the wallet-cli command?
-3. **How does the legacy CLI resolve the token from a CLI argument?** Is the input a ticker (`USDT`), a token id (`ethereum/erc20/usd_tether__erc20_`), a contract address (`0xdAC1...`), or all three? What helper does the resolution? (Look for `findTokenById` or similar around the legacy `inferTransactions`.)
-4. **What does the spender argument look like — `--spender` flag, positional, prompted?** Does the legacy CLI validate the address format? What does it do when validation fails?
-5. **What happens if the user passes a token whose `parentCurrency.id` doesn't match the account's currency?** (Trace the validation chain. The error message in the legacy CLI is verbatim what you should reproduce — the test harness above wallet-cli will likely depend on it.)
-
-You don't need to memorise these answers — you need to know *where to look* the next time someone asks. The legacy CLI is going away, but as long as it ships, it is your reference implementation. The wallet-cli rewrite is supposed to behave the same way externally; if your `revoke` command surprises a user who has muscle memory from the legacy CLI, you have a UX bug.
-
-> **Verify:** the line numbers in this section are pulled from research at one snapshot; if your monorepo branch is newer or older, the symbols may have moved. Search by name (`grep -r "revokeApproval" libs/coin-modules/coin-evm/src/`) before quoting line numbers in your PR.
-
-### 5.8.6 Phase 2 — Sketch the Bunli Command Skeleton
-
-Open a new file at `apps/wallet-cli/src/commands/revoke.ts`. Do not paste a complete implementation — draft the skeleton below into your editor and start filling the TODOs one at a time.
-
-```ts
-// apps/wallet-cli/src/commands/revoke.ts
-import { defineCommand, option } from "@bunli/core";
-import { z } from "zod";
-// TODO: import lastValueFrom + tap from rxjs (look at send.ts for the pattern)
-// TODO: import the WalletAdapter and the EVM intent schema
-// TODO: import the device-session helper used by send.ts
-// TODO: import the shared command-output helpers (createCommandOutput, etc.)
-// TODO: import the calldata builder you decide on (Q1 below)
-// TODO: import the account-resolving helpers (resolveAccountArg, resolveAccountDescriptor)
-
-export default defineCommand({
-  name: "revoke",
-  description: "TODO: write a one-line description; see send.ts for tone and verbosity",
-  options: {
-    // TODO: account option — same shape as send.ts (positional + --account flag)
-    // TODO: --token option — accept ticker OR token id (see Q2 below)
-    // TODO: --spender option, regex-validated 0x-prefixed 40-hex-char address
-    // TODO: --dry-run boolean flag
-    // TODO: --output option (text | json) — reuse the existing outputOption
-  },
-  handler: async (ctx) => {
-    // TODO: parse account descriptor (delegate to resolveAccountDescriptor)
-    // TODO: validate that the account family is "evm" — throw a clean error otherwise
-    // TODO: resolve the token's contract address (see Q3 below)
-    // TODO: build approve(spender, 0) calldata using getErc20ApproveData
-    // TODO: construct the EVM TransactionIntent ({ family: "evm", recipient: <token contract>, amount: "0 <ticker>" or "0 ETH", data: "0x..." })
-    // TODO: if --dry-run, call wallet.prepareSend(descriptor, intent) and print the envelope; else open the device session and call wallet.send(...)
-    // TODO: print a human-readable line OR the JSON envelope, depending on --output
-  },
-});
-```
-
-Now resolve, in your scratchpad, these five questions before you write the bodies. Each has a hint pointing at a real file.
-
-**Q1. Where do you get `getErc20ApproveData` from?**
-
-Two options:
-- Direct deep import from `@ledgerhq/coin-evm`:
+- `TokenAccount` (not `Account`) — by type, only token sub-accounts can be revoked. A native Account (ETH, BTC) has no allowance to clear; the type system prevents calling this with a wrong shape.
+- `spender: string` — the contract address that holds the allowance. In swap tests that is `provider.contractAddress` (e.g., 1inch's router on Ethereum, OKX's router, etc.).
+- No `approveAmount` argument. Compare to its twin:
 
   ```ts
-  import { getErc20ApproveData } from "@ledgerhq/coin-evm/logic/getErc20Data";
+  export const approveTokenCommand = async (
+    account: TokenAccount, spender: string, approveAmount: string,
+  ) => { ... };
   ```
 
-  Pro: zero duplication, identical bytes to what production uses. Con: deep imports past package barriers are typically discouraged in this monorepo. Check `tsconfig.json` `paths` and `package.json` `exports` to confirm whether the deep path is actually exposed.
+  The revoke is **always to zero**. The senior didn't add an `approveAmount: "0"` parameter because that would be a footgun — callers could pass `"100"` and turn revoke into a partial approve.
 
-- Local re-implementation in `apps/wallet-cli/src/wallet/erc20-calldata.ts` using `ethers.Interface` directly (5 lines — copy from `getErc20Data.ts`).
-
-  Pro: clean dep boundary. Con: tiny duplication. R2 actually recommended viem; R3 (which read the actual monorepo) reports the entire EVM family standardises on `ethers` v6 and there is no viem in the workspace. Stick with ethers unless your team has decided otherwise.
-
-  > **Verify:** check `apps/wallet-cli/package.json` to see whether `ethers` is a direct dep or only transitive via `@ledgerhq/coin-evm`. If transitive, decide: add it explicitly, or rely on the workspace alias (`workspace:^`) to surface it.
-
-**Q2. Where do you register the command, and how does Bunli pick it up?**
-
-Bunli's CLI surface is wired in `apps/wallet-cli/src/cli.ts`. Look at the line that registers `send`. Add an analogous line for revoke. Then run `pnpm generate` (or whatever the wallet-cli's codegen command is — verify with the README) to regenerate any auto-generated types or help text. Forgetting this step means your command compiles but `wallet-cli --help` doesn't list it, and the harness can't find it either.
-
-> **Verify:** the precise codegen command in this monorepo. R1 mentions `pnpm generate` but workspaces vary. `cd apps/wallet-cli && pnpm run` will list available scripts.
-
-**Q3. How do you map `--token USDC` to a contract address?**
-
-Three options, ordered from cleanest to most-pragmatic:
-
-- *(a) Require a full token id* (e.g., `ethereum/erc20/usd__coin`). No sync needed — direct lookup via `getCryptoAssetsStore().findTokenById(tokenId)`. UX cost: users have to know the token id format. The format is documented in `libs/cryptoassets/src/data/tokens.ts` (or similar).
-- *(b) Accept a ticker, sync the account, look up `subAccounts[].token.contractAddress`*. Mirrors how `parseAmountWithTicker` already works in `apps/wallet-cli/src/wallet/intents/parse-amount.ts`. Costs one sync (~1-2s) per revoke. UX win.
-- *(c) Accept the contract address directly* (`--contract 0xdAC1...`). Bypass the token registry entirely. Useful when the token isn't in the registry; loses the clear-sign rendering on the device because the device cannot resolve the token's ticker.
-
-R2 recommends (b) with a fallback to (a). For your spike, (a) alone is acceptable — ship it, mention in the report that ticker resolution is a follow-up.
-
-**Q4. What should the spender argument look like?**
-
-A flag (`--spender 0x...`) with regex validation. The regex `/^0x[0-9a-fA-F]{40}$/` catches the obvious typos. Do *not* accept ENS names — ENS resolution introduces a network call and a domain trust boundary you don't need in a test hook. If a hook author wants ENS, they should resolve it before invoking the CLI.
-
-**Q5. What does the user see when they run revoke and the allowance is already 0?**
-
-This is a real product decision. Three behaviours:
-
-- *(a) Always send the transaction.* Revoke costs gas regardless. The on-chain state is the same after as before, but the test harness pays gas every iteration.
-- *(b) Pre-check via `getEvmTokenAllowance`.* If the result is 0, exit 0 with `{ skipped: true, reason: "allowance-already-zero" }` and don't sign anything. Saves gas, makes the command idempotent.
-- *(c) Add a `--skip-if-zero` flag.* Default off; opt-in idempotency.
-
-R2 recommends (a) for the spike, deferring (b) to a `--skip-if-zero` flag. Why: the cleanest semantics for a hook are "revoke always emits the tx; you decide upstream when to call it." You can layer (c) on later without breaking callers.
-
-Now think — *what should happen if the user passes `--amount 100` instead of `--amount 0`?* For the QAA-615 spike, the answer is "the command refuses with a clear error, because revoke is amount=0 by definition; users who want partial allowance should use a future `approve --amount N` command." But you should write that decision into the help text so a confused future maintainer doesn't second-guess it.
-
-### 5.8.7 Phase 3 — Wire the Calldata
-
-The ERC-20 approve selector is `0x095ea7b3`. The full calldata for `approve(spender, 0)` is:
-
-- 4 bytes: `0x095ea7b3` (the function selector — the keccak256 hash of `"approve(address,uint256)"`, truncated to its first 4 bytes).
-- 32 bytes: the spender address, left-padded with zeroes to fit a 256-bit slot.
-- 32 bytes: the amount (0), left-padded to fit a 256-bit slot.
-
-Total 68 bytes. The same shape would be true for `approve(spender, N)` — only the last 32 bytes differ.
-
-Concretely, `approve(0x58df81bababd293aaca0a3a76d70d3b69b25c1cf, 0)` encodes to:
-
-```
-0x095ea7b3
-00000000000000000000000058df81bababd293aaca0a3a76d70d3b69b25c1cf
-0000000000000000000000000000000000000000000000000000000000000000
-```
-
-You will not write this by hand. The signature of the helper:
+#### Line 2 — flip the broadcast env
 
 ```ts
-// libs/coin-modules/coin-evm/src/logic/getErc20Data.ts:10
-export function getErc20ApproveData(spender: string, amount: bigint): Buffer
+const original = setDisableTransactionBroadcastEnv("0");
 ```
 
-Your call site is one line. The interesting question is **how do you turn the `Buffer` into the hex string the wallet-cli intent schema expects?** The schema accepts `data: "0x..."` (a string), not a `Buffer`. So your code is something like:
+- `"0"` means `DISABLE_TRANSACTION_BROADCAST` is now falsy → the CLI **will** broadcast.
+- `original` captures whatever the env was before the flip. Could be `"1"`, `"0"`, or `undefined`. We must restore it later, regardless.
+- Why "0" and not unset? Because the function explicitly opts into broadcast. The whole reason to revoke is to change on-chain state; signing without sending would defeat the purpose.
+
+This is the same flip `approveTokenCommand` does. The pattern is documented in Chapter 5.6.7.
+
+#### Lines 4-11 — build and start the CLI subprocess
 
 ```ts
-const calldataBuffer = getErc20ApproveData(spender, 0n);
-const calldataHex = "0x" + calldataBuffer.toString("hex");
-// pass calldataHex as intent.data
+const result = runCliTokenApproval({
+  currency: account.currency.speculosApp.name,
+  index: account.index,
+  spender,
+  token: account.currency.id,
+  mode: "revokeApproval",
+  waitConfirmation: true,
+});
 ```
 
-That's it. Don't gold-plate.
+- `runCliTokenApproval` is the Layer-2 spawn wrapper (Chapter 5.4). It returns a `Promise<string>` that resolves with the CLI's stdout when the subprocess exits cleanly.
+- `currency: account.currency.speculosApp.name` — the *speculos app* name, not the parent chain ID. For an ERC-20 USDT account, `account.currency.speculosApp.name` is `"Ethereum"` (the app that signs ERC-20s). This is what gets passed to `--currency` and is also what `launchSpeculos` uses (you'll see it again in File 2).
+- `index: account.index` — the account index in the seed's derivation tree. The senior is reading this off the `TokenAccount` directly.
+- `spender` — passed straight through to `--spender`. The CLI bakes it into the calldata.
+- `token: account.currency.id` — the live-common currency ID, e.g., `"ethereum/erc20/usd_coin"`. The CLI resolves this to a contract address internally.
+- `mode: "revokeApproval"` — the magic flag. This is parsed by `inferTransactionsOpts` in `apps/cli/src/transaction.ts` and dispatched to `libs/coin-modules/coin-evm/src/cli-transaction.ts:inferTransactions`, where the EVM mode is converted into the transaction shape (`recipient = token contract`, `amount = 0`, `data = getErc20ApproveData(spender, 0n)`). See Chapter 5.4 for the trace.
+- `waitConfirmation: true` — adds `--wait-confirmation` to argv. The CLI will keep its subprocess alive until the device signs *and* broadcasts *and* the tx is confirmed in a block. Without this flag, the CLI exits immediately after broadcast and your test moves on before the chain has settled — leading to flaky pre-checks on the next iteration.
 
-> **Verify:** look at `bridge.ts:194-198` again to confirm it strips the `0x` prefix back off before reconstructing the Buffer for the live-common transaction. Yes, you're encoding then decoding — that's the cost of the schema being stringly-typed at the intent boundary. Don't try to short-circuit by passing a Buffer through; you'd break the schema validation step.
+**Note the assignment**, not `await`. The function fires the CLI subprocess and stores the still-pending promise in `result`. Awaiting it now would block the device-tap helper from running in parallel — and the device tap is what *unblocks* the CLI.
 
-> **A quick sanity check.** Once you've wired this up, dry-run your command with a known spender and assert the output `data` field is exactly 138 characters (`0x` + 4-byte selector × 2 + 32 bytes × 2 + 32 bytes × 2 = 2 + 8 + 64 + 64 = 138). If your output is 137 or 139 characters, you have a leading-zero or padding bug. Fix that *before* you bother signing anything.
-
-### 5.8.8 Phase 4 — Send the Signed Transaction
-
-Once your intent is constructed, your handler delegates to the existing send pipeline. The shape, copied from `send.ts`'s handler:
+#### Lines 13-17 — the device-tap dance
 
 ```ts
-// inside the handler, after building `descriptor` and `intent`:
-if (dryRun) {
-  const prepared = await wallet.prepareSend(descriptor, intent);
-  // emit a dry-run envelope with prepared.amount, prepared.fees, prepared.recipient
-  return;
+try {
+  await approveToken();
+} finally {
+  setDisableTransactionBroadcastEnv(original);
 }
-
-await withCurrencyDeviceSession(descriptor.currencyId, async () => {
-  await lastValueFrom(
-    wallet
-      .send(descriptor, intent, WALLET_CLI_DMK_DEVICE_ID, false)
-      .pipe(tap(event => out.sendEvent(event))),
-  );
-  out.sendComplete();
-});
 ```
 
-Read `send.ts` end to end before you copy this shape. The points to internalise:
+- `approveToken()` is the Layer-4 helper from `libs/ledger-live-common/src/e2e/families/evm.ts` (Chapter 5.4 §6). It drives the Speculos REST API to walk through the approval screens — `waitFor(REVIEW_TRANSACTION_TO)`, `pressUntilTextFound(SIGN_TRANSACTION)`, then both buttons (or hold-to-sign on touch devices).
+- The function name is a misnomer for this context — `approveToken` *means "tap through the approve-or-revoke confirmation screens"*. Both transactions render the same `ERC20.APPROVE` selector to the device; the only difference is the on-screen amount (zero for revoke, N for approve). The device flow is identical, so the helper is reused.
+- `try/finally` around it is the safety net. If `approveToken()` throws (label timeout, button-press error), we still hit the `finally` block and restore the env. Without that, the env would be left at `"0"` for the rest of the test run, silently flipping broadcast on for every subsequent CLI call. Chapter 5.6.7 covers this in detail.
 
-- **`WalletAdapter.send` returns an `Observable<SendEvent>`**, not a Promise. You convert it with `lastValueFrom` (rxjs). If you've never used rxjs, the mental model is: an Observable is a stream of events; subscribing pulls them; `lastValueFrom` turns "subscribe and wait until completion, return the last value" into a Promise.
-- **The `SendEvent` types** (`device-streaming`, `device-signature-requested`, `device-signature-granted`, `signed`, `broadcasted`) come from the live-common `signOperation` Observable. You don't need to act on each — `out.sendEvent(event)` formats them for human or JSON output. But you should know what they are; print them out during local development.
-- **`withCurrencyDeviceSession`** opens the DMK session, prompts the user to connect the device and open the right app (Ethereum), then runs your callback. The session is closed automatically on exit. You do **not** open or close the device yourself.
-- **`WALLET_CLI_DMK_DEVICE_ID`** is a constant exported from the device transport registration module. Same value `send.ts` uses.
+The CLI subprocess and `approveToken()` run in parallel. While the CLI is blocked at `bridge.signOperation` waiting for the device, `approveToken()` *is* the user — driving the simulator to sign.
 
-R2's appendix points to the file:line for `BridgeAdapter.send` if you want to trace what happens after `wallet.send` returns. For your purposes you don't need to — the only thing your code is responsible for is constructing a correct `intent`. Everything below the `wallet.send` call is shared infrastructure.
-
-### 5.8.9 Phase 5 — Verify with `getEvmTokenAllowance`
-
-This is optional for QAA-615 itself — the spike does not require a companion read command — but it's the natural next step and Section 5.9.4 (in Chapter 5.9 Exercises) makes it concrete. Do it now if you have time; defer if you don't.
-
-The companion command, `wallet-cli allowance`, would expose:
-
-```bash
-wallet-cli allowance ethereum-1 --token USDC --spender 0xUNISWAP_ROUTER
-```
-
-and print the current on-chain allowance for that (account, token, spender) triple.
-
-Skeleton:
+#### Line 18 — return the CLI stdout
 
 ```ts
-// apps/wallet-cli/src/commands/allowance.ts
-import { defineCommand, option } from "@bunli/core";
-import { z } from "zod";
-// TODO: imports — see revoke.ts; the only new symbol is getEvmTokenAllowance from
-//       @ledgerhq/live-common/families/evm/getTokenAllowance
-
-export default defineCommand({
-  name: "allowance",
-  description: "Read the current ERC-20 allowance for a (token, spender) pair",
-  options: {
-    // TODO: account, token, spender, output (no --dry-run — this is read-only)
-  },
-  handler: async (ctx) => {
-    // TODO: resolve descriptor and currency
-    // TODO: sync the account (so freshAddress and parentCurrency are populated correctly)
-    // TODO: const result = await getEvmTokenAllowance(account, tokenId, spender);
-    // TODO: format result.allowance using result.unit (BigNumber → human string)
-    // TODO: print "<value> <symbol>" (human) or the full result envelope (JSON)
-  },
-});
+return await result;
 ```
 
-The questions to resolve as you fill it in:
+- This is the await we deferred earlier. By the time we hit it, the device has signed (because `approveToken()` resolved), the CLI has broadcast (because the env was `"0"`), and the chain has confirmed (because `waitConfirmation: true`).
+- The returned string is the CLI's stdout. With default formatting, it's a human-readable log; with `--format json`, it's a structured envelope. The POM method (File 2) attaches this string to the Allure report so reviewers can see what landed.
 
-1. **How do you go from the V1 descriptor to a synced `Account`?** Look at how `send.ts` handles this — there's a `WalletAdapter.sync` (or similar) that returns a live-common Account. The bridge already exposes one.
-2. **Token id resolution:** ticker only? token id only? Both? Mirror what you decided in 5.8.6 Q3 — consistency with `revoke` is the win.
-3. **Output formatting:** the allowance comes back as a `BigNumber` in raw integer units (e.g., `1000000` for 1 USDC since USDC has 6 decimals). Format it via `formatCurrencyUnit(unit, allowance)` for human output. Pass the raw integer string + the unit metadata for JSON output, so consumers can do their own formatting.
+**What this function does NOT do:**
+- It does not check if there's anything to revoke. Calling revoke on a zero allowance is a no-op gas-wise but still costs a tx fee and a confirmation. If you wanted to skip the device dance when allowance is already zero, you'd add an `isTokenAllowanceSufficientCommand(account, spender, 0)`-style pre-check — the senior chose not to, probably because in regression context the revoke runs in `beforeEach` regardless and the no-op check would add complexity for marginal savings.
 
-This command is what makes the regression hook **verifiable**: revoke, wait, allowance, assert it's 0. Without it, the hook trusts that revoke worked but cannot prove it. Ship them as a pair if you can.
-
-### 5.8.10 Phase 6 — Tests
-
-The wallet-cli's test harness (`apps/wallet-cli/src/test/`) uses `bun test` plus three custom modules: a `cli-runner` that spawns the binary in-process, a `mock-DMK` that fakes device responses at the `Completed` state level, and an `http-intercept` that catches outbound RPC and explorer calls. Look at `apps/wallet-cli/src/test/commands/send.test.ts` for the canonical shape.
-
-A representative test from the existing `send.test.ts` (paraphrased — open the actual file to see current line numbers):
+### 5.8.5 File 2 — `swap.page.ts` Line by Line
 
 ```ts
-describe("send --dry-run", () => {
-  it("returns a dry-run envelope with the parsed amount and recipient", async () => {
-    const { stdout, exitCode } = await runCli(
-      ["send", "--account", MOCK_ETH_DESCRIPTOR, "--to", MOCK_ETH_RECIPIENT, "--amount", "0.001 ETH", "--dry-run", "--output", "json"],
-      {
-        env: {
-          WALLET_CLI_MOCK_APP_RESULTS: JSON.stringify({
-            Ethereum: { publicKey: MOCK_ETH_PUBKEY, address: MOCK_ETH_ADDRESS },
-          }),
-          WALLET_CLI_HTTP_INTERCEPT: ETH_SYNC_ROUTES,
+// e2e/desktop/tests/page/swap.page.ts
+@step("Ensure token approval")
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+
+  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+  try {
+    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
+  } finally {
+    await cleanSpeculos(speculos, previousSpeculosPort);
+  }
+}
+```
+
+#### Line 1 — `@step("Ensure token approval")` — **THE COPY-PASTE BUG**
+
+The senior copied this from `ensureTokenApproval` and forgot to update the description. In Allure reports, every test step rendered from this method will be labelled *"Ensure token approval"* — wrong on its face, and especially confusing when both methods run in the same test.
+
+**Fix before merge:**
+
+```ts
+@step("Revoke token approval")
+async revokeTokenApproval(...) { ... }
+```
+
+This is the smallest, most obvious item on your do-list. Don't ship without it.
+
+#### Line 2 — the signature
+
+```ts
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+```
+
+- Note `Account | TokenAccount`. The POM accepts a wider type than the Layer-3 helper (`TokenAccount` only). Why? Because callers in the swap spec already type their `fromAccount` as `Account | TokenAccount` (a swap can be from a native or a token account), and the POM wants to be a drop-in replacement at those call sites. The early-return guard on the next line catches the native-account case.
+- `provider: Provider` — the swap provider enum (1inch, OKX, etc.). Carries `contractAddress`, `uiName`, `app`, etc.
+
+#### Line 3 — the early-return guard
+
+```ts
+if (!provider.contractAddress || !fromAccount.parentAccount) return;
+```
+
+- `!provider.contractAddress` — some providers don't need an allowance (CEX flows, native-to-native). For those, revoke is meaningless; skip.
+- `!fromAccount.parentAccount` — only a `TokenAccount` carries `parentAccount` (its EVM parent). A native `Account` returns `undefined` here. The guard catches the `Account | TokenAccount` widening from line 2.
+
+**A subtle gap.** If a caller passed a native `Account` *with* a `parentAccount` (impossible by current types, but the type system doesn't enforce that the discriminant matches the flag), the guard would let it through and the helper would crash inside `revokeTokenCommand` because `account.currency.speculosApp.name` would not match the `TokenAccount` shape the CLI wrapper expects. Tightening this is on your do-list (5.8.7 #4).
+
+#### Line 5 — snapshot the current Speculos port
+
+```ts
+const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+```
+
+- The fixture has already started a Speculos for the *swap* itself, on the Exchange app. That instance's port lives in `SPECULOS_API_PORT`.
+- We're about to replace it with a fresh Speculos running the *Ethereum* app (because revoke is an EVM tx, not a swap-sig request). When we're done, we must restore the original port, so the rest of the test continues to talk to the Exchange Speculos.
+- This is the snapshot/restore pattern from Chapter 5.5.
+
+#### Line 6 — launch a fresh Speculos for the source coin's app
+
+```ts
+const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+```
+
+- For a USDT→ETH swap with `fromAccount = TokenAccount.ETH_USDT_1`, `fromAccount.currency.speculosApp.name` is `"Ethereum"`. We launch a Speculos running the Ethereum app — the one that knows how to render ERC20.APPROVE clear-sign screens.
+- `launchSpeculos` registers the Speculos transport, sets `SPECULOS_API_PORT` to the new port, and returns a `SpeculosDevice`. See Chapter 5.5.
+
+#### Lines 7-9 — call the Layer-3 helper, attach to Allure
+
+```ts
+try {
+  const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+  await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
+```
+
+- `revokeTokenCommand` does the broadcast-flip + spawn + device-tap + restore (you just walked it in 5.8.4).
+- `allure.description(...)` attaches the CLI stdout to the test's Allure entry. Reviewers see the actual transaction hash, gas used, and confirmation status without having to dig through CI logs.
+- The string includes `${provider.uiName}` so reviewers can tell *which* provider's revoke this was — useful when the spec iterates over multiple providers in one run.
+
+#### Line 11 — restore the previous Speculos
+
+```ts
+} finally {
+  await cleanSpeculos(speculos, previousSpeculosPort);
+}
+```
+
+- `cleanSpeculos` stops the Speculos process, unregisters its transport, and restores `SPECULOS_API_PORT` to `previousSpeculosPort`.
+- The `finally` ensures it runs even if the revoke threw — without it, the next test would inherit a stale port and a leaked Speculos container.
+- After this line, the world is back to the swap's Exchange Speculos, exactly as it was before `revokeTokenApproval` was called.
+
+### 5.8.6 File 3 — `provider.swap.spec.ts` Line by Line
+
+The diff is two lines:
+
+```diff
+  const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
+- await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
++ //await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
++ await app.swap.revokeTokenApproval(fromAccount, provider);
+  const swap = new Swap(fromAccount, toAccount, minAmount, provider);
+```
+
+#### What was removed
+
+`await app.swap.ensureTokenApproval(fromAccount, provider, minAmount)` ran the approve flow with a 1.2x slippage buffer (see Chapter 5.6's twin walkthrough). It set the allowance high enough that the swap that followed could pull tokens.
+
+#### What was added
+
+`//await app.swap.ensureTokenApproval(...)` — same line, commented out. The senior left the original code in as a marker; this is a common signal of "I'll un-comment this once the new line is proven".
+
+`await app.swap.revokeTokenApproval(fromAccount, provider)` — the new method from File 2. It clears whatever allowance is on-chain and returns.
+
+#### What this means
+
+**This is dev-loop code, not the final shape.** The senior wanted to test the revoke path *in isolation*. With both calls in place, a failure would be ambiguous (revoke or approve?). With only the revoke, a failure is unambiguously a revoke problem.
+
+The senior was iterating. The final PR must restore the approve and add the revoke as a `beforeEach` cleanup that runs *before* the per-test approve. The proposed shape is in 5.8.8.
+
+If you ship the senior's commit as-is, every swap test will revoke (good for state hygiene) but never approve (the swap then fails because allowance is zero — unrelated to the spike's intent). That's why this can't be the final shape.
+
+### 5.8.7 What's Still TODO Before Merge
+
+The senior left you six items. Work them in this order:
+
+#### 1. Fix the `@step` copy-paste bug
+
+```ts
+// e2e/desktop/tests/page/swap.page.ts:589 (approximately)
+- @step("Ensure token approval")
++ @step("Revoke token approval")
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+```
+
+5-second fix. Smallest commit you'll write all sprint. Do it first; it changes Allure rendering for every subsequent test run you do.
+
+#### 2. Restore proper hook ordering in `provider.swap.spec.ts`
+
+The dev-loop swap (5.8.6) replaces approve with revoke. The final shape keeps both: revoke as a `beforeEach` cleanup, approve as the per-test setup. Proposed diff:
+
+```diff
+  for (const { fromAccount, toAccount, provider, xrayTicket } of providerFlowTests) {
+    test.describe(`Swap - ${provider.uiName} flow`, () => {
+      setupEnv(true);
+      test.use({ /* ... */ });
+
++     test.beforeEach(async ({ app }) => {
++       await app.swap.revokeTokenApproval(fromAccount, provider);
++     });
+
+      test(
+        `Swap - ${provider.uiName} flow`,
+        { /* tag/annotation */ },
+        async ({ app }) => {
+          await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+          const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
+-         //await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
+-         await app.swap.revokeTokenApproval(fromAccount, provider);
++         await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
+          const swap = new Swap(fromAccount, toAccount, minAmount, provider);
+
+          await performSwapUntilQuoteSelectionStep(app, swap, minAmount);
+          // ... rest unchanged ...
         },
+      );
+    });
+  }
+```
+
+Why `beforeEach` and not the test body: the cleanup is a fixture concern, not a logic step. Putting it in `beforeEach` makes it run on retries too (Playwright retries reuse the same `beforeEach`) and surfaces revoke failures separately from the swap failure in Allure.
+
+#### 3. Mobile parity
+
+`e2e/mobile/page/trade/swap.page.ts` already imports `approveTokenCommand` (consolidated briefing §10). Add a parallel `revokeTokenApproval` method, mirroring the desktop shape. The mobile global injection (`Object.assign(this.global, cliCommandsUtils)` at `e2e/mobile/jest.environment.ts:138`) makes `revokeTokenCommand` available on `global` automatically; only the POM method needs adding. Code in 5.8.10.
+
+#### 4. Tighten the type guard
+
+`revokeTokenCommand`'s signature is `(account: TokenAccount, spender: string)`. The POM accepts `Account | TokenAccount` (correct, for ergonomics) and guards on `!fromAccount.parentAccount`. But the guard only checks one of the two discriminants of `TokenAccount`. Tighten the call site so TypeScript can narrow:
+
+```ts
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+  if (!provider.contractAddress) return;
+  if (!("parentAccount" in fromAccount) || !fromAccount.parentAccount) return;
+  // fromAccount is now TokenAccount within the rest of the body
+  ...
+  const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+  ...
+}
+```
+
+Optional but cheap. Do it if review pushes back; ship without it otherwise.
+
+#### 5. Spike report
+
+QAA-615 is a spike. The deliverable is **not** just code — it's a written answer. Outline in 5.8.16.
+
+#### 6. Test against a real device
+
+Speculos is canonical for CI but a real Nano S Plus or Stax run on Sepolia confirms the clear-sign content matches expectations. Quick validation:
+
+- Plug a Nano S Plus seeded with the QAA test seed
+- Switch to Sepolia (or the testnet your team uses for swap regression)
+- Run the spec with `MOCK=0 SPECULOS=0` (whatever your local convention is for "use the real device")
+- Tap through the revoke screens manually
+- Verify the device displays "Type: Approve / Amount: 0 USDT / Spender: 0xRouter"
+
+Pass that test once before declaring done.
+
+### 5.8.8 The Proposed Final Spec Shape
+
+Putting items #2 and #1 together, the final `provider.swap.spec.ts` body looks like:
+
+```ts
+for (const { fromAccount, toAccount, provider, xrayTicket } of providerFlowTests) {
+  test.describe(`Swap - ${provider.uiName} flow`, () => {
+    setupEnv(true);
+
+    test.use({
+      teamOwner: Team.SWAP,
+      userdata: "skip-onboarding-with-last-seen-device",
+      speculosApp: provider.app,
+      cliCommandsOnApp: [
+        [
+          { app: fromAccount.currency.speculosApp, cmd: liveDataWithAddressCommand(fromAccount) },
+          { app: toAccount.currency.speculosApp,   cmd: liveDataWithAddressCommand(toAccount)   },
+        ],
+        { scope: "test" },
+      ],
+    });
+
+    test.beforeEach(async ({ app }) => {
+      // Clean state before each iteration. No-op if already zero.
+      await app.swap.revokeTokenApproval(fromAccount, provider);
+    });
+
+    test(
+      `Swap - ${provider.uiName} flow`,
+      {
+        tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5", "@ethereum", "@family-evm"],
+        annotation: [{ type: "TMS", description: xrayTicket }],
+      },
+      async ({ app }) => {
+        await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
+
+        const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
+        await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
+        const swap = new Swap(fromAccount, toAccount, minAmount, provider);
+
+        await performSwapUntilQuoteSelectionStep(app, swap, minAmount);
+        await app.swap.selectSpecificProvider(provider);
+
+        await app.swap.clickExchangeButton();
+        await app.swap.checkElementsPresenceOnSwapApprovalStep();
+        await app.swap.clickExecuteSwapButton();
+        await app.swap.clickContinueButton();
+        await app.speculos.verifyAmountsAndAcceptSwap(swap, minAmount);
+        await app.swap.expectTransactionSentToasterToBeVisible();
       },
     );
-    expect(exitCode).toBe(0);
-    const data = JSON.parse(stdout);
-    expect(data.command).toBe("send");
-    expect(data.amount).toBe("0.001 ETH");
-    expect(data.recipient).toBe(MOCK_ETH_RECIPIENT);
-    expect(data.dry_run).toBe(true);
+  });
+}
+```
+
+Read the order:
+1. `beforeEach` revokes — state goes to zero.
+2. `ensureTokenApproval` runs the pre-check (`isTokenAllowanceSufficientCommand` returns 0 because we just revoked), so it always runs the approve flow.
+3. The swap runs against a freshly-approved allowance every time.
+
+### 5.8.9 Speculos Coordination
+
+The final spec spawns Speculos **three times** per test:
+
+1. `revokeTokenApproval` — Ethereum app (revoke calldata)
+2. `ensureTokenApproval` — Ethereum app (approve calldata)
+3. The fixture's swap Speculos — Exchange app (swap signing)
+
+Each `launchSpeculos` / `cleanSpeculos` pair takes ~10–30 seconds depending on local Docker vs remote Speculos pool. Three pairs is 30–90 seconds of overhead per test. The swap suite has ~10 tests today; that's 5–15 minutes of pure Speculos boot time per run.
+
+**Possible optimisation: share the Ethereum Speculos between revoke and approve.**
+
+Both run on the same app. You could refactor:
+
+```ts
+// pseudo-code, not the final API
+test.beforeEach(async ({ app }) => {
+  await app.speculos.withApp("Ethereum", async () => {
+    await revokeTokenCommand(fromAccount, provider.contractAddress);
+    if (currentAllowanceIsBelowMin) {
+      await approveTokenCommand(fromAccount, provider.contractAddress, minAmount * 1.2);
+    }
   });
 });
 ```
 
-Now write `apps/wallet-cli/src/test/commands/revoke.test.ts`. The cases you should cover, at minimum:
+That would halve the boot overhead. **It is out of scope for QAA-615.** File it as a follow-up; mention it in the spike report's "recommended next steps" section. Do not slip it into the spike PR — review-scope creep is the canonical way for spike PRs to die.
 
-1. **`revoke --dry-run` with a known token returns a JSON envelope** with `command: "revoke"`, `recipient` = the USDT contract (`0xdAC1...`), `amount` matching `/^0(\.0+)? USDT$/`, and `dry_run: true`.
-2. **`revoke --dry-run` rejects an unknown token** — exit code non-zero, stderr matches `/not found|unknown token/i`.
-3. **`revoke --dry-run` rejects a malformed spender** (`--spender not-an-address`) — exit code non-zero, stderr matches `/spender|address/i`.
-4. **`revoke` (mocked DMK) emits device-signature events and a broadcasted txHash** — full flow, with `WALLET_CLI_MOCK_APP_RESULTS` set and the broadcast endpoint mocked to return a fake hash.
+For now, accept the three-launch shape. Sub-30-second-per-test Speculos overhead is the team's current baseline.
 
-Hints for the wiring:
+### 5.8.10 Mobile Implementation
 
-- **Mock-DMK** doesn't care what the calldata is. The signing call dispatches the same way regardless of `transfer` vs `approve`. So you don't need a new mock fixture — `MockAppResults["Ethereum"]` is identical to what `send.test.ts` uses.
-- **HTTP routes** the revoke flow needs (same as send): `GET /address/<addr>/balance`, `GET /address/<addr>/nonce`, `POST /tx/estimate-gas-limit`, `GET /gastracker/barometer`, plus the ETH sync routes for `BridgeAdapter.sync`. If you went with ticker resolution (Q3 option b in Phase 2), you may also need a token sub-account fixture; `eth-sync-routes.ts` likely already has one.
-- **Broadcast mock** — when you test the signed flow (case 4), intercept the broadcast endpoint and have it return a deterministic 32-byte hash like `0x` + `"a".repeat(64)`. The exact endpoint is in `eth-sync-routes.ts`.
+Mobile parity is item #3 on your do-list. The proposed addition:
 
-> **Verify:** R2 references `apps/wallet-cli/src/test/helpers/eth-sync-routes.ts` and `apps/wallet-cli/src/device/mock-dmk.ts` as the assets you'll touch. If the names have moved, search by content (`grep -r "ETH_SYNC_ROUTES" apps/wallet-cli/`).
+```ts
+// e2e/mobile/page/trade/swap.page.ts
+// (somewhere near the existing approve/swap methods)
 
-A test you do **not** write at this level: an assertion on the device's clear-sign screen content. The mock-DMK doesn't drive the on-device UI — Speculos does — and Speculos isn't part of the unit test loop. Clear-sign verification belongs in the QAA-613 UI tests downstream, not here.
+async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
+  if (!provider.contractAddress || !("parentAccount" in fromAccount) || !fromAccount.parentAccount) return;
 
-### 5.8.11 Phase 7 — Manual Sanity Run
-
-Mocked tests prove the wiring; a real device run proves the device renders the approve screen correctly. The manual loop:
-
-1. **Plug in a Ledger device** loaded with a test seed (the QAA team's standard test seed; check the `qa-team-resources` Confluence page or ask in `#qa-automation` if you don't have it).
-2. **Open the Ethereum app** on the device. Make sure clear-sign is enabled (Settings → Allow contract data is fine, but for clear-sign you also need the modern descriptor support that's on by default on recent firmware).
-3. **Pick a network.** Sepolia is preferred for the spike — gas is free, and you can produce a non-zero allowance ahead of time by running `wallet-cli send` with the long `--data 0x095ea7b3...` form (Section 5.8.3) targeting a fake spender. Mainnet is fine too if you have a real allowance to revoke (e.g., a stale Uniswap approval from a real swap), but you'll spend real gas.
-4. **Run** `wallet-cli revoke ethereum-1 --token USDT --spender 0x...`.
-5. **On the device, walk through the screens**. You should see:
-   - "Type: Approve" (or "Review transaction")
-   - "Amount: 0 USDT"
-   - "Address: 0x..." (the spender, shortened on Stax/Flex)
-   - Fee, network, "Sign?"
-6. **Approve and let the broadcast complete.** Capture the txHash from stdout.
-7. **Open Etherscan** (or Sepolia's etherscan), paste the txHash, and confirm the tx state: `to` = the USDT contract, `value` = 0, calldata starts with `0x095ea7b3`, ends in 64 trailing zeroes.
-8. **Capture a screenshot** of one of the device screens (Speculos has a "save screenshot" command; the device itself can be photographed). The screenshot is evidence for your spike report.
-
-> **Verify:** the QAA test seed and test spender addresses. R2 didn't pin down the exact router addresses on Sepolia. If you don't have a known testnet allowance to revoke, you'll need to set one up first — pick any address as the fake spender (e.g., `0x000000000000000000000000000000000000dEaD`), approve a small allowance, then revoke. The on-chain state doesn't matter; what matters is that the device shows the right screens.
-
-### 5.8.12 Phase 8 — The Spike Report
-
-QAA-615 is a spike. The artefact that gets reviewed is not just the PR — it's a written report explaining what you found, what you shipped, and what you'd recommend next. Without this report, the spike is incomplete even if the code works.
-
-The report can live as a Confluence page under the QAA team space, as a long Jira comment on QAA-615 itself, or as a markdown file in the PR description. Confluence is the canonical home for spike reports in this team — confirm with your manager which they prefer.
-
-A 1-page template you can fill:
-
-```
-# QAA-615 — Spike: wallet-cli revoke
-
-## Question
-Can we add a CLI command that revokes an ERC-20 token approval, suitable for use as a
-before/after hook in the broadcast-enabled regression suite (QAA-613 and follow-ups)?
-
-## Answer
-Yes. Implementation shipped in PR #<number>: `wallet-cli revoke <account> --token <ticker> --spender <0x...>`.
-Transaction signs `approve(spender, 0)` against the token contract, broadcasts, returns txHash.
-
-## Path chosen
-Path C (thin wrapper over the existing `send` pipeline). Rationale: <one paragraph
-explaining the load-bearing constraints — hook UX, code reuse, no live-common changes>.
-
-## LOC actually shipped
-- commands/revoke.ts: <N> lines
-- wallet/erc20-calldata.ts (or deep import from coin-evm — note which): <N> lines
-- cli.ts: +2 (registration)
-- output.ts: +<N> (revoke envelope variants, if added)
-- test/commands/revoke.test.ts: <N> lines
-Total: ~<N>00 LOC.
-
-## Where it slots in
-Can be invoked as `wallet-cli revoke <descriptor> --token <ticker> --spender <0x...>`
-in a shell, or as a child process from the QAA-613 test harness. JSON output mode
-(--output json) emits a stable envelope `{ command: "revoke", account, token, spender,
-recipient, amount, txHash }` suitable for `jq` parsing.
-
-## What is NOT covered (out of scope for QAA-615)
-- The `cliCommandsUtils.ts` wire-up (a `revokeAllowanceCommand` wrapper backed by a new
-  `runWalletCliRevoke` engine in `runCli.ts`). Without it, this binary is shipped but not
-  consumed by any spec yet. Recommended as the immediate follow-up ticket.
-- Dynamic spender lookup from a known-DEX registry (e.g., resolve `--router uniswap-v3` to the
-  current Uniswap V3 router address). Currently the user must pass the address.
-- Auto token registry — if the token isn't in `cryptoassets`, the command errors. Adding
-  arbitrary `--contract 0x...` support is a follow-up.
-- A companion `wallet-cli allowance` read command (sketched in 5.8.9, not shipped here).
-- A symmetric `wallet-cli approve --amount N` command (acknowledged as a natural follow-up;
-  ~70 LOC given the same helper).
-
-## Recommended next steps
-1. Wire `wallet-cli revoke` into `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` so
-   desktop and mobile specs can consume it via the existing `cliCommands: [...]` fixture
-   pattern (mobile picks it up automatically through the global injection at
-   `e2e/mobile/jest.environment.ts:138`). Add a `runWalletCliRevoke` to `runCli.ts` (or a
-   parallel `runWalletCli.ts`) and a `revokeAllowanceCommand(account, spender)` wrapper.
-2. Land `wallet-cli allowance` so QAA-613's hook can verify revoke worked, not just trust it.
-3. Wire `wallet-cli revoke` into QAA-613's `beforeEach` once that ticket starts.
-4. Expand the token registry / accept raw `--contract` for tokens not yet in the registry.
-5. Track the same pattern for ERC-721 and ERC-1155 (NFT) approvals, since
-   `setApprovalForAll` will eventually have the same regression-suite need.
-
-## Evidence
-- Tests: <link to the test file>, <N> cases passing under `bun test`.
-- Manual run on Sepolia: txHash <0x...>, screenshots attached.
-- PR: <link>.
+  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
+  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
+  try {
+    // revokeTokenCommand is already global on mobile via jest.environment.ts:138
+    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
+    // Mobile uses jest-allure-circus differently; use the team's standard attachment helper
+    await allure.attachment(
+      `revoke-${provider.uiName}.txt`,
+      Buffer.from(result, "utf-8"),
+      "text/plain",
+    );
+  } finally {
+    await cleanSpeculos(speculos, previousSpeculosPort);
+  }
+}
 ```
 
-The report is short on purpose. A spike that produces a 5-page report has scope-crept into a feature.
+Differences from desktop:
+- Type-guarded narrowing (item #4 applied here too).
+- Allure API differs slightly between Playwright and jest-allure-circus. Match whatever the existing mobile POM methods do for attachments.
+- No `@step` decorator on mobile (the mobile POM uses `@Step` capitalised — confirm the file's existing convention before adding; copy from `approveTokenApproval` if it exists, or from a neighbouring `@Step` method).
 
-### 5.8.13 PR Shape
+The `revokeTokenCommand` import is automatic via the global injection — no `import` statement needed in the mobile POM file. That said, do add it explicitly if your team's lint rules require it; the global is for spec files, not POM files.
 
-The PR for QAA-615 should be small, isolated, and easy to review. Suggested commit decomposition (each small, each green on its own):
+Wire it into the mobile spec the same way as desktop: `beforeEach` cleanup, then per-test approve. The mobile equivalent of `provider.swap.spec.ts` lives at `e2e/mobile/specs/swap/`.
 
-1. `feat(cli): add revoke command skeleton` — the new `revoke.ts` file + registration in `cli.ts`. No tests yet, no output formatting; just the command structure compiling.
-2. `feat(cli): wire ERC-20 approve calldata into revoke handler` — the `getErc20ApproveData` integration, the intent construction, the dry-run path. After this commit, `revoke --dry-run` works.
-3. `feat(cli): wire revoke through the device-session signing path` — the `withCurrencyDeviceSession` + `wallet.send` plumbing. After this commit, the full flow runs against a real device.
-4. `feat(cli): add JSON envelope for revoke output` — output formatter changes.
-5. `test(cli): add revoke command tests` — the four test cases from Section 5.8.10.
-6. (Optional) `docs(cli): document revoke in apps/wallet-cli/README.md` — one paragraph + an example invocation.
+### 5.8.11 Verifying Revoke Worked
 
-**Reviewers:**
-- One owner of `apps/wallet-cli` (look at the most recent merged PRs to identify; usually `@ledgerhq/wallet-xp` or whatever team owns the wallet-cli workspace today).
-- The QAA SDET who will consume the command for QAA-613 (the engineer who raised the hook requirement on the parent ticket).
-- Optionally, an EVM family owner if your PR touches `coin-evm` (it shouldn't, but if you decide to expose a new helper from the EVM logic module, this becomes mandatory).
+Three ways to confirm the revoke landed, ranked by effort:
 
-**PR title suggestion:** `feat(cli): add revoke command for ERC-20 token approvals (QAA-615 spike)`
+#### Option A — CLI read-back (canonical)
 
-**PR body should include:**
-- One-paragraph summary lifted from the spike report's "Answer" section.
-- A copy-pasteable example invocation.
-- A link to the spike report (Confluence or Jira comment).
-- A screenshot from the manual run (Section 5.8.11).
-- The "What is NOT covered" list, so reviewers don't ask about scope creep.
+```ts
+// after the revoke, in a debug spec or one-off script
+import { runCliGetTokenAllowance, isTokenAllowanceSufficientCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";
+
+const allowance = await isTokenAllowanceSufficientCommand(fromAccount, provider.contractAddress, "1");
+console.log("Allowance after revoke:", allowance);  // expect "0" or false
+```
+
+This uses the existing reader (Chapter 5.4 §5). Zero return means the revoke landed.
+
+#### Option B — revoke.cash (Chapter 5.3)
+
+Open `https://revoke.cash`, paste the QAA test address (read-only, no wallet connection needed), select Sepolia, find the token + spender pair. After a successful revoke, the entry should disappear from the list.
+
+#### Option C — Etherscan read tab
+
+`https://sepolia.etherscan.io/token/<contract>#readContract`, scroll to `allowance(owner, spender)`, paste the test wallet address as `owner` and the provider router as `spender`. Returns 0 in raw smallest units after a successful revoke.
+
+Use Option A in the spec itself if you ever want a hard assertion. Use Options B/C for one-off audits and during the spike's manual verification step.
+
+### 5.8.12 The PR Shape
+
+Slice the spike PR into four small, reviewable commits plus a non-code deliverable:
+
+| # | Type | Files | Rationale |
+|---|---|---|---|
+| 1 | `test(common)` | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | The senior's existing commit, possibly with the `@step` description fix folded in (it's small enough that a separate commit feels heavy). |
+| 2 | `test(desktop)` | `e2e/desktop/tests/page/swap.page.ts`, `e2e/desktop/tests/specs/provider.swap.spec.ts` | The POM method (with corrected `@step`) and the `beforeEach` wiring. |
+| 3 | `test(mobile)` | `e2e/mobile/page/trade/swap.page.ts`, mobile spec | Mobile parity. |
+| 4 | `refactor(common)` | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | (Optional) Tightened type guard, if review asked for it. |
+| — | (no commit) | Confluence or Jira | Spike report. Lives outside the repo. |
+
+Why four commits and not one squash:
+
+- Reviewers can land #1 independently (it's a pure live-common change with no spec wiring, and other teams can already use `revokeTokenCommand` once it's merged).
+- Mobile parity (#3) might be reviewed by a different team owner than desktop (#2). Splitting them lets each owner review their own surface.
+- The optional refactor (#4) is a "nice to have" — keeping it separate means you can drop it if review pushes back without unwinding the spike.
+
+### 5.8.13 Reviewer Routing
+
+Code-owners on each surface:
+
+| File | Likely owner |
+|---|---|
+| `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | live-common owner + wallet-xp |
+| `e2e/desktop/tests/page/swap.page.ts`, `provider.swap.spec.ts` | wallet-xp + Swap (PTX) team |
+| `e2e/mobile/page/trade/swap.page.ts`, mobile spec | wallet-xp mobile + Swap (PTX) |
+
+Tag the reviewers in your PR description, not just via CODEOWNERS auto-routing. The Swap team specifically wants visibility on anything that changes their regression flow — they own the contract that `revokeTokenApproval` is implementing.
 
 ### 5.8.14 Common First-Run Failures
 
-When you actually run your code for the first time, you will hit issues. Here are five-to-seven likely ones with hints — not full solutions. Practise debugging from the symptom backward.
+Things that will go wrong on your first end-to-end run, and how to debug:
 
-**1. `Token UNKN not found`** when you run `wallet-cli revoke … --token UNKN`. The token registry doesn't have a ticker `UNKN`. Decision time: do you add the token to the registry (PR to `libs/cryptoassets/src/data/...`), or do you accept a raw `--contract 0x...` flag in your command? For the QAA-615 spike, the answer is "neither — error and document the limitation in the spike report under What is NOT covered." For follow-up tickets, this is the seam where `--contract` lands.
+#### "CLI subprocess hung at confirmation"
 
-**2. `Cannot read property 'parentAccount' of undefined`** during descriptor parsing. Your V1 descriptor parsing is missing the parent linkage. The descriptor format `account:1:<type>:<network>:<env>:<xpub>:<path>` for a token sub-account requires the parent account to be syncable; if the bridge can't find the parent, the resolver throws. Trace through `resolveAccountDescriptor` to find where the lookup is happening; usually this is a fixture issue (the descriptor points to a token but the sync doesn't return it as a sub-account).
+Symptom: the test sits at `await app.swap.revokeTokenApproval(...)` for 60+ seconds, then Playwright times out.
 
-**3. `Insufficient balance` during dry-run, even though you specified amount=0.** Your gas estimation is hitting the live RPC and the test address has 0 ETH. Two fixes: either fund the address with a fraction of an ETH (Sepolia faucet is free), or verify your HTTP intercept routes are catching the gas-estimate call and returning the mocked fee in the test environment.
+Cause: `approveToken()` couldn't find the expected screen labels. Either the device class doesn't match the labels in `families/evm.ts`, or the Speculos firmware version renders the screen differently.
 
-**4. `Invalid hex data: expected 0x prefix`** at the bridge boundary. You forgot the `"0x" +` prefix when converting the Buffer from `getErc20ApproveData` to a string. Re-read Section 5.8.7's sanity check.
+Debug:
+- `console.log(await fetchCurrentScreenTexts(device.port))` — see what's actually on screen
+- Check `families/evm.ts` for the `DeviceLabels` constants vs. what Speculos shows
+- Confirm `SPECULOS_DEVICE` matches your `--currency` (Nano S Plus vs Stax render different labels)
 
-**5. The device shows blind-sign warning ("Data is present, sign?") instead of the friendly "Type: Approve" screen.** Two possible causes:
-- The token isn't in the cryptoassets registry on the device build you're running. The clear-sign decoder uses `findTokenByAddressInCurrency` to resolve the recipient (which is the token contract); if that resolution fails, it falls through to blind-sign. Test with a mainstream token (USDT, USDC, DAI) before assuming the code is wrong.
-- The Ethereum app on the device is too old. Recent firmware ships clear-sign descriptors for ERC-20; very old firmware does not. Update the device.
+#### "DISABLE_TRANSACTION_BROADCAST not honoured"
 
-**6. `pnpm generate` succeeds but `wallet-cli --help` doesn't list `revoke`.** You registered the command in the wrong place in `cli.ts`, or the codegen target points at a different file. Compare with how `send` is registered. Also check whether there's a runtime registry (e.g., a `defineCli({ commands: [...] })` call somewhere) — Bunli sometimes wires commands at runtime, not at build time.
+Symptom: revoke completes but allowance on-chain doesn't change.
 
-**7. The unit test passes locally but fails in CI** with a network-error message. Your test is hitting a real RPC because `WALLET_CLI_HTTP_INTERCEPT` isn't set in the CI environment, or your sync route fixture is missing a route the bridge calls. Run with `DEBUG=*` (or whatever the wallet-cli's debug flag is — check the README) to see exactly which URL the test tried to fetch. Add it to `eth-sync-routes.ts`.
+Cause: env not propagated to the subprocess, or the flip-and-restore logic ran out of order.
 
-If you hit something not on this list, write it down. Add it as the eighth entry in the chapter's reference list when you submit your PR — future readers benefit from your stumbles.
+Debug:
+- Add `console.log("ENV:", process.env.DISABLE_TRANSACTION_BROADCAST)` inside `revokeTokenCommand` after the flip
+- Confirm `setDisableTransactionBroadcastEnv` actually mutates `process.env` (it should — the helper at the bottom of `cliCommandsUtils.ts` does both `setEnv` and `process.env`)
+- Check there's no upstream test setting `DISABLE_TRANSACTION_BROADCAST=1` after `revokeTokenCommand` flipped it but before the CLI started
 
-### 5.8.15 Linking Back to QAA-613
+#### "Speculos port collision"
 
-QAA-613 is the next ticket in the queue: *"implement the token approval flow with Thorchain, Uniswap, and LiFi. Broadcast will be disabled so just the first part of the flow will happen, no actual swap."* It's the consumer of QAA-615.
+Symptom: `launchSpeculos` errors with "port in use" or the test inherits the wrong device.
 
-The shape of QAA-613's hook, once your `wallet-cli revoke` ships, is roughly five lines of shell:
+Cause: previous test's `cleanSpeculos` was skipped — usually because a `try/finally` was missing somewhere.
 
-```bash
-# pseudo-code for the QAA-613 beforeEach hook
-echo "Revoking $TOKEN allowance for $SPENDER on $ACCOUNT..."
-TX_HASH=$(wallet-cli revoke "$ACCOUNT" \
-  --token "$TOKEN" \
-  --spender "$SPENDER" \
-  --output json | jq -r '.txHash')
-echo "Revoke broadcast: $TX_HASH"
-# wait for confirmation — exact mechanism depends on the test harness
-```
+Debug:
+- `docker ps` — see if old Speculos containers are still up
+- `lsof -i :<port>` — see what's holding the port
+- Confirm every `launchSpeculos` in your codebase has a paired `cleanSpeculos` inside a `finally`
+- Kill the strays: `docker kill $(docker ps -q --filter ancestor=ghcr.io/ledgerhq/speculos:master)`
 
-Two important nuances:
+#### "Allure shows wrong description"
 
-**(a) QAA-613 itself runs broadcast-disabled.** The on-chain allowance never moves during a QAA-613 run. So strictly, the revoke hook is *not* needed for QAA-613's own runs — the test starts each iteration from the same on-chain state regardless. The reason you ship revoke now anyway is that **the same test code will run in the broadcast-enabled regression suite** (the parent QAA-919 epic's deliverable). When that switch flips, the hook becomes load-bearing without anyone having to add it.
+Symptom: every step in the Allure report says "Ensure token approval" twice.
 
-**(b) The hook is per-flow, not per-suite.** Each provider (Thorchain, Uniswap V3, LiFi) has its own router address. Revoking the Uniswap allowance does not reset the Thorchain allowance. The hook runs in the `beforeEach` of each provider's flow and revokes that provider's specific spender. R6's audit confirms this — the test fixture stores per-provider router addresses, so the hook reads `$SPENDER` from the per-flow config.
+Cause: the `@step` copy-paste bug from 5.8.7 #1.
 
-> **Verify:** the exact Thorchain / Uniswap V3 / LiFi router addresses for the chains the regression suite targets. R2 didn't pin these down, and they change occasionally (especially Uniswap, which has v2/v3/universal-router variants on different networks). The Swap Live App team owns the canonical list — check `swap-configuration` repo or ask `#swap-engineering` before hardcoding.
+Fix: change the decorator to `@step("Revoke token approval")`. You knew this was coming.
 
-### 5.8.16 Going Further
+#### "Test passes locally, fails in CI"
 
-Once `revoke` is shipping and being consumed by QAA-613's hook, the natural follow-ups split into five categories. None of these are in scope for QAA-615; all are reasonable items to file as new tickets.
+Symptom: green on your machine, red on CI.
 
-**1. Wire `revoke` into `cliCommandsUtils.ts`.** This is the most consequential follow-up. Today QAA-613 (and every other test that needs a CLI fixture) goes through `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` — and that wrapper points at the legacy `apps/cli`. To make `wallet-cli revoke` consumable from desktop and mobile specs, you add a `runWalletCliRevoke` engine to `runCli.ts` (or a sibling `runWalletCli.ts` if reviewers prefer separating transports), then expose a `revokeAllowanceCommand(account, spender)` wrapper from `cliCommandsUtils.ts`. Desktop specs pick it up via `{ cliCommands: [revokeAllowanceCommand(account, router)] }`; mobile picks it up automatically because `jest.environment.ts` injects all `cliCommandsUtils` exports as globals. Estimated ~80 LOC across the two files plus tests. Without this step, `wallet-cli revoke` is shipped but unconsumed — the spike's binary deliverable does not become test infrastructure until the wrapper layer points at it.
+Causes (in decreasing order of likelihood):
+- `REMOTE_SPECULOS=true` on CI — the remote pool has different latency. Add `await waitForSpeculosReady(device.id)` (already in `launchSpeculos` for remote; check the path is hit)
+- CI's QAA seed has different account state than yours — the on-chain allowance differs at run-start
+- CI is on a different testnet than your local — confirm `DEFAULT_NETWORK` env
 
-**2. Companion `approve` command.** Symmetric to revoke but takes `--amount N` (or the literal `unlimited`, mapping to `2^256 - 1`). Reuses the same `getErc20ApproveData` helper with a non-zero amount. Estimated ~70 LOC. Useful for the regression suite's *setup* phase: pre-load an allowance before a swap test starts, so the test exercises the swap path rather than the approve path.
+#### "Allowance is zero before revoke even runs"
 
-**3. Dynamic spender lookup.** Instead of `--spender 0x...` (raw address), accept `--router uniswap-v3` (provider name), and resolve internally to the current router address per (chain, version). Source of truth: `swap-configuration` repo. Pro: hooks become readable (`--router uniswap-v3` instead of a 40-hex-char blob). Con: introduces a network/config dependency on a moving target. File this as a separate ticket so the tradeoff is explicit.
+Not a failure, but worth noting: if a previous CI run's `afterEach` (or a previous test's natural cleanup) zeroed the allowance, your `beforeEach` revoke is a no-op. The test is still correct. Don't add a "did anything happen?" assertion — revoke from zero is valid.
 
-**4. Batch revoke.** Take a comma-separated `--spender 0xA,0xB,0xC` (or read a file) and emit one transaction per spender. Useful when a single test wipes multiple stale allowances at once. Each transaction is signed individually (no EIP-3074 / batched-tx assumptions); the device prompts once per signature. Pseudo-cost: linear in number of spenders, both in gas and in user-tap effort if running on a real device. Acceptable for CI on Speculos, painful for a human.
+### 5.8.15 What's NOT in Scope for QAA-615
 
-**5. `--unlimited` toggle on `approve`.** Sets the allowance to `2^256 - 1`, which the device's clear-sign decoder renders as "Unlimited <ticker>". Useful for tests that need a "rich" account that can swap any amount without hitting allowance bounds. Already documented in `cli-transaction.ts:37` (`UNLIMITED_APPROVAL_AMOUNT = 2n ** 256n - 1n`). One-flag addition once `approve` lands.
+The spike has a finite boundary. Things you *do not* need to ship:
 
-A practice question to test your understanding: of these five, which one is closest to "free" (smallest review surface, biggest test-suite leverage)? Stop reading and answer before continuing.
+- **Symmetric `runCliApprove` standalone command.** `approveTokenCommand` already exists; nothing new needed there.
+- **Token registry expansion.** Adding new ERC-20s to the test fixture is QAA-919's overall scope but a separate ticket. Don't pull it in.
+- **Multi-spender batch revoke.** A single-call helper that revokes from N spenders at once would be useful but is a future optimisation. File as follow-up.
+- **Migration of every test to use revoke as `beforeEach`.** Only `provider.swap.spec.ts` is in scope for QAA-615. Other specs (e.g., `validation.swap.spec.ts`) might benefit, but each is a separate PR.
+- **EIP-2612 permit support.** Some newer tokens (USDC v2, DAI) support gasless permit signatures, which would be a much faster cleanup mechanism than on-chain revoke. Out of scope; would need a different CLI command and a different device flow.
+- **Speculos sharing optimisation.** 5.8.9 — file as follow-up, do not bundle into spike PR.
+- **Spike report → Confluence migration.** If your team writes spike reports in Jira comments, keep them in Jira. Don't promote a comment to a Confluence page as part of the same PR.
 
-> **Answer.** Item 1 (the `cliCommandsUtils.ts` wire-up) is the highest leverage — without it, your spike's binary work does not reach the test suites it was scoped to serve. Item 2 (`approve`) is the closest to "free" in terms of code reuse — the helper is already in your hand from QAA-615, and the command is a 70-LOC clone of `revoke` with one extra option. Once `approve` ships, items 4 and 5 fall out almost for free (batch is a loop, `--unlimited` is one constant). Item 3 is the most useful but the most expensive — it ties wallet-cli to the swap config repo, which is its own moving target.
+The senior already drew this boundary by writing 37 lines instead of 200. Honour it.
 
-### 5.8.17 Chapter 5.8 Quiz
+### 5.8.16 The Spike Report
+
+The spike report is a non-code deliverable. Post it as a Jira comment on QAA-615 (or a Confluence page, depending on your team's convention). Outline:
+
+#### Section 1 — Question
+
+Restate verbatim what the ticket asked. One paragraph.
+
+> QAA-615 asked: find the smallest, lowest-risk way to revoke an existing ERC-20 allowance from inside an E2E test, so that the broadcast-enabled regression suite can clean up provider allowances between iterations.
+
+#### Section 2 — Answer
+
+Yes, here's what shipped. Link the PR. One paragraph.
+
+> Shipped: a thin `revokeTokenCommand` typed wrapper in `cliCommandsUtils.ts`, plus a `revokeTokenApproval` POM method on both desktop and mobile swap pages, plus a `beforeEach` cleanup hook in `provider.swap.spec.ts`. Total ~50 LOC of new code (mobile parity adds 20 to the senior's 37). PR: <link>.
+
+#### Section 3 — Path chosen
+
+State the path and why.
+
+> **Path C — thin wrapper following the existing `approveTokenCommand` pattern.** Reuses the legacy CLI's existing `--mode revokeApproval` flag (already in `apps/cli/src/commands/blockchain/send.ts`); reuses the existing `runCliTokenApproval` Layer-2 spawn helper; reuses the existing `approveToken()` Layer-4 device-tap helper. No changes to the CLI binary, no new Speculos plumbing, no new device labels. The whole spike is symmetry with the existing approve flow.
+
+#### Section 4 — Alternatives rejected
+
+Two paragraphs each, max.
+
+- **Path A — wallet-cli new `revoke` subcommand.** Rejected. wallet-cli is out of QAA scope (per Chapter 5.1). Building parallel infra in a CLI we don't own would create maintenance debt for two teams.
+- **Path B — manual `revoke.cash` script.** Rejected for automation. Useful for one-off cleanup (Chapter 5.3) but not deterministic enough for CI.
+- **Path D — bypass the device entirely with EIP-2612 permits.** Rejected for scope. Would require token-by-token `permit()` support audit and a different signing path. File as a future optimisation.
+
+#### Section 5 — LOC actually shipped
+
+Show the numbers. Reviewers love numbers.
+
+> - `cliCommandsUtils.ts`: +20
+> - `swap.page.ts` (desktop): +15
+> - `swap.page.ts` (mobile): +20
+> - `provider.swap.spec.ts`: +3 / -1
+> - **Total: ~57 LOC of new code, 0 LOC of CLI changes.**
+
+#### Section 6 — Recommended next steps
+
+Bulleted list. Each one a candidate follow-up ticket.
+
+- Speculos-app sharing between revoke and approve (5.8.9)
+- Multi-spender batch revoke helper (5.8.15)
+- Migrate other broadcast-enabled specs to use revoke as `beforeEach`
+- EIP-2612 permit support investigation (separate spike)
+
+#### Section 7 — Evidence
+
+Links and screenshots.
+
+- PR link
+- Allure run link with the new step visible (after fixing `@step`)
+- Manual real-device run screenshot (5.8.7 #6)
+- Etherscan link showing allowance went from non-zero to zero on the test seed
+
+A 7-section, ~1-page spike report is the right size. Do not write 4 pages. The deliverable is "the question is answered"; not "every neuron I had during the investigation".
+
+### 5.8.17 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Quiz — QAA-615 Walkthrough</h3>
@@ -6198,947 +3988,474 @@ A practice question to test your understanding: of these five, which one is clos
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> The QAA-615 ticket text says the revoke command is for "automatic regression testing AND NOT nightly executions." What does that distinction mean architecturally?</p>
+<p><strong>Q1.</strong> The senior's <code>revokeTokenApproval</code> POM method is decorated with <code>@step("Ensure token approval")</code>. Why is this wrong, and what is the fix?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CLI must run only at night, not during the day</button>
-<button class="quiz-choice" data-value="B">B) Nightly executions don't need a CLI; daytime ones do</button>
-<button class="quiz-choice" data-value="C">C) The nightly QAA-613 suite runs broadcast-disabled, so on-chain allowance never moves and revoke isn't strictly needed for it; the broadcast-enabled regression suite (parent epic QAA-919) does mutate on-chain state, so it needs revoke as a cleanup hook to keep iterations deterministic</button>
-<button class="quiz-choice" data-value="D">D) Speculos cannot run during nightly windows</button>
+<button class="quiz-choice" data-value="A">A) The decorator should be <code>@Step</code> with a capital S; rename the import</button>
+<button class="quiz-choice" data-value="B">B) The decorator should be removed; revoke does not need an Allure step</button>
+<button class="quiz-choice" data-value="C">C) Copy-paste from <code>ensureTokenApproval</code>: every Allure entry rendered from this method will be mislabelled. Change to <code>@step("Revoke token approval")</code></button>
+<button class="quiz-choice" data-value="D">D) The decorator's argument must include the test ticket: <code>@step("QAA-615 — Revoke token approval")</code></button>
 </div>
-<p class="quiz-explanation">The load-bearing constraint is the broadcast switch. Nightly = broadcast off = no state to clean. Regression = broadcast on = state must be reset between runs. Revoke is for the second case, used as a before/after hook around the test so each iteration starts from a known-clean allowance.</p>
+<p class="quiz-explanation">The senior left a copy-paste residue from the twin <code>ensureTokenApproval</code> method. Allure step descriptions are user-visible — when both methods run in the same test, the Allure report would show "Ensure token approval" twice, confusing reviewers. Fix is a one-word change in the decorator argument. This is item #1 on the do-list.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> R2's spike report recommends Path C (thin <code>revoke</code> wrapper over the existing <code>send</code> pipeline). What is the strongest argument <em>against</em> Path B (just rely on <code>send --data 0x095ea7b3...</code>, which already works today)?</p>
+<p><strong>Q2.</strong> Inside <code>revokeTokenCommand</code>, the senior writes <code>const original = setDisableTransactionBroadcastEnv("0")</code>. What does this do and why?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Path B is broken on Speculos</button>
-<button class="quiz-choice" data-value="B">B) Path B works for interactive debugging but is unfit for unattended test hooks: the hook author has to assemble 68 bytes of hex by hand, a single typo silently produces a different transaction, and test logs become coupled to hex strings rather than to a clean semantic envelope</button>
-<button class="quiz-choice" data-value="C">C) Path B requires changes to the EVM intent schema</button>
-<button class="quiz-choice" data-value="D">D) Path B is slower at runtime</button>
+<button class="quiz-choice" data-value="A">A) Disables broadcast for the next CLI call so the revoke is signed but not sent</button>
+<button class="quiz-choice" data-value="B">B) Sets <code>DISABLE_TRANSACTION_BROADCAST</code> to a falsy <code>"0"</code> (i.e., enables broadcast), and captures the previous value so the <code>finally</code> block can restore it. Required because revoke must actually change on-chain state to be useful</button>
+<button class="quiz-choice" data-value="C">C) Sets a timeout of 0 ms on the broadcast pipeline</button>
+<button class="quiz-choice" data-value="D">D) Caches the original env so it can be passed to <code>runCliTokenApproval</code></button>
 </div>
-<p class="quiz-explanation">Path B is functionally correct — the example invocation in 5.8.3 produces a real revoke transaction. But the regression-suite hook context (a before/after hook running around every iteration of the swap test) is the load-bearing constraint. Hooks run unattended, must be greppable, and must not silently no-op or produce the wrong transaction when an author mistypes a digit. Path B fails all three; Path C addresses all three.</p>
+<p class="quiz-explanation">The <code>"0"</code> string makes the env flag falsy in the CLI's check (<code>opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")</code>). Capturing <code>original</code> is the safety net: the <code>finally</code> block restores whatever the env was before, ensuring the test doesn't leak a flipped broadcast state into subsequent CLI calls. See Chapter 5.6.7.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> In the legacy <code>cli-transaction.ts</code>'s <code>revokeApproval</code> path, the produced <code>Transaction</code> has <code>mode: "send"</code>, <code>recipient: tokenContractAddress</code>, <code>amount: BigNumber(0)</code>, and <code>data: getErc20ApproveData(spender, 0n)</code>. Why is <code>recipient</code> the <em>token contract address</em> instead of the spender's address?</p>
+<p><strong>Q3.</strong> The POM method does <code>const previousSpeculosPort = getEnv("SPECULOS_API_PORT")</code> before <code>launchSpeculos</code>, and <code>cleanSpeculos(speculos, previousSpeculosPort)</code> in the <code>finally</code>. Why?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because the EVM transaction's <code>to</code> field must point at the contract that contains the function being called. <code>approve(spender, 0)</code> is a function on the token contract, so <code>tx.to = tokenContractAddress</code>; the spender is a parameter encoded inside the calldata, not the recipient of the transaction</button>
-<button class="quiz-choice" data-value="B">B) Spender addresses cannot receive transactions</button>
-<button class="quiz-choice" data-value="C">C) Live-common refuses to sign transactions whose recipient is a non-contract address</button>
-<button class="quiz-choice" data-value="D">D) The clear-sign decoder requires it</button>
+<button class="quiz-choice" data-value="A">A) The fixture has already started a Speculos for the swap itself (Exchange app). The revoke needs a different app (Ethereum app), so we save the port, swap to the Ethereum-app Speculos for the revoke, then restore the swap's Speculos port so the rest of the test continues to talk to the Exchange Speculos</button>
+<button class="quiz-choice" data-value="B">B) Speculos crashes if launched twice in the same process; the snapshot is a workaround</button>
+<button class="quiz-choice" data-value="C">C) <code>previousSpeculosPort</code> is logged to Allure for debugging</button>
+<button class="quiz-choice" data-value="D">D) The port number is used as a randomness seed for transaction nonces</button>
 </div>
-<p class="quiz-explanation">EVM transactions are calls to whichever contract sits at <code>tx.to</code>. To run <code>approve</code>, the transaction must be addressed to the token contract; the spender is just one of the two ABI-encoded arguments inside <code>tx.data</code>. Putting the spender in <code>tx.to</code> would be a no-op transaction sending zero ETH to the spender — wholly different from a revoke.</p>
+<p class="quiz-explanation">The snapshot/restore pattern (Chapter 5.5) is how a single test coordinates multiple Speculos instances on different apps. The swap fixture starts the Exchange-app Speculos; the revoke runs against the Ethereum-app Speculos; cleanup restores the Exchange-app port so the rest of the swap test continues normally. Without the snapshot, the rest of the test would inherit the (now-stopped) Ethereum-app Speculos's port and break.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> <code>getErc20ApproveData(spender: string, amount: bigint): Buffer</code> returns a Buffer; the wallet-cli EVM intent schema's <code>data</code> field expects a string of the shape <code>"0x..."</code>. Why does the bridge's <code>buildTxExtras</code> then strip the <code>0x</code> prefix and reconstruct a Buffer at <code>bridge.ts:194-198</code>?</p>
+<p><strong>Q4.</strong> The senior's <code>provider.swap.spec.ts</code> diff comments out <code>ensureTokenApproval</code> and replaces it with <code>revokeTokenApproval</code>. Is this the final shape that should ship in the PR?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Bun does not support Buffers natively</button>
-<button class="quiz-choice" data-value="B">B) The intent schema is broken — this is a bug</button>
-<button class="quiz-choice" data-value="C">C) The intent boundary is stringly-typed (Zod-validated, JSON-serializable, easy to log) while the live-common <code>Transaction.data</code> is a Buffer because that's what the RLP encoder expects. The two-step encode/decode is the cost of having a clean, serialisable intent at the CLI surface and a binary representation at the wallet-internal surface</button>
-<button class="quiz-choice" data-value="D">D) The Buffer is replaced by a hex string for security</button>
+<button class="quiz-choice" data-value="A">A) Yes — revoke now serves the same purpose as ensureTokenApproval did</button>
+<button class="quiz-choice" data-value="B">B) Yes — the swap suite no longer needs allowance setup once revoke is wired in</button>
+<button class="quiz-choice" data-value="C">C) No — this is dev-loop code. The senior commented out the approve to test revoke in isolation. The final shape uses revoke as a <code>beforeEach</code> cleanup AND keeps <code>ensureTokenApproval</code> as the per-test setup, so each iteration starts at zero and ends with a fresh allowance</button>
+<button class="quiz-choice" data-value="D">D) No — revoke should run in <code>afterEach</code>, not as a replacement for approve</button>
 </div>
-<p class="quiz-explanation">Two layers, two representations. The intent is a stable, schema-validated user-facing shape; serialising it as JSON for tests, dry-runs, and logs is much easier when every field is a string or a primitive. The bridge then converts to the internal binary types the bridge and signer expect. Trying to pass a Buffer through the intent boundary would break <code>JSON.stringify</code>, defeat schema validation, and couple the CLI surface to internal types.</p>
+<p class="quiz-explanation">Without <code>ensureTokenApproval</code>, the swap step has no allowance to spend and will fail. Revoke and approve are complementary: revoke clears stale state, approve sets the allowance the swap needs. Final shape: revoke in <code>beforeEach</code>, approve in the test body (5.8.8). <em>Either</em> <code>beforeEach</code> <em>or</em> <code>afterEach</code> would work for the cleanup; <code>beforeEach</code> is preferred because it survives test retries cleanly.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> You're writing the unit tests for <code>revoke</code> using mock-DMK. Which of the following does mock-DMK <em>not</em> let you assert?</p>
+<p><strong>Q5.</strong> What does <code>fromAccount.parentAccount.address</code> represent for a <code>TokenAccount</code>, and why does the POM check <code>!fromAccount.parentAccount</code> in its early-return guard?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) That the command exits with code 0</button>
-<button class="quiz-choice" data-value="B">B) That the device's screen displays "Type: Approve / Amount: 0 USDT / Address: 0x..." in clear-sign mode</button>
-<button class="quiz-choice" data-value="C">C) That the JSON envelope includes a txHash matching <code>/^0x[0-9a-f]{64}$/</code></button>
-<button class="quiz-choice" data-value="D">D) That stderr matches <code>/spender|address/i</code> when the spender flag is malformed</button>
+<button class="quiz-choice" data-value="A">A) The parent's address is the spender to revoke; the guard skips empty parents</button>
+<button class="quiz-choice" data-value="B">B) <code>parentAccount</code> is the EVM (or other native) account that holds the token sub-account. Its <code>address</code> is the EOA on chain — the <em>owner</em> of any allowance. The guard skips native <code>Account</code>s (which have no <code>parentAccount</code>) because they have no allowance to revoke</button>
+<button class="quiz-choice" data-value="C">C) <code>parentAccount.address</code> is the device's master public key</button>
+<button class="quiz-choice" data-value="D">D) It's the previous account in iteration order; used for log breadcrumbs</button>
 </div>
-<p class="quiz-explanation">Mock-DMK abstracts at the <code>Completed</code> state level — it returns canned <code>publicKey</code>/<code>address</code> results without running the on-device UI. Exit codes, stdout JSON, stderr text, and event types are all observable. The actual on-screen labels are not — that requires Speculos and lives in QAA-613's UI tests downstream. The QAA-615 spike's tests should not assert screen text.</p>
+<p class="quiz-explanation">In live-common's account model, a TokenAccount (e.g., USDT on Ethereum) has a <code>parentAccount</code> pointer to its native parent (the Ethereum account). The parent's <code>address</code> is the EOA that owns the allowance on chain — what would be passed as <code>owner</code> to <code>allowance(owner, spender)</code>. Native accounts have no parent and no allowance to clear; the guard skips them.</p>
 </div>
 
-<div class="quiz-question" data-correct="D">
-<p><strong>Q6.</strong> The QAA-615 ticket is labelled <code>LLD/LLM/UI</code>, but the work lives entirely inside <code>apps/wallet-cli/</code>. Should you re-label the ticket before merging?</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q6.</strong> The CLI is invoked with <code>waitConfirmation: true</code> and the broadcast env flipped to <code>"0"</code>. What is the actual behaviour, end-to-end?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) No — labels are immutable once a ticket is in progress</button>
-<button class="quiz-choice" data-value="B">B) Yes — you must remove all incorrect labels before opening the PR</button>
-<button class="quiz-choice" data-value="C">C) The labels don't matter</button>
-<button class="quiz-choice" data-value="D">D) Mention it in the spike report and to your manager — labels were inherited from the parent epic and don't reflect the spike's actual scope. Whether to re-label depends on the team's Jira hygiene conventions; do not unilaterally re-label without asking, but do flag the mismatch so dashboards and filters reflect reality</button>
+<button class="quiz-choice" data-value="A">A) The CLI signs the revoke tx, broadcasts it (because broadcast is enabled), then blocks until the tx is confirmed in a block before exiting. The wrapping promise resolves only after on-chain confirmation, so the next test step sees the new allowance state</button>
+<button class="quiz-choice" data-value="B">B) The CLI signs only — the env disables broadcast — and waits for a fake "confirmation" emitted by Speculos</button>
+<button class="quiz-choice" data-value="C">C) The CLI broadcasts but exits immediately; <code>waitConfirmation</code> is a no-op when broadcast is enabled</button>
+<button class="quiz-choice" data-value="D">D) <code>waitConfirmation</code> sets a timeout on the device-tap helper, not the broadcast pipeline</button>
 </div>
-<p class="quiz-explanation">Labels in a real Jira project carry weight (filters, dashboards, escalation routing). Mismatched labels are an organisational hygiene issue, not a code issue, and the right move is to surface them rather than silently fix them. The spike's value is in observation as much as in code — and "the labels are wrong, here's why" is a legitimate finding for the report.</p>
+<p class="quiz-explanation">The CLI's rxjs pipe (Chapter 5.4 §3.1) only takes the broadcast branch when <code>DISABLE_TRANSACTION_BROADCAST</code> is falsy <em>and</em> <code>--disable-broadcast</code> is not passed. With env <code>"0"</code>, broadcast happens. The <code>--wait-confirmation</code> flag (set by <code>waitConfirmation: true</code>) keeps the subprocess alive until <code>waitForTransactionConfirmation</code> resolves — i.e., the tx is in a block. This is what makes the revoke deterministic for the next test: when the wrapper returns, the chain has settled.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
-### 5.8.18 Reference Implementation (Spoiler)
-
-> **Spoiler ahead.** Read this section only after you have honestly tried to build `revoke.ts` and `revoke.test.ts` from the scaffolding in 5.8.5 through 5.8.10. The point of the chapter was the assembly. Reading the answer first short-circuits the lesson — and worse, it locks you into one interpretation when the team may legitimately prefer another. If you're stuck, scroll back to the section that lost you and read again. If you're verifying, scroll on.
-
-This section is a complete, compile-ready reference implementation of the QAA-615 spike. It contains a `revoke.ts` command file, a `revoke.test.ts` test file, the one-line CLI registration step, and a deliberate list of what is **not** here. The implementation chooses Path C (a new Bunli command that constructs an EVM intent with `recipient = tokenContract`, `amount = "0 ETH"`, `data = approve(spender, 0)` calldata) and Q3 option (a) for token resolution (full token id like `ethereum/erc20/usd__coin`, no ticker fuzzing) — the simplest defensible spike scope. The `cliCommandsUtils.ts` and `runCli.ts` wrapper layer that ledger-live-common's e2e specs actually import was scoped explicitly out of QAA-615 in the spike report and is therefore left out of this reference too. Treat the code below as **one valid implementation** that compiles, lints, and passes the four prescribed test cases — not as the canonical answer the team will eventually ship.
-
-#### 5.8.18.1 The new command — `apps/wallet-cli/src/commands/revoke.ts`
-
-The file lives next to `send.ts` in `apps/wallet-cli/src/commands/`. It mirrors `send.ts` byte-for-byte where it can: same `defineCommand` shape, same `accountOption` and `outputOption`, same `createCommandOutput` envelope, same `withCurrencyDeviceSession` pattern, same `lastValueFrom`+`tap` rxjs flow. The only structural difference is that `revoke` does not need `INTENT_BUILDERS` — it always builds the same EVM intent, with `amount` hard-coded to `"0 ETH"` and `data` populated from `getErc20ApproveData(spender, 0n)`.
-
-```ts
-// apps/wallet-cli/src/commands/revoke.ts
-import { defineCommand, option } from "@bunli/core";
-import { z } from "zod";
-import { lastValueFrom } from "rxjs";
-import { tap } from "rxjs/operators";
-import { getCryptoCurrencyById } from "@ledgerhq/live-common/currencies/index";
-import { getCryptoAssetsStore } from "@ledgerhq/cryptoassets/state";
-import { getErc20ApproveData } from "@ledgerhq/coin-evm/logic/getErc20Data";
-import { WalletAdapter } from "../wallet";
-import { TransactionIntentSchema } from "../wallet/intents";
-import { WALLET_CLI_DMK_DEVICE_ID } from "../device/register-dmk-transport";
-import { withCurrencyDeviceSession } from "../session/bridge-device-session";
-import { networkStringFromCurrencyId } from "../shared/accountDescriptor";
-import { colors } from "../shared/ui";
-import { createCommandOutput } from "../output";
-import { accountOption, outputOption, resolveAccountArg, resolveAccountDescriptor } from "./inputs";
-
-const SPENDER_REGEX = /^0x[0-9a-fA-F]{40}$/;
-
-export default defineCommand({
-  name: "revoke",
-  description: "Revoke an ERC-20 allowance (approve(spender, 0)) — bridge only, EVM only",
-  options: {
-    account: accountOption,
-    token: option(
-      z.string().min(1, "Token id is required (--token <id>, e.g. ethereum/erc20/usd__coin)"),
-      {
-        description:
-          "Full token id, e.g. 'ethereum/erc20/usd__coin' for USDC. Tickers are not accepted in this spike — see the spike report for the rationale.",
-      },
-    ),
-    spender: option(
-      z
-        .string()
-        .regex(SPENDER_REGEX, "spender must be a 0x-prefixed 40-hex-char address"),
-      {
-        description: "Spender address whose allowance will be set to 0 (--spender 0x…).",
-        short: "s",
-      },
-    ),
-    "dry-run": option(z.boolean().default(false), {
-      description: "Build and validate the revoke transaction but do not sign or broadcast",
-      argumentKind: "flag",
-    }),
-    output: outputOption,
-  },
-  handler: async ({ flags, positional }) => {
-    const ctx = { command: "revoke", network: "", account: "" };
-    const out = createCommandOutput(flags.output, ctx);
-    const wallet = new WalletAdapter();
-    const dryRun = flags["dry-run"];
-
-    await out.run(async () => {
-      const descriptor = await resolveAccountDescriptor(resolveAccountArg(flags.account, positional));
-      ctx.network = networkStringFromCurrencyId(descriptor.currencyId);
-      ctx.account = descriptor.id;
-
-      // Revoke is EVM-only by definition. Reject other families with a clean message
-      // rather than letting the bridge fail later with an opaque error.
-      const { family } = getCryptoCurrencyById(descriptor.currencyId);
-      if (family !== "evm") {
-        throw new Error(
-          `revoke is only supported on EVM accounts (got family=${family} for ${descriptor.currencyId}).`,
-        );
-      }
-
-      // Token id → contract address. Mirrors libs/coin-modules/coin-evm/src/cli-transaction.ts
-      // so the resulting on-device clear-sign matches what the legacy CLI used to produce.
-      const tokenCurrency = await getCryptoAssetsStore().findTokenById(flags.token);
-      if (!tokenCurrency) {
-        throw new Error(
-          `Token <${flags.token}> not found in cryptoassets registry. Use a full token id, e.g. ethereum/erc20/usd__coin for USDC.`,
-        );
-      }
-      if (tokenCurrency.parentCurrency.id !== descriptor.currencyId) {
-        throw new Error(
-          `Token ${flags.token} is on ${tokenCurrency.parentCurrency.id}, not ${descriptor.currencyId}. Use a token from the account's chain.`,
-        );
-      }
-
-      // approve(spender, 0) → 4-byte selector + 32-byte spender + 32-byte amount = 68 bytes.
-      const calldataBuffer = getErc20ApproveData(flags.spender, 0n);
-      const calldataHex = "0x" + calldataBuffer.toString("hex");
-
-      // EVM TransactionIntent: recipient is the *token contract*, native amount is 0,
-      // and the calldata carries the approve. See bridge.ts:194-198 for how `intent.data`
-      // is unpacked back into `tx.data` when the transaction is prepared.
-      const intent = TransactionIntentSchema.parse({
-        family: "evm",
-        recipient: tokenCurrency.contractAddress,
-        amount: "0 ETH",
-        data: calldataHex,
-      });
-
-      if (dryRun) {
-        const spin = out.spin("Preparing revoke transaction (dry run)…");
-        const prepared = await wallet.prepareSend(descriptor, intent);
-        spin?.clear();
-        out.sendDryRun(prepared);
-        spin?.success("Dry run complete (transaction not broadcasted)");
-        return;
-      }
-
-      const spin = out.spin(`Connect device and open ${colors.bold(descriptor.currencyId)} app…`);
-      await withCurrencyDeviceSession(descriptor.currencyId, async () => {
-        spin?.success("Device session established");
-        out.spin(`Preparing ${colors.bold(descriptor.currencyId)} revoke transaction…`);
-
-        await lastValueFrom(
-          wallet
-            .send(descriptor, intent, WALLET_CLI_DMK_DEVICE_ID, dryRun)
-            .pipe(tap(event => out.sendEvent(event))),
-        );
-
-        out.sendComplete();
-      });
-    });
-  },
-});
-```
-
-A few load-bearing decisions worth pointing at explicitly:
-
-- **`recipient = tokenCurrency.contractAddress`, not the spender.** This is the single most important shape decision and the one a careful reader of `cli-transaction.ts:120-130` already internalised. The "to" of an ERC-20 approve is the token contract; the spender is encoded inside the calldata. Getting this backwards produces a transaction that sends 0 ETH to the spender's EOA and does nothing on-chain — silently broken in a way that would only surface during the manual sanity run in 5.8.11.
-- **`amount = "0 ETH"`** because `AmountWithTickerSchema` requires a value-plus-ticker string and `bridge.ts` reads native value from this field. The ticker `ETH` is correct on Ethereum mainnet; a polished version would derive the native ticker from `descriptor.currencyId` (BNB on BSC, MATIC on Polygon, etc.). The spike scope accepts the hard-coded `ETH` because the QAA-613 hooks only target Ethereum mainnet and a Verify-callout-style note in the spike report flags the multi-chain follow-up.
-- **`data: "0x" + calldataBuffer.toString("hex")`** is the seam called out in 5.8.7. `getErc20ApproveData` returns a `Buffer` because the legacy bridge consumed buffers; the wallet-cli intent schema consumes a `0x`-prefixed hex string and `bridge.ts:196-197` strips the prefix back off and re-buffers. Two conversions in opposite directions look ugly but the alternative (changing the intent schema to accept a `Buffer`) leaks bridge internals into the public CLI surface, so the cosmetic ugliness is the right trade.
-- **JSON envelope shape.** No custom envelope code — `createCommandOutput` does the work. The `command` field in `ctx` is `"revoke"`, the `network` string is derived from `descriptor.currencyId`, and `out.sendDryRun` and `out.sendEvent` produce the same `{ recipient, amount, fee, dry_run, tx_hash }` keys that send produces. That deliberate symmetry is what lets the future `parseRevokeCliOutput` helper in `cliCommandsUtils.ts` reuse the parsing pattern from `parseTokenAllowanceCliOutput`.
-
-> **Verify:** the deep import path `@ledgerhq/coin-evm/logic/getErc20Data` works because the package's `exports` map exposes `./logic/*` in the current monorepo. If a future `package.json` change tightens the export surface, the spike report's Q1 alternative (a 5-line local re-implementation in `apps/wallet-cli/src/wallet/erc20-calldata.ts`) becomes the lower-risk choice.
-
-#### 5.8.18.2 The cli registration — `apps/wallet-cli/src/cli.ts`
-
-You do not edit `cli.ts` by hand. The wallet-cli uses a Bunli convention where `bunli.config.ts` declares `commands: { directory: "./src/commands" }` and a codegen step (`pnpm generate` from inside `apps/wallet-cli/`) walks that directory and emits `apps/wallet-cli/.bunli/commands.gen.ts`, which is then statically imported by `cli.ts`:
-
-```ts
-// apps/wallet-cli/src/cli.ts (existing — no changes needed)
-import "../.bunli/commands.gen";
-```
-
-After you create `revoke.ts`, run:
-
-```bash
-cd apps/wallet-cli
-pnpm generate
-```
-
-The regenerated `commands.gen.ts` will pick up the new file automatically and add `Revoke` to the `modules` map alongside `Send`. Concretely you will see a new `import Revoke from '../src/commands/revoke.js'` and a `'revoke'` entry in the `metadata` record. Commit `commands.gen.ts` with the rest of the spike — it is checked in despite the "do not edit" banner because the standalone-binary build path needs it present at compile time (see the comment in `cli.ts` lines 5-9).
-
-#### 5.8.18.3 The test file — `apps/wallet-cli/src/test/commands/revoke.test.ts`
-
-This file mirrors `send.test.ts` exactly — same `MockServer` + route fixtures, same `runCli` helper, same `WALLET_CLI_MOCK_DMK` + `WALLET_CLI_MOCK_APP_RESULTS` env wiring. The four cases listed in 5.8.10 are all dry-run-anchored, which matches what `send.test.ts` actually does in the current tree. The "signed flow with broadcast" case extends past what `send.test.ts` currently exercises and is flagged as such below.
-
-```ts
-// apps/wallet-cli/src/test/commands/revoke.test.ts
-import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { MockServer } from "../helpers/mock-server";
-import { runCli } from "../helpers/cli-runner";
-import { ETH_SYNC_ROUTES } from "../helpers/eth-sync-routes";
-import { MOCK_ETH_DESCRIPTOR, MOCK_ETH_ADDRESS, MOCK_ETH_PUBKEY } from "../helpers/constants";
-
-// USDC on Ethereum mainnet.
-const USDC_TOKEN_ID = "ethereum/erc20/usd__coin";
-const USDC_CONTRACT = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
-const SPENDER = "0x58df81bababd293aaca0a3a76d70d3b69b25c1cf";
-const FAKE_TX_HASH = "0x" + "a".repeat(64);
-
-// Routes mirror send.test.ts's SEND_ROUTES — the revoke flow makes the same calls
-// (sync, balance, nonce, gas estimation, gas barometer). Override the default
-// zero-balance route so the bridge does not raise NotEnoughBalance for fees.
-const REVOKE_ROUTES = [
-  {
-    method: "GET",
-    match: /\/address\/[^/]+\/balance$/,
-    response: { balance: "1000000000000000000" }, // 1 ETH for gas
-  },
-  ...ETH_SYNC_ROUTES,
-  {
-    method: "GET",
-    match: /\/address\/[^/]+\/nonce$/,
-    response: { address: MOCK_ETH_ADDRESS, nonce: 0 },
-  },
-  {
-    method: "POST",
-    match: /\/tx\/estimate-gas-limit/,
-    response: { estimated_gas_limit: "60000" }, // approve gas, higher than a bare transfer
-  },
-  {
-    method: "GET",
-    match: /\/gastracker\/barometer/,
-    response: { low: "1", medium: "2", high: "3", next_base: "1" },
-  },
-];
-
-const baseEnv = (port: number) => ({
-  WALLET_CLI_MOCK_PORT: String(port),
-  WALLET_CLI_MOCK_DMK: "1",
-  WALLET_CLI_MOCK_APP_RESULTS: JSON.stringify({
-    Ethereum: { publicKey: MOCK_ETH_PUBKEY, address: MOCK_ETH_ADDRESS },
-  }),
-});
-
-describe("revoke command", () => {
-  const server = new MockServer(REVOKE_ROUTES);
-
-  beforeAll(() => server.start());
-  afterAll(() => server.stop());
-
-  it("dry-run: builds approve(spender, 0) calldata and emits a JSON envelope", async () => {
-    const { stdout, exitCode, stderr } = await runCli(
-      [
-        "revoke",
-        "--account", MOCK_ETH_DESCRIPTOR,
-        "--token", USDC_TOKEN_ID,
-        "--spender", SPENDER,
-        "--dry-run",
-        "--output", "json",
-      ],
-      baseEnv(server.port),
-    );
-    expect(exitCode, `stderr: ${stderr}`).toBe(0);
-
-    const data = JSON.parse(stdout);
-    expect(data.command).toBe("revoke");
-    expect(data.network).toBe("ethereum:main");
-    expect(data.dry_run).toBe(true);
-    // The recipient is the token contract — not the spender. This is the load-bearing assertion.
-    expect(data.recipient.toLowerCase()).toBe(USDC_CONTRACT.toLowerCase());
-    expect(data.amount).toMatch(/^0(\.0+)?\s*ETH$/);
-    expect(typeof data.fee).toBe("string");
-  });
-
-  it("rejects an unknown token id with a clean error envelope", async () => {
-    const { stdout, exitCode } = await runCli(
-      [
-        "revoke",
-        "--account", MOCK_ETH_DESCRIPTOR,
-        "--token", "ethereum/erc20/definitely_not_a_token",
-        "--spender", SPENDER,
-        "--dry-run",
-        "--output", "json",
-      ],
-      baseEnv(server.port),
-    );
-    expect(exitCode).not.toBe(0);
-    const err = JSON.parse(stdout);
-    expect(err.ok).toBe(false);
-    expect(err.error.command).toBe("revoke");
-    expect(err.error.message).toMatch(/not found/i);
-  });
-
-  it("rejects a malformed spender address before any network call", async () => {
-    const { stdout, stderr, exitCode } = await runCli(
-      [
-        "revoke",
-        "--account", MOCK_ETH_DESCRIPTOR,
-        "--token", USDC_TOKEN_ID,
-        "--spender", "not-an-address",
-        "--dry-run",
-        "--output", "json",
-      ],
-      baseEnv(server.port),
-    );
-    expect(exitCode).not.toBe(0);
-    // Bunli surfaces zod validation errors before the handler runs, so the message
-    // can land on either stdout (json error envelope) or stderr (bunli's own usage line)
-    // depending on where the validation throws — assert on the union.
-    const combined = stdout + "\n" + stderr;
-    expect(combined).toMatch(/spender|0x|address|hex/i);
-  });
-
-  it("signed flow: emits a broadcasted txHash in the JSON envelope", async () => {
-    // Mirrors the dry-run case but without --dry-run. Mock-DMK signs through the
-    // Ethereum app result fixture; the broadcast endpoint is intercepted to return
-    // FAKE_TX_HASH. NB: this case extends past what send.test.ts currently covers
-    // — see the Verify note below if it fails on your tree.
-    const broadcastServer = new MockServer([
-      ...REVOKE_ROUTES,
-      { method: "POST", match: /\/tx\/send/, response: { result: FAKE_TX_HASH } },
-    ]);
-    await broadcastServer.start();
-    try {
-      const { stdout, exitCode, stderr } = await runCli(
-        [
-          "revoke",
-          "--account", MOCK_ETH_DESCRIPTOR,
-          "--token", USDC_TOKEN_ID,
-          "--spender", SPENDER,
-          "--output", "json",
-        ],
-        baseEnv(broadcastServer.port),
-      );
-      expect(exitCode, `stderr: ${stderr}`).toBe(0);
-      const data = JSON.parse(stdout);
-      expect(data.command).toBe("revoke");
-      expect(data.tx_hash).toBe(FAKE_TX_HASH);
-    } finally {
-      await broadcastServer.stop();
-    }
-  });
-});
-```
-
-A few notes on the test choices:
-
-- **Mock-DMK fixture is identical to send's.** The signing path doesn't care whether the calldata is `transfer(...)` or `approve(...)` — both are EIP-1559 transactions and both go through the same `Ethereum` app result. So `WALLET_CLI_MOCK_APP_RESULTS` reuses send's fixture verbatim.
-- **The recipient assertion is case-insensitive.** `tokenCurrency.contractAddress` is stored in EIP-55 mixed case in the cryptoassets registry, but bridge transformations sometimes lowercase it. The lowercase comparison decouples the test from that incidental detail.
-- **The broadcast route pattern (`/\/tx\/send/`) is a reasonable guess** — the EVM bridge exposes `broadcast` over `coin-evm/src/api`, and the route shape on the mock server mirrors what other EVM bridge tests register. If your tree uses a different path (some chains use `/transactions` or `/send_tx`), update the regex; the assertion on `data.tx_hash === FAKE_TX_HASH` is what matters.
-
-> **Verify:** `send.test.ts` in the current tree only exercises the dry-run case. The signed-flow test above is a deliberate extension past what's currently practiced — if the broadcast intercept proves flaky in CI, downgrade case 4 to a `withSpenderEvent`-style observable assertion or drop it entirely and document the gap in the spike report. The spike's primary deliverable is the report, not 100% test coverage.
-
-#### 5.8.18.4 The bunli generate output
-
-After saving `revoke.ts`, run `pnpm generate` from inside `apps/wallet-cli/`. The bunli codegen rewrites `apps/wallet-cli/.bunli/commands.gen.ts` and adds a `Revoke` import + a `'revoke'` entry in the `modules` and `metadata` records. You do not edit that file manually — the banner at the top is enforced by the codegen. Commit the regenerated file as part of the spike PR; the standalone-binary build (`bun build --compile`) needs it present statically because Bun's bundler cannot follow the dynamic `import()` that Bunli would otherwise use.
-
-#### 5.8.18.5 What's still left as exercise
-
-This reference deliberately stops short of:
-
-- The `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` and `runCli.ts` wrapper layer that desktop/mobile e2e specs actually import (`liveDataCommand`, `parseTokenAllowanceCliOutput`, etc.). The spike report explicitly scoped this out of QAA-615 and into a follow-up — the wallet-cli surface area is the deliverable; the typed wrapper that consumes it is a separate, downstream ticket.
-- The companion `wallet-cli allowance` read command sketched in 5.8.9. Implementing it shadows the work you just did and adds a new external dependency on `getEvmTokenAllowance`.
-- The symmetric `wallet-cli approve --amount N` command floated as 5.8.16 follow-up #2. The legacy CLI's `cli-transaction.ts` already covers it; the spike is "revoke" specifically.
-- The manual sanity run on a real device (5.8.11). Mocked tests prove the wiring; only Speculos or a physical Nano confirms the clear-sign content. The spike report should state explicitly which scenarios were exercised on real hardware and which were not.
-- The spike report itself (5.8.12). The whole point of QAA-615 is the written report — the code is evidence.
-
-#### 5.8.18.6 If your version differs from this one
-
-This is one valid implementation. If your `revoke.ts` compiles, lints under the repo's eslint/biome config, passes the four test cases above with equivalent assertions, and produces an EVM transaction whose `to` is the token contract, `value` is 0, and `data` is `0x095ea7b3` followed by the spender and `0x00…00` — then your version is correct, even if it differs in import order, option naming, error wording, or the exact location of the family check. A common defensible alternative: resolving the token via `findTokenByAddressInCurrency` (Q3 option c) instead of `findTokenById`, which trades the cleaner UX of a token id for the ability to handle tokens not yet in the cryptoassets registry. Apply the Ch 0.4 Rodin classification to your own version honestly: a different choice may be `✓ Justified` in a way this reference's choice is only `~ Contestable`. The spike report is where you record that reasoning — for your reviewer, for the next QA who reads QAA-615, and for the version of you who will look at this code six months from now.
-
 <div class="chapter-outro">
-<strong>Key takeaway.</strong> QAA-615 is small in code (~225 LOC including tests) but large in <em>understanding</em>. The work that earns its keep is the diligence: reading the legacy <code>cli-transaction.ts</code> to internalise the <code>tx.to = tokenContract / tx.value = 0 / tx.data = approveCalldata</code> shape, mapping out the three implementation paths instead of jumping straight at one, choosing Path C with explicit reasoning, writing the spike report, and shipping the PR with the right reviewers. The TypeScript itself follows from those decisions almost mechanically — which is why this chapter handed you scaffolding instead of a finished file. If you wrote the code yourself by working through the Phase TODOs, you now know the wallet-cli stack the way you know the desktop and mobile stacks: from the inside. Chapter 5.9 — Exercises — picks up from here with three companion drills (an <code>allowance</code> read command, a <code>--skip-if-zero</code> idempotency flag, and a <code>--router</code> dynamic-spender lookup) to push the same code further.
+You now own the whole shape of QAA-615. The senior's commit was a runway, not a destination — 37 lines that prove the path works, with four obvious do-list items waiting on top: the <code>@step</code> rename, the proper hook ordering, mobile parity, and a tightened type guard. Plus the spike report. None of those is hard; all of them are necessary. Ship them. Chapter 5.9 turns the page from this guided walkthrough to your own hands: a set of CLI exercises and challenges that exercise every layer of what you just read, with grading rubrics so you can self-assess before bringing your work to a reviewer.
 </div>
-
----
 ## CLI Exercises and Challenges
 
 <a id="cli-exercises-and-challenges"></a>
 
 <div class="chapter-intro">
-Reading is not enough. The exercises below move from a 15-minute connectivity smoke to a 90-minute pre-test hook script. Do them in order &mdash; each one builds a skill you will need in the next. Every exercise has a verification step; if you cannot verify it yourself, grab a reviewer before moving on. The capstone (Exercise 7) previews QAA-613's hook pattern, so the work transfers directly to the next ticket on the QA backlog.
+Reading the previous eight chapters gives you the map. These exercises put you on the trail. They progress from a single CLI invocation typed by hand to a paper-sketch of mobile parity for the senior's revoke method. Every exercise has an explicit verification step; if you can't verify it yourself, grab a reviewer before moving on. Do them in order — each builds on the muscle memory of the one before. The first three are warm-ups (hand-run, paper read, trace memo); 4 and 5 force you to think about local-only debugging hygiene and Speculos lifecycle leaks; 6 is an audit pattern you'll repeat throughout your career; 7 maps directly onto the QAA-615 follow-up work that may land on your desk.
 </div>
 
-### 5.9.1 Exercise 1: Read Your Own xpub (15 min)
+### 5.9.1 Exercise 1: Read your first allowance (15 min)
 
-**Objective.** Confirm your local setup works end to end &mdash; Bun, DMK, USB, the Ethereum app, the descriptor V1 schema, the JSON envelope.
+**Objective.** Run the legacy `apps/cli` directly, with no test wrapping, to read an ERC-20 allowance for an arbitrary owner/spender pair on Sepolia. This grounds every later abstraction (`runCliGetTokenAllowance`, `isTokenAllowanceSufficientCommand`, `ensureTokenApproval`) in a single thing you've already typed.
 
 **Instructions.**
-
-1. Plug your Ledger in via USB. Unlock with PIN.
-2. Open the **Ethereum** app on the device manually.
-3. From `apps/wallet-cli/`, run (with the agent sandbox disabled because USB is involved):
-
+1. From the monorepo root, run:
    ```bash
-   pnpm --silent wallet-cli start -- account discover ethereum --output json | jq '.accounts[0]'
+   node apps/cli/bin/index.js tokenAllowance \
+     --currency ethereum \
+     --token ethereum/erc20/usd_coin \
+     --spender 0x1111111254EEB25477B68fb85Ed929f73A960582 \
+     --ownerAddress 0xYOUR_TEST_ADDRESS \
+     --format json
    ```
+2. Replace `0xYOUR_TEST_ADDRESS` with any address you control on Sepolia (or any mainnet address you want to inspect — read-only, no signing involved).
+3. Read the JSON output line by line. Identify the `allowanceStr` value and the `unitMagnitude`.
 
-4. Confirm the output is a JSON descriptor string starting with `account:1:address:ethereum:main:0x...`.
-5. Compare the address in the descriptor with the address shown in your real Ledger Live account list. They must match.
-
-**Verification.** The descriptor parses through `parseAccountDescriptor()` (Ch 5.4) and the embedded address is exactly what Ledger Live shows for the same path. Exit code is 0.
+**Verification.** Stdout is valid JSON. The `allowanceStr` is a string of digits in the token's smallest unit (for USDC: 6 decimals, so `1000000` = 1 USDC). If you used a fresh address, the value will be `"0"`.
 
 **Hints.**
+- The CLI prebuild step (`zx ./scripts/gen.mjs`) must have run at least once. If you get "command not found" inside the CLI, run `pnpm --filter @ledgerhq/live-cli prebuild` first.
+- `--format json` is what makes the output machine-parseable. Without it you'll get a human-readable line that the typed wrapper can't parse.
+- The spender `0x1111...0582` is 1inch v5 router; any contract that ever called `approve()` against your address will surface here.
 
-- Use `--no-verify` on `receive` if you want to peek at an address without the device prompting you to confirm. `discover` does not need `--no-verify`; the device only asks for confirmation on `receive --verify=true` (the default).
-- The V1 descriptor format and field meanings are in Ch 5.4.
-- If you see `Timeout has occurred`, you are running inside the sandbox. Re-run the same Bash with `dangerouslyDisableSandbox: true`.
+**Stretch goal.** Pipe the output through Node and call `parseTokenAllowanceCliOutput` (from `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`) on the raw stdout. Confirm it returns `{ allowanceStr, unitMagnitude }` and matches what your eye saw in the JSON.
 
-**Stretch goal.** Pipe the descriptor straight into a `balances` invocation:
+**Why this is the first exercise.** Every later abstraction — the typed wrapper, the curried fixture helper, the POM method that orchestrates Speculos — collapses to *this exact subprocess invocation* under the hood. If you can't run the CLI by hand, you can't reason about what the harness is doing on your behalf when something fails. Spending fifteen minutes here saves you hours later when a CI failure surfaces a stack trace pointing at `runCliCommand`.
 
-```bash
-DESC=$(pnpm --silent wallet-cli start -- account discover ethereum --output json | jq -r '.accounts[0]')
-pnpm --silent wallet-cli start -- balances "$DESC" --output json | jq '.balances'
-```
+**Common mistake.** Skipping `--format json` because the human-readable output looks "clearer". The typed wrappers parse JSON; the human-readable shape is for engineers reading their terminal. If you only ever call the CLI in human-readable mode, you'll be surprised when `parseTokenAllowanceCliOutput` throws on stdout you produced by hand. Always pass `--format json` when you intend to feed the output back into TypeScript — even ad hoc.
 
-You have just chained two CLI calls without ever touching `session.yaml` &mdash; useful for ad-hoc work that should not pollute persistent state.
+### 5.9.2 Exercise 2: Wrap an allowance read in a typed helper (20 min)
 
-### 5.9.2 Exercise 2: Inspect a Public Address Balance (15 min)
-
-**Objective.** Understand the descriptor V1 format well enough to hand-build one from public data &mdash; no device required.
+**Objective.** Read the existing `isTokenAllowanceSufficientCommand` and sketch a hypothetical sibling helper. This is a paper exercise — you are not shipping code, you are training your eye on the wrapper pattern.
 
 **Instructions.**
+1. Open `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`.
+2. Read `isTokenAllowanceSufficientCommand(account, spender, minAmount)` end to end. Note: it builds CLI args, calls `runCliGetTokenAllowance`, parses with `parseTokenAllowanceCliOutput`, compares against `minAmount`, and returns a string (the allowance) when sufficient or `"0"` otherwise.
+3. On paper (or in a scratch file you don't commit), sketch a `getCurrentAllowanceCommand(account, spender)` that returns the raw `allowanceStr` always — no comparison, no boolean coercion. Signature: `(account: TokenAccount, spender: string) => Promise<string>`.
+4. Decide: would you curry it? Would the curry buy you anything?
 
-1. Pick any well-known ETH address (e.g. the Vitalik Buterin address `0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045`).
-2. Hand-build a V1 address-type descriptor:
+**Verification.** Your sketch lists three things explicitly: (a) the CLI args you'd build, (b) which engine helper you'd call (`runCliGetTokenAllowance`), (c) which parser you'd use (`parseTokenAllowanceCliOutput`). You can articulate why this isn't a fixture-shaped curried helper.
 
-   ```text
-   account:1:address:ethereum:main:0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045:m/44h/60h/0h/0/0
-   ```
+**Hints.**
+- Re-read briefing §5 (the Layer 3 wrapper table) before sketching.
+- The curried-function pattern (`(account) => (userdataPath) => Promise<void>`) exists because the desktop fixture engine threads `userdataPath` in at the right lifecycle moment. A one-shot read needs no such threading — a plain async function is the right shape.
+- `getEvmTokenAllowance` (in `libs/ledger-live-common/src/families/evm/getTokenAllowance.ts`) is what `tokenAllowance.ts` calls under the hood. Your wrapper would still go through the CLI, not directly through this function — that's the point of the five-layer separation.
 
-   (The path is fictional &mdash; that's fine, `balances` does not verify path-to-address derivation.)
-3. Run:
+**Stretch goal.** Write 50 words explaining why a typed wrapper around an allowance read is more valuable than calling `getEvmTokenAllowance` directly from a test. (Answer involves: subprocess isolation, the same code path as the broadcast-enabled write, and the Speculos transport registration that the CLI already handles.)
 
+**Why this exercise is paper-only.** Adding real helpers to `cliCommandsUtils.ts` requires CODEOWNERS review and a JIRA ticket. The point here is to internalize the *shape* of a Layer-3 wrapper so that, when QAA-XXX one day asks for "a way to read the allowance without the boolean coercion", you've already drawn the picture and you don't waste the first half-hour staring at a blank file.
+
+### 5.9.3 Exercise 3: Trace a `cliCommands` fixture in a real test (30 min)
+
+**Objective.** Walk a single line of test metadata down through five layers and back up. By the end you should be able to draw the lifecycle on a whiteboard.
+
+**Instructions.**
+1. Open `e2e/desktop/tests/specs/earn.v2.spec.ts` and jump to line 86 (or any of the lines listed in briefing §10: 132, 195, 220, 254, 298, 327 — they all use the same pattern).
+2. Find the `cliCommands: [liveDataCommand(account)]` field.
+3. Walk the chain in order:
+   - **Layer 5 (the spec):** what helper is in the array? Note: `liveDataCommand(account)` is a *call* — it returns a curried function. The array holds the curried result.
+   - **Fixture engine:** open `e2e/desktop/tests/fixtures/common.ts` and find where the `cliCommands` field is consumed. Each curried function is invoked with the `userdataPath` for the test.
+   - **Layer 3 (`cliCommandsUtils.ts`):** read `liveDataCommand` itself. It builds a CLI command string and calls `runCliLiveData`.
+   - **Layer 2 (`runCli.ts`):** `runCliLiveData` formats the args (with the `+` separator quirk), then calls `runCliCommand` which spawns `node apps/cli/bin/index.js …` as a subprocess.
+   - **Layer 1 (`apps/cli`):** the `liveData` command (in `apps/cli/src/commands/live/`) reads the args, runs an account scan, and writes the resulting account JSON into the userdataPath's `app.json`.
+   - **Back up to the spec:** Live boots with that `app.json` already populated. The test asserts on UI state that depends on the seeded account.
+4. Write a 200-word memo titled "Lifecycle of a single cliCommands entry" describing what you just traced.
+
+**Verification.** Show the memo to a peer. They should be able to identify, from your text alone, (a) where the curry is unwrapped, (b) where the subprocess is spawned, (c) what file gets mutated on disk, and (d) what the test ultimately asserts on.
+
+**Hints.**
+- The `+` separator (briefing §4) is easy to miss. The engine joins args with `+`, then splits them back to argv before `spawn` — this avoids shell-escaping pain.
+- `liveData` is an `apps/cli/src/commands/live/` command, not a `blockchain/` command. The blockchain subdir is for tx-shaped commands (send, broadcast, getAddress, tokenAllowance).
+- If your memo skips the "what gets mutated on disk" step, re-read it. That's the load-bearing part.
+
+**Stretch goal.** Repeat the trace for `liveDataWithAddressCommand` (used by `validation.swap.spec.ts`, `accounts.swap.spec.ts`, etc.). Identify the one extra thing it does compared to `liveDataCommand` (hint: it caches the device address on the account object after seeding).
+
+**Calibration check.** A clean trace memo should make the reader say "ah, of course" at every transition. If a peer reads it and asks "wait, when does the curry get called?" your memo missed the fixture-engine link. If they ask "where does the JSON go?" your memo missed the userdataPath mutation. Iterate until the memo answers both questions on first read.
+
+**Common mistake.** Treating `liveDataCommand(account)` as a function call that does the work. It is *not*. It returns a curried function. The work happens later, when the fixture engine invokes that curried function with `userdataPath`. A new joiner who reads `cliCommands: [liveDataCommand(account)]` and assumes the seeding has already happened by the time the array is built will be confused when they try to assert on `account.address` immediately after — the address isn't populated until the engine actually runs the curried call.
+
+### 5.9.4 Exercise 4: Sketch a revoke.cash verification helper (45 min)
+
+**Objective.** Design — on paper — a debugging-only helper that bridges manual revoke.cash workflow with programmatic allowance polling. This helper will *never* go into a CI test. It exists to make local debugging less awful.
+
+**Instructions.**
+1. Sketch the API of `manualRevokeAndVerify(account: TokenAccount, spender: string): Promise<void>`.
+2. The helper does two things in order:
+   - **(a) Print the revoke.cash URL** for the account's address: `https://revoke.cash/address/<account.address>?chainId=11155111` (Sepolia). Print it big, with newlines around it, so the engineer running the script can't miss it. Optionally `console.log` instructions: "Open this URL, connect MetaMask, click Revoke for the spender at address X, sign in MetaMask. This script will detect the on-chain change and exit."
+   - **(b) Poll `getEvmTokenAllowance`** every 10 seconds. Time out at 5 minutes. Exit cleanly when the allowance drops to `0`. Print elapsed time on each tick so the engineer can see progress.
+3. Document the use case explicitly: when Speculos is acting up, when a CI revoke failed and you want to clean state by hand without restarting the harness, when auditing what a real seed has approved.
+4. Document why this never goes into a CI test: it requires human input. CI is non-interactive. There is no MetaMask in CI. The whole point of the typed wrappers (Ch 5.4) is to drive Speculos so this kind of human-in-the-loop helper is unnecessary in CI.
+
+**Verification.** Your sketch is one TypeScript file's worth of pseudocode (not real code). It has: function signature, a clear `console.log` block for the URL, a polling loop with a timeout, a clear comment block stating "DEBUGGING ONLY — DO NOT USE IN CI". A peer reading it should immediately understand the flow.
+
+**Hints.**
+- `getEvmTokenAllowance` is the read-only function from `libs/ledger-live-common/src/families/evm/getTokenAllowance.ts`. You can call it directly from a debugging helper — no subprocess needed because no signing is involved.
+- The 5-minute timeout is generous; revoking on Sepolia usually confirms in 15-60 seconds. The timeout exists to avoid an infinite hang if the engineer wandered off.
+- For mainnet debugging (very rare for QAA), swap the `chainId=11155111` to `chainId=1` and adjust the network in the polling call.
+
+**Stretch goal.** Add a third option to your sketch: an "auto-paste" mode that, on macOS, runs `pbcopy` with the revoke.cash URL so the engineer can `Cmd+V` into a browser. Document that this is shell-out and is therefore platform-specific (Linux has `xclip`, Windows has `clip`).
+
+**The line you must not cross.** A debugging helper that lives in a developer's local scratch folder is fine. The same helper, copied into the test harness "in case it's useful", becomes a footgun: a non-deterministic test that requires human input cannot run in CI, will be skipped, and skipped tests rot. Codify the rule for yourself now: human-in-the-loop helpers stay outside `e2e/` directories. If you find one that snuck in, that's a CF-XXX ticket.
+
+### 5.9.5 Exercise 5: Speculos snapshot/restore manual test (45 min)
+
+**Objective.** Demonstrate, on your own machine, the failure mode that the Speculos snapshot/restore pattern exists to prevent. Forewarned is forearmed.
+
+**Instructions.**
+1. Create a scratch script `scripts/leak-speculos-port.ts` (do not commit). It should do, in order:
+   - (a) Launch Speculos with the Ethereum app on a port — call it `portA`. Save `portA` to a variable. Set `SPECULOS_API_PORT=portA`.
+   - (b) Run `node apps/cli/bin/index.js getAddress --currency ethereum --path "44'/60'/0'/0/0"` and confirm it succeeds.
+   - (c) Launch a *second* Speculos with the Bitcoin app on `portB`. Set `SPECULOS_API_PORT=portB`. Do **not** save the original `portA`.
+   - (d) Run `node apps/cli/bin/index.js getAddress --currency bitcoin --path "44'/0'/0'/0/0"` and confirm it succeeds.
+   - (e) Stop both Speculos processes (`stopSpeculos` for each). Crucially, **do not restore `SPECULOS_API_PORT` to anything** — leak it.
+2. Now, in the same Node process or shell session, run a third `getAddress` against currency `ethereum`. The env var still points at `portB` (or — depending on order — at a stopped Speculos). Observe what happens.
+
+**Verification.** The third command fails. The exact failure mode depends on whether `portB` is reused, in TIME_WAIT, or vanished entirely. Most common: a connection-refused error from `hw-transport-node-speculos-http`. Document the failure in three sentences: what you expected, what happened, why.
+
+**Hints.**
+- The pattern in `e2e/desktop/tests/utils/speculosUtils.ts` (briefing §8) is what `cleanSpeculos(speculos, previousPort?)` exists to handle. When `previousPort` is passed, it restores the env var. When omitted, the env var is left at its current (now-stopped) value.
+- This is exactly why two-app tests in `swap.page.ts` save the previous port: `const previousSpeculosPort = getEnv("SPECULOS_API_PORT")` *before* launching, then pass it to `cleanSpeculos(speculos, previousSpeculosPort)` in `finally`.
+- If the third command happens to succeed, you may have hit a port-reuse coincidence. Run a fourth, fifth, sixth — eventually one will fail. The failure is non-deterministic, which is exactly why the pattern is mandatory rather than "add it if you remember".
+
+**Stretch goal.** Now fix your scratch script: save `previousPort` before the second launch, restore it in a `finally` block. Run the third `getAddress` again. Confirm it succeeds. You have now reproduced — by hand — the discipline that the desktop POM enforces.
+
+**Why a manual repro matters.** You could read the snapshot/restore pattern in `swap.page.ts` a dozen times and still forget to apply it the first time you write a two-app test. Reproducing the failure mode by hand burns the muscle memory in. The first time you reach for a POM method that needs to swap Speculos apps, you'll *feel* the urge to save the previous port — which is exactly the goal of this exercise.
+
+### 5.9.6 Exercise 6: Find a CLI helper that's missing a `try/finally` env restore (60 min)
+
+**Objective.** Audit the codebase for the `setDisableTransactionBroadcastEnv` discipline. Either you find a bug, or you confirm the pattern is held everywhere — both outcomes are valuable.
+
+**Instructions.**
+1. Grep the monorepo:
    ```bash
-   pnpm --silent wallet-cli start -- balances 'account:1:address:ethereum:main:0xd8dA...:m/44h/60h/0h/0/0' --output json | jq .
+   rg "setDisableTransactionBroadcastEnv" --type ts -n
    ```
+2. For every call site, check:
+   - (a) Is the return value (the original env value) captured into a variable?
+   - (b) Is there a corresponding `setDisableTransactionBroadcastEnv(original)` call that restores it?
+   - (c) Is the restore inside a `finally` block, so it runs even on throw between flip and restore?
+3. Flag any call site that fails (a), (b), or (c). Write a short audit memo: which file, which line, what's missing, what the fix would be.
+4. If you find no bugs, write the memo anyway: "Audit clean. Pattern held in N call sites. Sites: [list]." This is a real engineering deliverable; "we checked and nothing's wrong" is not the same as "we didn't check".
 
-4. Read the JSON. Identify the native ETH entry vs. the ERC-20 token entries (USDC, USDT, etc.). Note the `asset` and `amount` fields.
-
-**Verification.** The output is a `balances` JSON envelope with at least one entry where `asset === "ethereum"`. ERC-20 entries (if any) appear as additional objects with `asset` set to a token identifier.
+**Verification.** Your memo identifies every call site by file:line. Each site has a one-line verdict: `clean`, `missing-finally`, `missing-restore`, or `unrestored-by-design`. (The mobile module-load `setEnv("DISABLE_TRANSACTION_BROADCAST", true)` in `e2e/mobile/specs/swap/otherTestCases/swap.other.ts` is intentionally unrestored — the whole spec file runs broadcast-off; that's fine and you should annotate it as such.)
 
 **Hints.**
+- Briefing §9 lists every read site and set site. Use it as your ground truth.
+- The canonical clean pattern is `approveTokenCommand` and `revokeTokenCommand` in `cliCommandsUtils.ts`. They flip to `"0"`, run the CLI command, then in `finally` restore `original`. Compare every other site to this template.
+- Don't conflate "no `finally`" with "no restore". A function that restores at the end (after the CLI promise resolves) but not in `finally` is buggy: any throw between flip and restore leaks the env mutation to the rest of the test run.
 
-- No device needed &mdash; `balances` for the EVM family routes through `AlpacaAdapter` (see Ch 5.4 / R1 §5).
-- If the request fails with a network error, the http-intercept is **off** here (you're running for real, not under test). Make sure your host has internet.
+**Stretch goal.** If you find a bug, open a JIRA ticket (QAA-XXX) describing it with a reproducer. If you don't, propose a lint rule (`eslint-plugin-local`) that flags `setDisableTransactionBroadcastEnv("0")` calls not followed by a `try { ... } finally { setDisableTransactionBroadcastEnv(...) }` block within the same function. Discuss tradeoffs.
 
-**Stretch goal.** Compare the JSON output with the ETH balance shown by a public block explorer like Etherscan. They should agree to the rounding shown on the explorer's page.
+**The audit pattern, generalized.** Replace `setDisableTransactionBroadcastEnv` with any function whose name starts with `set`, mutates global state (env, registry, in-memory cache), and returns a "previous value" handle. Every such function deserves the same audit. The QAA codebase has a handful: `setEnv`, `setDisableTransactionBroadcastEnv`, the Speculos port mutations in `launchSpeculos`/`cleanSpeculos`. Carry this audit reflex into Part 6 and beyond.
 
-### 5.9.3 Exercise 3: Add a `--dry-run` Test for `send` (30 min)
+### 5.9.7 Exercise 7: Mobile parity for the senior's revoke (90 min)
 
-**Objective.** Write a `bun test` case that exercises the `send --dry-run` path through `cli-runner`, asserts no signing is attempted, and asserts the JSON envelope contains a `dry_run: true` marker.
+**Objective.** Sketch the mobile-side equivalent of the desktop `revokeTokenApproval` POM method. This is the exercise that maps directly to the QAA-615 follow-up work outlined in Ch 5.8.10.
 
 **Instructions.**
+1. Open `e2e/mobile/page/trade/swap.page.ts`. Find the existing `approveTokenCommand` usage (briefing §10 names it; it's near the top of the file in a method shaped like `ensureTokenApproval`).
+2. Compare with the desktop `swap.page.ts` `ensureTokenApproval` (briefing §7). They're structural twins, modulo:
+   - **Allure attachment shape.** Mobile uses a slightly different Allure helper — find the existing `await allure...` calls in the mobile POM and copy that idiom.
+   - **Mobile globals.** Mobile injects `cliCommandsUtils` as globals via `e2e/mobile/jest.environment.ts:138`. So `revokeTokenCommand` will already be a global in mobile specs. Check `e2e/mobile/types/global.d.ts:104-111` to confirm it's typed, or note that you'd need to add it.
+   - **Mobile-specific guards.** The mobile POM may have additional early-return guards (platform branches via `isAndroid()`/`isIos()`, network reachability checks). Audit the existing `ensureTokenApproval` for these and mirror them in your sketch.
+3. Sketch — on paper or in a scratch file you don't commit — a `revokeTokenApproval(fromAccount, provider)` mobile method. Same shape as desktop's: save previous Speculos port, launch Speculos for the account's currency, call `revokeTokenCommand` (the global), Allure-describe the result, clean Speculos in `finally`.
+4. List the exact diffs between your mobile sketch and the desktop method. There should be 3-5 of them.
+5. Sanity-check your sketch against the senior's commit (briefing §1, the desktop `revokeTokenApproval`). For every line of the desktop method, your sketch has either (a) an identical line, or (b) a justified mobile-specific deviation. There should be no orphan lines on either side.
 
-1. Open `apps/wallet-cli/src/test/commands/send.test.ts` &mdash; this is the existing 72-line dry-run test (R1 §8). Read it end to end.
-2. Notice it uses `runCli([...], { WALLET_CLI_MOCK_DMK: "1", WALLET_CLI_MOCK_APP_RESULTS: ... })` and asserts the dry-run envelope.
-3. **Add a new `it()` to that file** that:
-   - Spawns `send` with `--to 0xf39F... --amount '0.01 ETH' --dry-run`.
-   - Uses the same `MOCK_ETH_DESCRIPTOR` from `test/helpers/constants.ts` as the account.
-   - Asserts the JSON envelope's `command` field is `"send"`.
-   - Asserts no `tx_hash` field is present (a real send returns one; dry-run must not).
-   - Asserts the envelope has `recipient`, `amount`, `fee` fields populated &mdash; that's the `prepared` event from `WalletAdapter.send()` (see Ch 5.4 / R1 §3 for the `SendEvent` discriminated union).
-
-**Verification.**
-
-```bash
-bun test src/test/commands/send.test.ts
-```
-
-Both your new test and the existing one are green. Exit code 0.
+**Verification.** Your sketch reads, structurally, like a one-to-one translation of the desktop method. Your diff list is honest: every difference is justified, none are arbitrary. A peer should be able to take your sketch, point at any line, and tell you *why* it differs from the desktop equivalent.
 
 **Hints.**
+- Mobile specs do not import `cliCommandsUtils`; the helpers are globals. So your sketch may have *no* import statement for `revokeTokenCommand` — instead, the global type definition in `global.d.ts` makes TypeScript happy.
+- The mobile equivalent of `launchSpeculos` and `cleanSpeculos` may live in a different util file (search `e2e/mobile/` for `speculos`). The shape is the same, the path differs.
+- If `revokeTokenCommand` is not yet typed in `global.d.ts`, that's part of the work — note it in your diff list.
+- Do not merge this. The exercise terminates at "sketch and diff". Real merge work goes through QAA review and a QAA-615 follow-up ticket.
 
-- The fixture file `test/helpers/eth-sync-routes.ts` already provides the routes `send` needs (balance, nonce, gas estimate, gas tracker barometer). Reuse them.
-- If the test crashes with `LedgerAPI4xx`, your routes are missing the `/v1/currencies` CAL endpoint. Look at how `send.test.ts` imports `SEND_ROUTES` &mdash; copy that pattern.
-- LIVE-29404 documents that `@bunli/core`'s boolean options need an explicit value. Pass `--dry-run=true` or `--dry-run true` &mdash; **not** bare `--dry-run` (the latter is silently dropped).
+**Stretch goal.** Estimate the work breakdown for shipping this for real: types update (small), POM sketch (medium), spec wiring (medium), CI green-light requirements (depends on whether the CI runner has Speculos on the mobile path). Compare with how the senior shipped the desktop side in 37 lines across 3 files (briefing §1). Are the mobile changes likely to be larger or smaller? Why?
 
-**Stretch goal.** Add a third test that asserts the **failure case**: drop `--to` from the command, run, and assert exit code 1 plus a JSON error envelope (`{ ok: false, error: { command: "send", message: "..." } }`).
+**Capstone purpose.** The previous six exercises trained individual reflexes (read the CLI, trace a fixture, audit env discipline, reproduce a port leak). This one binds them together: the mobile parity work touches every layer. You'll add a global type (Layer 3 mobile-injection surface), call `revokeTokenCommand` (Layer 3 wrapper, already shared), launch and clean Speculos with port restore (Layer 5 lifecycle), trust the broadcast-env discipline inside `revokeTokenCommand` itself (Layer 3 again), and produce an Allure attachment for observability. If you can sketch this method without re-reading the briefing, you've internalized Part 5.
 
-### 5.9.4 Exercise 4: Cross-Reference Allowance from Legacy CLI (45 min)
+**Common mistake.** Copy-pasting the desktop `@step("Revoke token approval")` decorator into the mobile sketch. Mobile uses the `@Step` decorator from a different module path (check the existing mobile POM imports). The decorator name is the same in spirit but the import path differs. While you're at it, check that you don't replicate the senior's copy-paste bug from QAA-615 — your mobile sketch should say "Revoke token approval", not "Ensure token approval".
 
-**Objective.** Read a working pattern in `apps/cli` (legacy), then write a 30-line wallet-cli **read-only** stub that calls into live-common's existing allowance helper. This exercise warms you up for Ch 5.8's QAA-615 walkthrough &mdash; it is not shipped code, just a compile-clean reading exercise.
+### 5.9.8 Self-check checklist
 
-**Instructions.**
+Before you call Part 5 done, walk this checklist. Each item maps to one of the seven exercises plus a couple of integrative checks. If any answer is "no" or "not sure", the chapter reference next to it is your next read.
 
-1. Open `apps/cli/src/commands/blockchain/tokenAllowance.ts` (legacy CLI). Read it in full &mdash; it's short.
-2. Find the underlying live-common helper it calls. The signature lives at:
+- [ ] I can run `node apps/cli/bin/index.js tokenAllowance` from memory with the right flags. (Ex 1, Ch 5.1)
+- [ ] I can explain why typed wrappers go through the CLI subprocess instead of calling `getEvmTokenAllowance` directly. (Ex 2, Ch 5.4)
+- [ ] I can trace a `cliCommands: [liveDataCommand(account)]` line down five layers and back. (Ex 3, Ch 5.4)
+- [ ] I know which helpers stay out of CI and why (human-in-the-loop = local-only). (Ex 4, Ch 5.3)
+- [ ] I have personally observed the failure mode of a leaked `SPECULOS_API_PORT`. (Ex 5, Ch 5.5)
+- [ ] I have audited every `setDisableTransactionBroadcastEnv` call site for `try/finally` discipline. (Ex 6, Ch 5.6)
+- [ ] I can sketch a mobile parity method for `revokeTokenApproval` without re-reading the desktop POM. (Ex 7, Ch 5.8)
+- [ ] I know which CLI is canonical for QAA work and when (rarely) `wallet-cli` is justified. (Ch 5.1, Ch 5.7)
+- [ ] I can recognize the `@step` copy-paste bug in QAA-615 and explain why it's an observability bug, not a correctness bug. (Ch 5.8)
+- [ ] I can explain in one sentence why `0x095ea7b3` is the same selector for both an approve and a revoke. (Ch 5.2)
+- [ ] I know the difference between the Etherscan Read tab (free, no wallet) and the Etherscan Write tab (gas, MetaMask) and when each is the right manual tool. (Ch 5.3)
+- [ ] I can explain why broadcast-enabled regression tests need a revoke hook between iterations even when the test itself doesn't care about allowance state. (Ch 5.2, Ch 5.6)
 
-   ```
-   libs/ledger-live-common/src/families/evm/getTokenAllowance.ts
-   ```
+### 5.9.9 Diagnostic playbook for common CLI failures
 
-   exporting `getEvmTokenAllowance({ owner, spender, contract, currency })` (or similar &mdash; verify the exact shape).
-3. Create a new file **on a scratch branch only**: `apps/wallet-cli/src/commands/allowance.ts`. Follow the canonical command shape (Ch 5.4 / R1 §3):
-   - `defineCommand({ name: "allowance", description: "Read ERC-20 allowance for a spender", options: { account, token, spender, output }, handler })`.
-   - Resolve the account via `resolveAccountDescriptor(...)`.
-   - Call `getEvmTokenAllowance({ ... })` with the right inputs.
-   - Wrap the result in the JSON envelope via `out.run(...)` and `makeEnvelope(...)`.
-4. Run:
+When an exercise (or a real test) fails, work through this short playbook before reaching for help. Most failures map to one of five symptoms.
 
-   ```bash
-   pnpm typecheck && pnpm lint
-   ```
+| Symptom | First check | Likely cause | Reference |
+|---|---|---|---|
+| `MODULE_NOT_FOUND` from `apps/cli/bin/index.js` | Did the prebuild run? `pnpm --filter @ledgerhq/live-cli prebuild` | Generated commands index missing | Ch 5.1 |
+| `ECONNREFUSED` to a Speculos port | `echo $SPECULOS_API_PORT`; is the process still running? | Leaked port from prior cleanup; missing snapshot/restore | Ch 5.5, Ex 5 |
+| Test broadcasts a real transaction unexpectedly | `echo $DISABLE_TRANSACTION_BROADCAST` | Earlier `try/finally` was missing; env mutation leaked | Ch 5.6, Ex 6 |
+| `parseTokenAllowanceCliOutput` throws on stdout | Did you pass `--format json` to the CLI? | Human-readable output, not JSON | Ch 5.4, Ex 1 |
+| `getAddress` returns the wrong address | Which Speculos port is the env var pointing at? | Speculos for the wrong app (ETH vs BTC) | Ch 5.5, Ex 5 |
 
-   Both must pass. Do **not** run `pnpm generate` (you are not shipping this); do **not** open a PR (this is a learning artefact); do **not** add a test (we are practicing reading and wiring, not coverage).
+If the symptom isn't on this list, the next read is the `runCliCommand` error block in `runCli.ts` — the `❌ Failed to execute CLI command` template includes currency, index, exit code, and CLI stderr. Nine times out of ten the answer is in those four lines.
 
-**Verification.** `pnpm typecheck` and `pnpm lint` both pass with your file in place. The file compiles. You have a private branch with a 30-line read-only stub.
+**Worked example.** Imagine a flaky test that broadcasts a transaction every third run. First check: does any `setDisableTransactionBroadcastEnv("0")` call lack a `finally`-wrapped restore? Run the audit from Exercise 6. If clean, second check: does any helper in the test setup call `setDisableTransactionBroadcastEnv` and exit on a path that bypasses the restore (e.g., an early `return`)? An early-return after the flip is almost the same bug as a missing `finally`, just spelled differently. The remedy is the same: pair every flip with a guaranteed restore, and prefer `try/finally` to manual restoration even on the happy path.
 
-**Hints.**
+### 5.9.10 Where to go from here
 
-- The EVM family's bridge (R1 §5, `wallet/compatibility/bridge.ts`) already plumbs `data` through to the bridge transaction &mdash; that's the write path for QAA-615. For the read path, you skip the bridge entirely and call `getEvmTokenAllowance()` directly because there is no transaction to build.
-- The legacy `apps/cli` returns plain strings; your wallet-cli stub must return the JSON envelope. That difference (R4 §A.5, friction-point #1) is exactly why the new CLI exists.
-- Do not import from `wallet/compatibility/bridge.ts` directly. The README in `wallet/` says: "do not import `bridge.ts` or `alpaca.ts` from outside `wallet/`." For an allowance read, use the live-common helper directly &mdash; that is the correct boundary.
+If you've checked every box and finished all seven exercises, the natural next steps are:
 
-**Stretch goal.** Discard the file (`git checkout -- apps/wallet-cli/src/commands/allowance.ts && rm apps/wallet-cli/src/commands/allowance.ts`). Now write a 200-word note in your QAA-615 ticket comment explaining how Ch 5.8's walkthrough should differ from your stub. Submit the comment for your reviewer's amusement.
+- **Pair with the senior who wrote QAA-615** (briefing §1) on the final-shape PR. The dev-loop commit is on `support/qaa_add_revoke_token`; the final PR will likely keep both `revokeTokenApproval` (as `beforeEach`) and `ensureTokenApproval` (as per-test setup). Volunteering to review that PR is the cleanest way to confirm your model matches reality.
+- **Pick up a follow-up ticket** that touches `cliCommandsUtils.ts`. Anything in the QAA backlog tagged "CLI" or "test-data hooks" is fair game. You're now able to read those tickets without translation.
+- **Move to Part 6** (Swap Live App). The same allowance state, Speculos transport, and broadcast discipline you just learned reappear there, wrapped in a Live App iframe. Most of what you learned in Part 5 transfers; the new content is the postMessage protocol and the Live App sandboxing model.
+- **Volunteer for the QAA-615 mobile parity work** sketched in Exercise 7. The desktop ships first; the mobile follow-up is concrete, scoped, and a perfect first cross-platform contribution.
+- **Read one CLI command source file end to end** (e.g., `apps/cli/src/commands/blockchain/send.ts`). You don't need to memorize it; you need the muscle memory of having traced the rxjs pipe from sign to broadcast at least once.
+- **Sit in on a QAA review** of a `swap.page.ts` change. Watching how seniors challenge POM additions (does it duplicate an existing helper? does it leak env state? does the `@step` decorator string match the action?) is faster than reading any style guide.
+- **Run the full QAA-615 spec locally** end to end on Sepolia, with broadcast on, against the QAA test seed. Watch a real revoke land on-chain via Etherscan. Confirm the on-chain allowance dropped to zero. This grounds every abstraction you've learned in a verifiable on-chain effect.
+- **Write a small internal post-mortem** on the QAA-615 dev-loop commit, framed as: "what makes this not the final shape, and what would final-shape review look for?" Share it with one peer for feedback. The exercise of articulating the distinction in writing solidifies it more than any number of re-reads.
 
-### 5.9.5 Exercise 5: Add a JSON Envelope Assertion (45 min)
+<div class="chapter-outro">
+<strong>Key takeaway.</strong> The exercises ramp from a single CLI invocation to a paper-sketched mobile parity for a method you watched a senior write. Exercises 1-3 are warm-ups: hand-run, paper trace, fixture lifecycle memo. 4 and 5 force you to think about what stays out of CI (debugging helpers) and why disciplined env-restoration matters (port-leak failure modes). 6 is an audit pattern you'll repeat throughout your career — every codebase has env-mutating helpers, every one of them needs `try/finally` discipline, every team has at least one missing it. 7 is the capstone: take the senior's commit and translate it to a sister platform, the way real QA tickets evolve. The self-check checklist is the bar: if you can tick every box, you are past the Part 5 onboarding line.
 
-**Objective.** Internalize the JSON envelope contract by writing a strict-shape assertion. Make it fail first by tweaking the assertion; then make it pass.
-
-**Instructions.**
-
-1. Pick any existing test file under `src/test/commands/`. `balances.test.ts` is a good choice &mdash; it already asserts a few envelope fields loosely.
-2. Add a new `it("emits the strict envelope shape", ...)` to that file that runs the same command and asserts **all four** of:
-   - `envelope.status === "success"`
-   - `envelope.command === "balances"` (or whichever command you picked &mdash; **the exact name**, including any group prefix like `"account discover"`)
-   - `envelope.network === "ethereum:main"`
-   - `envelope.account === ETH_DESCRIPTOR` (or the `MOCK_ETH_DESCRIPTOR` for device-using commands)
-3. Run the test &mdash; it should pass.
-4. **Now make it fail** &mdash; tweak one assertion to use a wrong expectation (e.g. `expect(envelope.network).toBe("ethereum:test")`). Re-run; it must fail.
-5. Read the failure output. Note how Bun's diff formatter shows the mismatch.
-6. Restore the correct assertion. Re-run; green again.
-
-**Verification.** You can describe, without looking at the source, exactly what each of the four envelope fields contains and where they are populated (`makeEnvelope()` in `src/shared/response.ts`).
-
-**Hints.**
-
-- `account` is **only present when the command resolved an account descriptor** &mdash; `session view` and `session reset` do not set it. Choose a command that does (anything taking `--account`).
-- The error envelope is **different** (`{ ok: false, error: { command, message } }` &mdash; no `status` key, no `network` key). R1 §5 calls this inconsistency "a real wart" &mdash; do not assert error envelopes with the same helper as success envelopes.
-- The success envelope's `timestamp` field changes every run &mdash; do not assert its exact value. Use `expect(envelope.timestamp).toMatch(/^20\d\d-/)` if you want a smoke-level assertion.
-
-**Stretch goal.** Extract your four assertions into a helper `expectStrictEnvelope(envelope, { command, network, account })` in a new file `src/test/helpers/envelope-assertions.ts`. Use it from at least two existing tests. Run all tests &mdash; all green.
-
-### 5.9.6 Exercise 6: Reproduce the "Timeout has occurred" Sandbox Error (60 min)
-
-**Objective.** Internalize the sandbox boundary by triggering the canonical CLI failure mode on purpose, then resolving it on purpose. This exercise exists because every CLI engineer hits this once and wastes an hour debugging the wrong layer.
-
-**Instructions.**
-
-1. Plug your Ledger in. Unlock with PIN. Open the Ethereum app.
-2. From an agent shell (Claude Code, Cursor, etc.), run a device-touching command **without** disabling the sandbox:
-
-   ```bash
-   pnpm --silent wallet-cli start -- receive ethereum-1 --output json
-   ```
-
-   Submit the Bash call with the sandbox **enabled** (the default).
-3. Wait until it errors. Note the exact error string verbatim. It will be one of:
-   - `Timeout has occurred`
-   - `UnknownDeviceExchangeError`
-   - A connect timeout from `register-dmk-transport.ts` (60s).
-4. Now run the **same command** with `dangerouslyDisableSandbox: true`. Confirm on the device prompt that appears. The command completes; you get a JSON envelope with `data.address`.
-5. Open `apps/wallet-cli/src/device/wallet-cli-device-error.ts` &mdash; the error mapping table (R1 §4). Find which row the sandbox error you saw maps to. Read the suggested remediation; note that it is misleading in the sandbox case (the error map assumes a real transport problem, not a sandbox block).
-
-**Verification.** In your private notes, write a 5-line summary distinguishing **sandbox-caused** failures (USB blocked, no transport, timeouts that look like device issues) from **host-caused** failures (device locked, wrong app open, cable problem). Keep this file. Future-you will reference it.
-
-**Hints.**
-
-- The sandbox restricts USB; that's why the connect call hangs until the timeout fires.
-- The error mapping in `wallet-cli-device-error.ts` is designed for host-caused failures &mdash; it has no awareness of the sandbox layer above it. That's why the mapped message ("Timed out talking to the Ledger over USB. Retry; check cable.") is unhelpful here.
-- This is the same lesson R4 §A.2 codifies: the internal-testing page lists `Timeout has occurred` as the very first canonical error.
-
-**Stretch goal.** Modify your local copy of `wallet-cli-device-error.ts` (do not commit) to add a hint suggesting "If running through an AI agent shell, set `dangerouslyDisableSandbox: true` for this Bash call." Run again, observe the improved error. Discuss with your lead whether this is worth a real PR &mdash; the answer is "probably no" because the CLI shouldn't know about agent harnesses, but the discussion is the point.
-
-### 5.9.7 Exercise 7 &mdash; Stretch: A Pre-Test Hook Script (90 min)
-
-**Objective.** Build a 3-line shell hook that asserts a precondition on the test seed's USDC balance, exits 1 if the precondition fails. This is the exact pattern QAA-613's nightly tests will use to ensure deterministic state &mdash; you are previewing the Ch 5.8 deliverable.
-
-**Instructions.**
-
-1. Identify the ETH descriptor for your test seed (use the one from Exercise 1 or `MOCK_ETH_DESCRIPTOR` from `test/helpers/constants.ts`).
-2. Create `scripts/precheck-usdc-clean.sh` (or a `.ts` equivalent) at the repo root:
-
-   ```bash
-   #!/usr/bin/env bash
-   set -euo pipefail
-   DESC="${1:-$ETH_TEST_DESCRIPTOR}"
-   pnpm --silent wallet-cli start -- balances "$DESC" --output json \
-     | jq -e '.balances[] | select(.asset=="USDC") | .amount=="0 USDC"' \
-     >/dev/null || { echo "[precheck] USDC balance is non-zero; clean state required" >&2; exit 1; }
-   echo "[precheck] USDC balance clean"
-   ```
-
-3. `chmod +x scripts/precheck-usdc-clean.sh`.
-4. Run it. If your seed has no USDC entry at all (likely for a fresh dev address), `jq -e` will exit non-zero on the empty selector &mdash; treat that as a failed assertion. Adjust the script if you want "no USDC entry" to be acceptable (use `select(.asset=="USDC") | .amount` and default to zero).
-5. Wire the script as a `pretest` script for an experimental playwright job:
-
-   ```json
-   "scripts": {
-     "test:swap-regression": "playwright test specs/swap/regression",
-     "pretest:swap-regression": "scripts/precheck-usdc-clean.sh '$ETH_TEST_DESCRIPTOR'"
-   }
-   ```
-
-6. Run the playwright suite. The pretest must run first; if the precondition fails, the suite must not start.
-
-**Verification.** Three runs:
-
-- **Run A.** Seed clean (USDC balance == 0). `pretest` exits 0. Playwright runs.
-- **Run B.** Seed dirty (USDC balance > 0 &mdash; you can simulate by editing the mock route or by sending dust on testnet). `pretest` exits 1. Playwright does **not** run.
-- **Run C.** Wallet-cli is offline (e.g. you're on a plane). `pretest` exits non-zero with a clear network error in stderr. Playwright does not run.
-
-**Hints.**
-
-- `jq -e` propagates the test result as exit code &mdash; that is the whole reason it exists. Without `-e`, `jq` always exits 0 even when the filter produces no output.
-- The amount format is `"<value> <ticker>"` &mdash; e.g. `"0 USDC"`, `"123.45 USDC"` (R1 §5; the PRD enforces human-readable amounts with explicit tickers, R4 §A.1).
-- For a real CI hook, prefer a `.ts` script that uses `child_process.spawn` and parses JSON in TypeScript &mdash; it is more robust than `jq` chains and gives you better error messages. Bash is fine for the 3-line MVP.
-- This is exactly the pattern Ch 5.8 walks through end to end for QAA-615's `revoke` &mdash; the difference is that 5.8's hook **mutates state** (revokes an allowance) while yours **asserts state** (USDC balance is 0). Both are pre-test hooks. Both call `wallet-cli`. Both exit non-zero on failure.
-
-**Stretch goal.** Replace the bash script with a TypeScript version that:
-
-1. Reads the descriptor from an env var or a `.env.local` file.
-2. Runs `pnpm wallet-cli start -- balances ... --output json` via `Bun.spawn`.
-3. Parses the envelope, picks the USDC entry, compares amount to "0 USDC".
-4. On failure, **invokes a hypothetical `wallet-cli revoke`** to clean state, then re-asserts.
-5. Exits 0 on green, 1 on un-recoverable failure.
-
-You now have a draft for QAA-613's "before" hook. Show it to your lead before Ch 5.8 &mdash; you'll learn whether your design intuition matches what shipped.
+The diagnostic playbook in 5.9.9 is the artifact you'll reach for most often in your first months — keep it open in a tab. The "Where to go from here" list in 5.9.10 turns the onboarding momentum you've built into concrete next contributions instead of a stalled "now what?" gap. Both belong in your bookmarks.
+</div>
 
 ---
+
+
+---
+
 ## Part 5 Final Assessment
 
-You have walked the full CLI automation stack: `apps/wallet-cli/` versus the
-legacy `apps/cli`, the Bun runtime under Bunli's `define()` command tree, the
-Device Management Kit replacing the old `@ledgerhq/hw-transport-*` zoo, the
-Account Descriptor V1 grammar that glues currencies to xpubs, the mock-DMK plus
-http-intercept test rig, and one real spike (QAA-615 — `wallet-cli revoke`)
-shipped end to end as a fixture for QAA-613. This assessment samples the
-load-bearing ideas across Chapters 5.1-5.11. Eighty percent to pass. If you miss
-a question, jump back to the referenced chapter — the answer is always grounded
-in a concrete file, command, or APDU.
+You have walked the full QAA CLI stack: the `apps/cli` binary that is the canonical CLI for QA work, the blockchain primer that makes ERC-20 allowances less mysterious, the manual revoke tools (revoke.cash, Etherscan) that fill the gaps when the harness isn't available, the five-layer integration that turns one Bash command into a typed POM method that drives Speculos in parallel, the Speculos lifecycle and snapshot/restore pattern that keeps two-app tests honest, the broadcast-env discipline with its non-negotiable `try/finally`, the daily workflow with its `wallet-cli` escalation rules, and one real ticket (QAA-615) walked line by line. This assessment samples the load-bearing ideas across Chapters 5.1-5.8. Eighty percent to pass. If you miss a question, jump back to the referenced chapter — the answer is always grounded in a concrete file, command, or commit, not general knowledge.
+
+The questions are weighted toward the patterns you'll repeat in daily work: which CLI to pick (Q1), how on-chain state behaves (Q2), when to reach for manual tools (Q3), the architecture that ties layers together (Q4-Q5), the discipline that keeps tests deterministic (Q6-Q7), the workflow rules that prevent hour-long detours (Q8), and the close-reading skills that catch dev-loop artifacts before they ship (Q9-Q10). If your weak spots cluster around one chapter, that's your re-read; if they're scattered, do a slow pass of the whole part with the briefing open in a second pane.
+
+**Quick reference card (consult after the quiz, not during).**
+
+| Concept | Anchor |
+|---|---|
+| Canonical QAA CLI | `apps/cli/bin/index.js` (legacy `@ledgerhq/live-cli`) |
+| Approve/revoke selector | `0x095ea7b3` = `keccak256("approve(address,uint256)")[0:4]` |
+| Layer 2 spawn engine | `libs/ledger-live-common/src/e2e/runCli.ts` |
+| Layer 3 typed wrappers | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` |
+| Layer 4 device-tap | `libs/ledger-live-common/src/e2e/families/evm.ts` |
+| Layer 5 desktop POM | `e2e/desktop/tests/page/swap.page.ts` |
+| Speculos lifecycle utils | `e2e/desktop/tests/utils/speculosUtils.ts` |
+| Broadcast env helper | `setDisableTransactionBroadcastEnv` in `cliCommandsUtils.ts` |
 
 <a id="part-5-final-assessment"></a>
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 5 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions · 80% to pass · Covers Chapters 5.1-5.11</p>
+<p class="quiz-subtitle">10 questions · 80% to pass · Covers Chapters 5.1-5.8</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> The monorepo currently contains two CLIs at <code>apps/cli</code> and <code>apps/wallet-cli</code>. Which statement correctly describes their relationship?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>apps/cli</code> is the active CLI; <code>apps/wallet-cli</code> is an experimental fork that will be deleted</button>
-<button class="quiz-choice" data-value="B">B) Both are equal peers — <code>apps/cli</code> handles signing and <code>apps/wallet-cli</code> handles account discovery</button>
-<button class="quiz-choice" data-value="C">C) <code>apps/cli</code> is the legacy Node + <code>@ledgerhq/hw-transport-*</code> CLI being phased out; <code>apps/wallet-cli</code> is the active Bun + Bunli + DMK replacement, and new test fixtures (e.g. QAA-615 revoke) must land in <code>apps/wallet-cli</code></button>
-<button class="quiz-choice" data-value="D">D) <code>apps/wallet-cli</code> wraps <code>apps/cli</code> with a nicer flag parser but shares its transport code</button>
-</div>
-<p class="quiz-explanation">Chapter 5.1 lays out the migration story:
-<code>apps/cli</code> predates DMK and the live-common refactor and is in
-maintenance mode; <code>apps/wallet-cli</code> is the strategic successor — Bun
-runtime, Bunli command framework, DMK transport. Onboarding guidance: do not
-write new commands or fixtures in the legacy CLI. Run
-<code>pnpm wallet-cli start &lt;cmd&gt;</code>, never <code>pnpm cli ...</code>.
-The legacy tree still exists because some scripts and a handful of nightly jobs
-still call into it, but every QAA fixture from this sprint forward (QAA-615
-revoke, QAA-617 environment droplist, QAA-722 min-amount) lands exclusively in
-<code>apps/wallet-cli</code>.</p>
-</div>
-
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> A teammate's first wallet-cli PR uses
-<code>console.log</code> for status output, reads <code>process.env.HOME</code>
-directly, and shells out via <code>child_process.exec</code>. Which
-architectural footgun does this most obviously trip?</p>
+<p><strong>Q1.</strong> Which CLI is the canonical tool for QAA test data hooks?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) None — wallet-cli is plain Node and these are all idiomatic</button>
-<button class="quiz-choice" data-value="B">B) wallet-cli runs under Bun, not Node — and Bunli commands write user-facing output through the injected logger so it can be captured by <code>cli-runner</code> in tests; using <code>console.log</code> and raw <code>child_process</code> bypasses both the runtime's native APIs (<code>Bun.spawn</code>, <code>Bun.file</code>) and the test harness's stdout capture</button>
-<button class="quiz-choice" data-value="C">C) Bun forbids <code>console.log</code> at runtime</button>
-<button class="quiz-choice" data-value="D">D) <code>process.env</code> is the only correct way to read secrets in wallet-cli</button>
+<button class="quiz-choice" data-value="A">A) <code>libs/wallet-cli</code> (the Bun + Bunli + DMK CLI)</button>
+<button class="quiz-choice" data-value="B">B) <code>apps/cli</code> (the legacy <code>@ledgerhq/live-cli</code>, invoked as <code>node apps/cli/bin/index.js</code>)</button>
+<button class="quiz-choice" data-value="C">C) The Speculos REST API directly, with no CLI in front</button>
+<button class="quiz-choice" data-value="D">D) <code>ledger-cli</code> from the published npm package</button>
 </div>
-<p class="quiz-explanation">Chapter 5.1 enumerates the four most common
-footguns: assuming Node when the runtime is Bun, bypassing the Bunli logger,
-importing from the legacy CLI's <code>lib/</code>, and creating a DMK transport
-per command instead of reusing the session.</p>
-<p class="quiz-explanation">The injected logger and <code>Bun.*</code> native
-APIs are not optional — <code>cli-runner</code> mocks them in tests and real
-runs depend on them. A PR that prints with <code>console.log</code> will pass
-locally but produce empty assertions in the unit suite, because the test
-harness reads from the logger contract, not from process stdout.</p>
+<p class="quiz-explanation"><code>apps/cli</code> is what every spec under <code>e2e/desktop/tests/specs/</code> and every <code>cliCommands: [...]</code> fixture call resolves to via <code>runCliCommand</code>. The path resolution is hard-coded in <code>libs/ledger-live-common/src/e2e/runCli.ts</code>: <code>LEDGER_LIVE_CLI_BIN = path.resolve(__dirname, "../../../../apps/cli/bin/index.js")</code>. <code>wallet-cli</code> is a separate workspace, used for non-QAA work; treating it as the QAA tool is the most common new-joiner mistake and produces a confusing 30-minute detour every time.</p>
 </div>
 
-<div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> In Bunli's <code>define({ ... })</code> command shape
-used by <code>apps/wallet-cli/src/commands/*.ts</code>, what does the
-<code>handler</code> argument receive, and how are flags declared?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> What does the calldata <code>0x095ea7b3</code> represent on an ERC-20 token contract?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>handler</code> receives <code>argv: string[]</code> and flags are parsed manually inside the function body</button>
-<button class="quiz-choice" data-value="B">B) <code>handler</code> receives a Commander.js <code>program</code> instance; flags are added with <code>.option()</code></button>
-<button class="quiz-choice" data-value="C">C) <code>handler</code> receives only the device transport; flags are declared as decorators on the surrounding class</button>
-<button class="quiz-choice" data-value="D">D) <code>handler</code> receives a context with typed <code>flags</code>, <code>positionals</code>, <code>logger</code>, and <code>prompt</code> already resolved; flags are declared in <code>define({ flags: { ... }})</code> with Zod schemas, and Bunli's codegen produces a typed manifest from those declarations</button>
+<button class="quiz-choice" data-value="A">A) The contract's bytecode prelude</button>
+<button class="quiz-choice" data-value="B">B) The function selector for <code>transfer(address,uint256)</code></button>
+<button class="quiz-choice" data-value="C">C) The function selector for <code>approve(address,uint256)</code> — i.e. <code>keccak256("approve(address,uint256)")[0:4]</code> — followed in calldata by the spender address (32 bytes) and the allowance amount (32 bytes)</button>
+<button class="quiz-choice" data-value="D">D) The selector for <code>balanceOf(address)</code></button>
 </div>
-<p class="quiz-explanation">Chapter 5.3 walks through the Bunli
-<code>define</code> API: every command exports
-<code>define({ name, description, flags, handler })</code> where
-<code>flags</code> is a Zod-validated record. Bunli generates a typed manifest
-at build time so <code>flags.spender</code> in the handler is statically
-<code>0x${string}</code> rather than <code>string | undefined</code>.</p>
-<p class="quiz-explanation">Skipping codegen breaks type-checks in CI — see
-Chapter 5.9 on the codegen pre-commit gate. The same chapter shows the QAA-615
-revoke command's <code>define</code> block as a reference implementation: two
-required flags (<code>--account</code>, <code>--spender</code>), one optional
-(<code>--gas-limit</code>), all Zod-validated.</p>
+<p class="quiz-explanation"><code>0x095ea7b3</code> is the four-byte function selector for <code>approve</code>. Both an "approve N" and a "revoke" share the same selector — the difference is whether the trailing 32-byte amount is non-zero (approve) or zero (revoke). Ledger's clear-sign decoder recognizes this selector and renders human-readable approve/revoke screens. The infinite-approval footgun (calldata <code>...</code> with amount <code>2^256 - 1</code>) was the vector in major DeFi drains (BadgerDAO 2021, multiple 2022 phishing campaigns) — which is why revoke.cash and EIP-2612 permit exist.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> The Device Management Kit (DMK) is what wallet-cli uses
-to talk to a Ledger device. What does it replace, and what transports does it
-expose?</p>
+<p><strong>Q3.</strong> When is revoke.cash the right manual tool, and when is Etherscan's Write tab the right tool?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It replaces the family of <code>@ledgerhq/hw-transport-*</code> packages (hw-transport-node-hid, hw-transport-http, hw-transport-webusb…) with one session-oriented SDK that exposes USB (node-hid under the hood), HTTP (Speculos), and WebHID transports behind a single typed device session</button>
-<button class="quiz-choice" data-value="B">B) It replaces Ledger Live's Redux store with a CLI-friendly state machine</button>
-<button class="quiz-choice" data-value="C">C) It replaces BOLOS firmware on the device itself</button>
-<button class="quiz-choice" data-value="D">D) It is a thin shim over <code>child_process</code> that boots Speculos</button>
+<button class="quiz-choice" data-value="A">A) revoke.cash when you need a one-click UI to enumerate every active allowance on an address and revoke any of them; Etherscan's Write tab when revoke.cash doesn't list a specific token (rare edge cases) and you need to call <code>approve(spender, 0)</code> directly via Connect+MetaMask</button>
+<button class="quiz-choice" data-value="B">B) revoke.cash for mainnet, Etherscan only for testnets</button>
+<button class="quiz-choice" data-value="C">C) They are interchangeable; pick whichever loads faster</button>
+<button class="quiz-choice" data-value="D">D) Etherscan first, revoke.cash only as a fallback when Etherscan is down</button>
 </div>
-<p class="quiz-explanation">Chapter 5.4 covers DMK end-to-end: one
-<code>DeviceManagementKit</code> instance, one <code>DeviceSession</code>,
-multiple pluggable transports. wallet-cli wires the USB transport for real
-devices and the HTTP transport for Speculos; you select via
-<code>--speculos</code> at the CLI surface, but underneath the only thing that
-changes is the transport plugged into the same DMK session.</p>
-<p class="quiz-explanation">The legacy <code>hw-transport-*</code> packages are
-still present in the repo for back-compat but new code must consume DMK. The
-APDU exchange API is the same shape; what changed is session lifecycle,
-typed-event observability, and a unified error taxonomy.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> An Account Descriptor V1 string in wallet-cli has the
-shape
-<code>account:1:&lt;type&gt;:&lt;network&gt;:&lt;env&gt;:&lt;xpub_or_address&gt;:&lt;path&gt;</code>.
-What is the role of the <code>1</code> after <code>account</code>, and why is
-the descriptor string-based rather than a JSON object?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The <code>1</code> is a checksum byte; the string form is a Bun runtime constraint</button>
-<button class="quiz-choice" data-value="B">B) The <code>1</code> is the device app version; JSON would not survive shell quoting</button>
-<button class="quiz-choice" data-value="C">C) The <code>1</code> is the descriptor schema version, so future fields can be added without breaking parsers; the colon-delimited string form is shell-paste-friendly, copy-paste-survivable across tools, and language-agnostic so non-TS consumers (Speculos hooks, shell scripts, future Rust tooling) can split on <code>:</code></button>
-<button class="quiz-choice" data-value="D">D) The <code>1</code> indicates a single-signer account; the string form is required by DMK</button>
-</div>
-<p class="quiz-explanation">Chapter 5.6 introduces the V1 grammar in detail.
-The leading <code>1</code> is a deliberate version slot — V2 will add fields
-without changing the prefix, and parsers reject unknown versions explicitly.</p>
-<p class="quiz-explanation">The string form trades a little parsing ceremony
-for a huge usability win: descriptors travel through CI logs, shell history,
-Slack messages, and ticket comments unchanged. The reference parser lives in
-<code>src/lib/account/descriptor.ts</code> and is the canonical implementation
-— never re-implement the split locally.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> Inside
-<code>apps/wallet-cli/src/lib/intents/families/evm.ts</code>, what does the
-file actually do, and why is it the entry point for QAA-615's revoke
-command?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It exports a React component that renders the EVM transaction form</button>
-<button class="quiz-choice" data-value="B">B) It builds the family-specific transaction intent for EVM chains — encoding ERC-20 calldata (<code>transfer</code>, <code>approve</code>, <code>revoke = approve(spender, 0)</code>), populating gas/nonce, and handing the typed intent to the DMK signer; QAA-615 plugs in there because revoke is <code>approve</code> with <code>amount = 0</code> and the calldata builder already handles <code>approve</code></button>
-<button class="quiz-choice" data-value="C">C) It is a test fixture file with no production role</button>
-<button class="quiz-choice" data-value="D">D) It bridges wallet-cli to the Swap Live App via WebSocket</button>
-</div>
-<p class="quiz-explanation">Chapter 5.5 maps every file in
-<code>src/lib/intents/families/</code>. The <code>evm.ts</code> intent builder
-is where currency-agnostic command handlers (send, approve, revoke) are
-translated into chain-specific calldata + gas params.</p>
-<p class="quiz-explanation">QAA-615's spike (Chapter 5.10) confirmed the
-cleanest path is a thin <code>revoke</code> subcommand that calls the same
-<code>buildApproveIntent</code> with <code>amount: 0n</code>, reusing the EVM
-family code instead of duplicating it. The same file already houses
-<code>buildSendIntent</code> and <code>buildApproveIntent</code>, so revoke
-needed only a one-line wrapper — not a new abstraction layer.</p>
+<p class="quiz-explanation">revoke.cash's value is its enumeration UI — it scans the address and surfaces every active allowance per token+spender. Etherscan's Write tab is a generic contract-write surface for the rare case revoke.cash doesn't index a token (obscure tokens, fresh deployments). Both connect via the same WalletConnect/MetaMask flow; both broadcast a real transaction and cost gas.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q7.</strong> You run
-<code>wallet-cli revoke --account ... --spender ...</code> against a real
-device and it fails with <code>Operation not permitted</code>. The same
-command works with <code>--speculos</code>. What is the most likely fix?</p>
+<p><strong>Q4.</strong> In the five-layer integration, which layer does device-tap automation (driving Speculos's REST API to walk through the on-device approval screens)?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Re-run with <code>--verbose</code> — the verbose flag toggles USB permissions</button>
-<button class="quiz-choice" data-value="B">B) Reinstall node-hid via <code>pnpm rebuild</code></button>
-<button class="quiz-choice" data-value="C">C) Switch to the legacy <code>apps/cli</code> for real-device runs</button>
-<button class="quiz-choice" data-value="D">D) Re-invoke through Claude Code or your harness with <code>dangerouslyDisableSandbox: true</code>, because device-touching commands need raw USB access that the default sandbox denies — Speculos works fine in-sandbox because it is HTTP-only</button>
+<button class="quiz-choice" data-value="A">A) Layer 1 — <code>apps/cli/bin/index.js</code></button>
+<button class="quiz-choice" data-value="B">B) Layer 2 — <code>libs/ledger-live-common/src/e2e/runCli.ts</code></button>
+<button class="quiz-choice" data-value="C">C) Layer 3 — <code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code></button>
+<button class="quiz-choice" data-value="D">D) Layer 4 — <code>libs/ledger-live-common/src/e2e/families/evm.ts</code> (with <code>approveToken()</code>, <code>approveTokenButtonDevice</code>, <code>approveTokenTouchDevices</code>)</button>
 </div>
-<p class="quiz-explanation">Chapter 5.7 catalogues the common-error remediation
-table. Sandbox-level USB denial is the single most frequent first-day blocker:
-Speculos runs over HTTP (and stays inside the sandbox's network allowlist for
-<code>localhost</code>), but real device traffic goes through node-hid which
-needs raw USB.</p>
-<p class="quiz-explanation">The fix is harness-level
-(<code>dangerouslyDisableSandbox: true</code>), not a wallet-cli flag. The same
-chapter also covers the second-most-common error — a stale DMK session left
-over from a previous run — and its fix: <code>pkill -f wallet-cli</code> then
-re-launch.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q8.</strong> The wallet-cli test harness lives at
-<code>apps/wallet-cli/src/test/</code> and combines <code>cli-runner</code>,
-<code>mock-DMK</code>, <code>http-intercept</code>, and <code>mock-server</code>.
-What is the specific role of <code>mock-DMK</code> versus
-<code>http-intercept</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>mock-DMK</code> replaces the DMK device session with an in-memory script of expected APDU exchanges so signing tests run without any real device or Speculos; <code>http-intercept</code> stubs the explorer / coin-API HTTP calls (balances, fees, broadcast) so tests are deterministic and offline</button>
-<button class="quiz-choice" data-value="B">B) <code>mock-DMK</code> and <code>http-intercept</code> are aliases for the same module</button>
-<button class="quiz-choice" data-value="C">C) <code>mock-DMK</code> mocks the Bun runtime; <code>http-intercept</code> mocks the file system</button>
-<button class="quiz-choice" data-value="D">D) Both are dev-only browser tools and not used in CI</button>
-</div>
-<p class="quiz-explanation">Chapter 5.8 splits the harness into two
-responsibilities: device I/O (DMK) and network I/O (HTTP). A QAA-615 unit test
-scripts the expected <code>approve(spender, 0)</code> APDU through
-<code>mock-DMK</code> and stubs <code>eth_estimateGas</code> +
-<code>eth_sendRawTransaction</code> through <code>http-intercept</code>.</p>
-<p class="quiz-explanation">Both must be in place — a real-device test would
-skip the mock-DMK layer; a real-network test would skip http-intercept; a pure
-unit test uses both. <code>cli-runner</code> wires these together and exposes
-the captured logger output for assertions; <code>mock-server</code> covers the
-few cases that need a stateful HTTP fixture (e.g. simulating a nonce that
-increments).</p>
+<p class="quiz-explanation">Layer 4 is the device-tap layer. While the CLI subprocess (Layer 1, spawned by Layer 2) is blocked waiting for a hardware confirmation, <code>approveToken()</code> in <code>families/evm.ts</code> drives Speculos's REST API to navigate menus, press buttons, hold-to-sign on touch devices. The CLI and the device-tap helper run in parallel — that's the trick. <code>approveToken()</code> branches on <code>isTouchDevice()</code>: button devices (Nano S/X/S+) get <code>pressUntilTextFound</code> + <code>buttonsController.both()</code>; touch devices (Stax/Flex) get <code>longPressAndRelease(HOLD_TO_SIGN, 3)</code>. Same logical labels via <code>DeviceLabels.*</code>, different physical interactions.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q9.</strong> Which pre-commit step is non-negotiable in the
-wallet-cli daily workflow, and what commit-message convention does the part
-teach?</p>
+<p><strong>Q5.</strong> Why are several Layer-3 helpers (<code>liveDataCommand</code>, <code>liveDataWithAddressCommand</code>, <code>liveDataWithRecipientAddressCommand</code>) curried — i.e. <code>(account) =&gt; (userdataPath) =&gt; Promise&lt;void&gt;</code> — instead of plain async functions?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>pnpm lint --fix</code> only — codegen runs on push, not commit; commit messages are free-form</button>
-<button class="quiz-choice" data-value="B">B) <code>pnpm format</code> only — Bunli has no codegen; commits use <code>[wallet-cli]</code> prefix</button>
-<button class="quiz-choice" data-value="C">C) <code>pnpm wallet-cli codegen</code> (or <code>pnpm --filter wallet-cli codegen</code>) must run before commit so the generated typed flag manifest stays in sync with <code>define()</code> declarations; commits follow Conventional Commits — e.g. <code>feat(wallet-cli): add revoke command for QAA-615</code></button>
-<button class="quiz-choice" data-value="D">D) Only <code>pnpm test</code> — commit messages must include the Jira ticket as the first word</button>
+<button class="quiz-choice" data-value="A">A) For functional-programming style points</button>
+<button class="quiz-choice" data-value="B">B) To support partial application across spec files</button>
+<button class="quiz-choice" data-value="C">C) Because the desktop fixture engine (in <code>e2e/desktop/tests/fixtures/common.ts</code>) consumes a <code>cliCommands: [...]</code> array and threads in the userdataPath at the right point in the test lifecycle. Currying lets specs declare <code>cliCommands: [liveDataCommand(account)]</code> at metadata-time and have the engine call <code>(curried)(userdataPath)</code> at setup-time</button>
+<button class="quiz-choice" data-value="D">D) To avoid TypeScript inference issues</button>
 </div>
-<p class="quiz-explanation">Chapter 5.9 walks the daily lifecycle ticket-to-PR.
-Forgetting codegen is the #1 CI failure pattern: the generated manifest is
-checked in, so a stale manifest fails the type-check and the codegen-drift CI
-job.</p>
-<p class="quiz-explanation">Commit conventions mirror the rest of the monorepo
-— Conventional Commits, scope is <code>wallet-cli</code>, ticket id in the
-body or trailer. Branch naming follows the same convention as desktop and
-mobile work: <code>feat/qaa-615-wallet-cli-revoke</code>,
-<code>support/wallet-cli-codegen-pin</code>, etc.</p>
+<p class="quiz-explanation">The curry is fixture-shaped: the spec author binds <code>account</code> when writing the test; the engine binds <code>userdataPath</code> when setting up. One-shot reads (like <code>isTokenAllowanceSufficientCommand</code>) don't need this pattern — they're plain async functions because there's no second-stage binding to thread.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q10.</strong> The QAA-615 spike compared three implementation paths
-for revoke. Which path was chosen, what reusable helper did it produce, and
-how does QAA-613 consume it?</p>
+<p><strong>Q6.</strong> Why does a swap test that needs to revoke a token approval before the test runs save the previous Speculos port and restore it in a <code>finally</code> block?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Path 2 (generalize <code>send</code> with raw calldata); helper is <code>buildCalldata()</code>; QAA-613 calls it inline in each spec</button>
-<button class="quiz-choice" data-value="B">B) Path 3 (a thin <code>revoke</code> subcommand wrapping a generalized intent helper); the reusable piece is <code>buildApproveIntent({ spender, amount })</code> in <code>lib/intents/families/evm.ts</code>, called with <code>amount: 0n</code> for revoke and any positive value for approve; QAA-613's nightly token-approval specs gain a <code>beforeEach</code> (or <code>beforeAll</code>) hook that shells out to <code>wallet-cli revoke</code> to reset on-chain allowance to zero, so each broadcast-enabled regression run starts deterministic</button>
-<button class="quiz-choice" data-value="C">C) Path 1 (a brand-new <code>revoke</code> command with its own calldata builder, no shared helper); QAA-613 imports the command's TypeScript source directly</button>
-<button class="quiz-choice" data-value="D">D) None — the spike concluded revoke is impossible from the CLI and recommended a manual reset</button>
+<button class="quiz-choice" data-value="A">A) For Allure attachment hygiene</button>
+<button class="quiz-choice" data-value="B">B) Because two-app tests run a second Speculos (e.g., the Ethereum app for the revoke) on a different port, which mutates <code>SPECULOS_API_PORT</code>. Without saving and restoring, the rest of the test run — including the main Exchange-app Speculos that drove the swap — would point at a now-stopped port, causing connection-refused failures on every subsequent CLI call</button>
+<button class="quiz-choice" data-value="C">C) Because Speculos randomizes its port and the previous port is unreachable after restart</button>
+<button class="quiz-choice" data-value="D">D) Because Allure requires the original port to render device screenshots</button>
 </div>
-<p class="quiz-explanation">Chapter 5.10 documents the full QAA-615 spike:
-Path 3 wins because it gives users a clean <code>wallet-cli revoke</code> UX
-while keeping a single calldata builder shared with <code>approve</code>.</p>
-<p class="quiz-explanation">The hook pattern follows from a single
-fact about ERC-20 allowances: an approve only needs to happen once per
-address-spender pair, and a before/after hook calling the CLI is what keeps
-the regression suite re-runnable. Nightly QAA-613 runs with broadcast
-disabled do not strictly need revoke (allowance never moves on-chain), but
-the broadcast-enabled regression suite does, and the same fixture serves
-both.</p>
-<p class="quiz-explanation">The hook is a thin shell-out via
-<code>Bun.spawn</code> from the test setup, capturing exit code and stderr; on
-non-zero exit the test fails fast rather than running against a polluted
-allowance state.</p>
+<p class="quiz-explanation">The <code>SPECULOS_API_PORT</code> env var is process-global. Mutating it for a sub-step (revoke on Ethereum app) and forgetting to restore leaks the change to every later CLI invocation. The pattern in <code>cleanSpeculos(speculos, previousPort?)</code> exists exactly to make this restoration idiomatic.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q7.</strong> What does the <code>try/finally</code> block in <code>approveTokenCommand</code> and <code>revokeTokenCommand</code> guard against?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) An unhandled throw between the env flip (<code>setDisableTransactionBroadcastEnv("0")</code>) and the env restore would leak the broadcast-on state to every subsequent CLI call in the run, silently flipping broadcast for tests that expected it to stay off. The <code>finally</code> ensures restoration runs even on throw</button>
+<button class="quiz-choice" data-value="B">B) Speculos crashes — the <code>finally</code> kills the simulator</button>
+<button class="quiz-choice" data-value="C">C) The CLI subprocess hanging — the <code>finally</code> sends SIGKILL</button>
+<button class="quiz-choice" data-value="D">D) Allure attachment failures — the <code>finally</code> writes a fallback record</button>
+</div>
+<p class="quiz-explanation">Env mutations are process-global and persist across awaits. A throw between flip and restore leaves <code>DISABLE_TRANSACTION_BROADCAST</code> set to <code>"0"</code> for the rest of the run; later tests assuming broadcast-off would silently broadcast real transactions. <code>finally</code> turns "we restore on the happy path" into "we always restore" — non-negotiable. The same pattern applies to any other env-mutating helper: capture the original value, pair the mutation with a guaranteed restore, never trust an explicit happy-path restore alone.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q8.</strong> When does the daily QAA workflow legitimately escalate to <code>wallet-cli</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Whenever <code>apps/cli</code> is slow</button>
+<button class="quiz-choice" data-value="B">B) For every test that involves a swap</button>
+<button class="quiz-choice" data-value="C">C) Whenever you need to read an allowance — <code>wallet-cli</code> is faster</button>
+<button class="quiz-choice" data-value="D">D) Almost never. <code>wallet-cli</code> is out of QAA scope; the canonical CLI for QAA test hooks is <code>apps/cli</code>. Escalation to <code>wallet-cli</code> is reserved for rare cross-team work where a wallet-cli-specific feature (e.g., DMK transport pinning, certain BLE flows) is genuinely required and a senior has signed off</p></button>
+</div>
+<p class="quiz-explanation">The new-joiner trap is treating <code>wallet-cli</code> as a general-purpose CLI just because it's newer. For QAA work, <code>apps/cli</code> is the answer in 99% of cases. Reaching for <code>wallet-cli</code> usually signals you've taken a wrong turn — pause, ask, then proceed only with sign-off.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q9.</strong> The senior's QAA-615 commit has <code>@step("Ensure token approval")</code> on the <code>revokeTokenApproval</code> method. What's the issue?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>@step</code> should be <code>@Step</code> with a capital S</button>
+<button class="quiz-choice" data-value="B">B) The decorator string is a copy-paste from <code>ensureTokenApproval</code> — it lies about what the method does. The Allure report will label every revoke step as "Ensure token approval", which is actively misleading. Final PR will fix this to "Revoke token approval"</button>
+<button class="quiz-choice" data-value="C">C) <code>@step</code> is deprecated; use <code>@TestStep</code> instead</button>
+<button class="quiz-choice" data-value="D">D) Decorators don't work on async methods in this version of TypeScript</button>
+</div>
+<p class="quiz-explanation">The bug is observability, not correctness. The method runs fine; the Allure step name is wrong. This is a classic dev-loop artifact: the senior copied the existing method's shape including its decorator, and forgot to update the string. Final PR review catches it.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q10.</strong> The QAA-615 commit comments out <code>ensureTokenApproval</code> and replaces it with <code>revokeTokenApproval</code>. The Part 5 briefing notes this is "dev-loop code, not the final shape." What is the final shape likely to be?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The final shape removes <code>ensureTokenApproval</code> entirely and only revokes</button>
+<button class="quiz-choice" data-value="B">B) The final shape collapses both methods into a single <code>handleTokenApproval</code> that takes a mode flag</button>
+<button class="quiz-choice" data-value="C">C) The final shape keeps both: <code>revokeTokenApproval</code> as a <code>beforeEach</code> cleanup that resets allowance to zero between iterations, and <code>ensureTokenApproval</code> as the per-test setup that approves the slippage-padded amount the test actually needs. The dev-loop commit only flipped them temporarily because the senior was iterating on the revoke path</button>
+<button class="quiz-choice" data-value="D">D) The final shape calls neither — the swap provider auto-approves at swap time</button>
+</div>
+<p class="quiz-explanation">Both methods are needed for a deterministic broadcast-enabled regression test: revoke first to clear stale allowance from the previous run, then approve the right amount for this run. The commented-out <code>ensureTokenApproval</code> in the dev-loop commit is just the senior temporarily disabling the second half while iterating on the first half. Final PR will keep both. Recognizing this distinction — between code that helps a human iterate and code that is ready to ship — is one of the highest-leverage skills in code review; the <code>// await app.swap.ensureTokenApproval(...)</code> line is the smoking gun.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
 <div class="chapter-outro">
-<strong>Part 5 complete.</strong> You own the CLI automation stack end to end:
-<code>apps/wallet-cli</code> versus the legacy <code>apps/cli</code>, the Bun
-+ Bunli runtime model with its <code>define()</code> command shape and
-codegen-checked typed flag manifest, the Device Management Kit replacing the
-old <code>hw-transport-*</code> family with one session-oriented SDK over USB
-and HTTP (Speculos), the Account Descriptor V1 grammar that travels safely
-through CI logs and Slack, the codebase walk through <code>commands/</code>,
-<code>lib/intents/families/evm.ts</code>, <code>signers/</code>,
-<code>transports/</code>, the sandbox plus common-error remediation table, the
-mock-DMK + http-intercept + cli-runner test rig, the daily workflow with its
-codegen pre-commit and Conventional Commits, and one spike shipped — QAA-615
-— that produced a <code>revoke</code> subcommand and a
-<code>buildApproveIntent</code> helper that QAA-613's broadcast-enabled
-regression hook now consumes.
+<strong>Part 5 complete.</strong> You own the QAA CLI stack end to end:
 
-<strong>Next: Part 6</strong> takes you up a layer — out of the wallet-cli's
-terminal and into the <strong>Swap Live App</strong> that wallet-cli's revoke
-fixture supports. The Swap Live App is the React/Vite app embedded in Ledger
-Live that orchestrates the swap flow you just unblocked: it talks to
-Thorchain, Uniswap, and LiFi, calls the Wallet API to request the two
-on-device signatures (approve, then swap), and renders Firebase-driven release
-variants per environment. Same monorepo, same Xray traceability, same PR
-etiquette, same DMK transport underneath — just a UI surface where wallet-cli
-is the silent test-data infrastructure underneath. The surface changes from a
-Bun command tree to a Live App embedded in Ledger Live; the professionalism
-does not.
+- <code>apps/cli</code> as the canonical binary, invoked from tests as <code>node apps/cli/bin/index.js</code> via <code>child_process.spawn</code>. The Bun-based <code>wallet-cli</code> stays out of QAA scope.
+- ERC-20 approvals as on-chain state that survives reboots, simulator restarts, and repo re-clones. The <code>0x095ea7b3</code> selector renders human-readable on Ledger devices because the clear-sign decoder recognizes it.
+- revoke.cash and Etherscan as the manual escape hatches when the harness can't help — debugging local seeds, auditing what's actually approved, recovering from a broken Speculos session.
+- The five-layer integration: <code>apps/cli/bin/index.js</code> → <code>runCli.ts</code> → <code>cliCommandsUtils.ts</code> → <code>families/evm.ts</code> (device-tap parallel-driver) → <code>swap.page.ts</code> POM. Each layer has one job; the curry pattern at Layer 3 is what makes the <code>cliCommands: [...]</code> fixture syntax possible.
+- The Speculos snapshot/restore pattern. Two-app tests save the previous port and restore it in <code>finally</code>; failure to do so leaks a now-stopped port to every subsequent CLI call.
+- The <code>DISABLE_TRANSACTION_BROADCAST</code> env discipline. Flip to <code>"0"</code> with <code>setDisableTransactionBroadcastEnv</code>, restore <code>original</code> in <code>finally</code>. No exceptions; an unhandled throw between flip and restore silently flips broadcast for the rest of the run.
+- The daily workflow that prefers small typed wrappers over hand-run CLI sessions, with rare <code>wallet-cli</code> escalation only on senior sign-off.
+- One real ticket (QAA-615) walked line by line — three files, 37 lines, the <code>@step</code> copy-paste bug, and the dev-loop-vs-final-shape distinction that separates "code that helped a senior iterate" from "code that ships".
+
+<strong>Next: Part 6</strong> climbs back up the stack to the Swap Live App — the embedded UI that exercises everything you just learned. Same allowance state, same Speculos transport, same broadcast discipline — but now wrapped in a Live App iframe with a postMessage protocol of its own. The work you put into understanding why <code>revokeTokenCommand</code> exists is exactly what makes the Swap Live App's flows make sense: when the iframe asks the host to sign an approve transaction, you'll know which CLI command would emit the same calldata, which Speculos screen would appear, and which env flag would have prevented broadcast in a test. Carry that mental model forward.
 </div>
