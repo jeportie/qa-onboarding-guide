@@ -707,6 +707,7 @@ If these terms feel natural to you now, the chapter has done its job. If any fee
 
   <div class="quiz-score"></div>
 </div>
+
 ## Teams and Ownership
 
 <div class="chapter-intro">

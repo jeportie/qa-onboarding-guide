@@ -1943,6 +1943,7 @@ The one place to be careful: when a Layer 3 helper takes a curried form (`liveDa
 <div class="chapter-outro">
 You now have a layer-by-layer map of how a single line in a desktop spec — <code>await app.swap.revokeTokenApproval(account, provider)</code> — descends through five distinct files, spawns a Node subprocess, drives a Speculos REST API in parallel with that subprocess, and reaches an on-chain broadcast on a public testnet. The next chapter zooms in on one of the supporting cast members of this trace: the Speculos lifecycle. <code>launchSpeculos</code> and <code>cleanSpeculos</code> appeared at the top and bottom of every Layer 5 method in this chapter; Chapter 6.5 takes them apart, shows what <code>startSpeculos</code> does inside (Docker container or remote pool), explains the <code>SPECULOS_API_PORT</code> snapshot-and-restore pattern in full, and gives you the playbook for debugging Speculos boot failures.
 </div>
+
 ## Speculos Lifecycle in CLI Tests
 
 <div class="chapter-intro">
@@ -3262,6 +3263,7 @@ The classic e2e symptom. Order of suspects, in increasing rarity:
 <div class="chapter-outro">
 You now have the full daily workflow — recon, change shape, iteration loop, smoke, commit, PR — and the debugging vocabulary to read the failure modes that show up in practice. The next chapter takes a real ticket end-to-end: <strong>QAA-615</strong>, the senior's commit that introduced <code>revokeTokenCommand</code>, walked line-by-line through every file changed, every choice made, every alternative considered. After you have followed that walkthrough, the architecture, the env discipline, and the workflow will all click into a single coherent picture you can reproduce on your own tickets.
 </div>
+
 ## Walkthrough QAA-615 — Line-by-Line
 
 <div class="chapter-intro">
@@ -4059,6 +4061,7 @@ A 7-section, ~1-page spike report is the right size. Do not write 4 pages. The d
 <div class="chapter-outro">
 You now own the whole shape of QAA-615. The senior's commit was a runway, not a destination — 37 lines that prove the path works, with four obvious do-list items waiting on top: the <code>@step</code> rename, the proper hook ordering, mobile parity, and a tightened type guard. Plus the spike report. None of those is hard; all of them are necessary. Ship them. Chapter 6.9 turns the page from this guided walkthrough to your own hands: a set of CLI exercises and challenges that exercise every layer of what you just read, with grading rubrics so you can self-assess before bringing your work to a reviewer.
 </div>
+
 ## CLI Exercises and Challenges
 
 <a id="cli-exercises-and-challenges"></a>
