@@ -1,404 +1,218 @@
-# PART 5 — CLI AUTOMATION
-
-Part 5 covers the CLI surface QAA owns: `apps/cli`, the typed wrappers around it, the Speculos device-tap layer that drives signing, and the broadcast discipline that keeps regression tests deterministic. Ten chapters; this fragment contains the first two — the framing chapter (5.1) and the blockchain primer (5.2). Read them in order; everything after assumes the vocabulary established here.
-
-The reference branch for everything in Part 5 is `support/qaa_add_revoke_token` at commit `4fa4868a35`, authored by Abdurrahman SASTIM. Three small files, thirty-seven lines added — the canonical example of "do one thing well" in QAA tooling. By the end of the part you should be able to read those three files at a glance and know exactly which layer each line touches.
-
-## CLI in QA — apps/cli is the canonical CLI
+## Mobile E2E -- Architecture Deep Dive
 
 <div class="chapter-intro">
-You have learned the desktop E2E surface (Part 3) and the mobile E2E surface (Part 4). This chapter introduces the third surface QAA owns: the command-line interface. The CLI is not a product the customer touches — it is internal test-data infrastructure. It seeds accounts, reads device addresses, queries on-chain allowances, and signs approve / revoke transactions. The QAA-canonical binary is <code>apps/cli</code>; <code>apps/wallet-cli</code> is experimental and out of scope for this part.
+The mobile E2E suite tests Ledger Live Mobile (React Native) using Detox + Jest. While the high-level patterns mirror the desktop suite — Page Object Model, Speculos emulation, feature flag overrides — the implementation differs significantly. This chapter maps the directory structure, the initialization flow, the WebSocket bridge, and the key architectural differences from desktop.
 </div>
 
-### 5.1.1 What this part teaches and why a third E2E surface
+### 5.1.1 Directory Structure
 
-Parts 3 and 4 covered the two product-facing E2E suites: Playwright drives Ledger Live Desktop, Detox + Jest drives Ledger Live Mobile. Both can tap UI elements and read screens. Neither can cheaply seed an account, query an ERC-20 allowance, or burn a deterministic on-chain transaction before a test runs. That is why a third surface exists: the CLI.
-
-### 5.1.2 Why a CLI in QA
-
-The CLI is test-data infrastructure. Three jobs are easier in a CLI subprocess than in a UI driver.
-
-**Test-data seeding.** A swap test needs an Ethereum account with a known balance, a known token balance, a known address, and a known derivation path. Building that state through the UI takes minutes per test and breaks every time a screen changes. The CLI builds it in one subprocess call, decoupled from the UI. Concretely: `liveDataCommand(account)` writes a JSON userdata file that the desktop app reads at launch, and the app boots straight into the prepared state. The UI driver never has to click through "Add account → Choose currency → Choose derivation → Confirm" four times before each test. That preparation cost — measured in tens of seconds per account, multiplied by every spec — collapses into a single subprocess call.
-
-**Allowance state determinism.** ERC-20 allowances live on-chain. They survive simulator restarts, repo re-clones, and CI runners. A nightly run that broadcasts an `approve(spender, 100)` leaves `allowance[seed][spender] = 100` permanently. The next run's "fresh approval" device screen reads "you already approved 100 — approve more?" and any test that asserts "Approve 100 USDC" content will fail. Manual recovery via revoke.cash is the human fallback (Chapter 5.3); the CLI hook is the automated one. This is the headline reason QAA-615 exists, and it's why Chapter 5.2 spends time on the storage model — without that mental picture, the determinism problem looks like a flaky test rather than a structural reality. There is no shortcut around this; you cannot "reset the chain" between test runs. You can only reset the slots you touch.
-
-**One-shot operations Playwright and Detox shouldn't do.** Reading a device address, signing a single revoke transaction, broadcasting it, and exiting is five lines of CLI. It is fifty lines of Page Object Model with a Speculos device dance. Use the right tool: UI drivers for UI behaviour, CLI for state operations. The CLI is also the only place where a non-product code path can reasonably live — the harness can call `tokenAllowance` to make a routing decision (skip the device dance if allowance is already sufficient) without polluting the desktop or mobile app with test-only code. This separation of concerns — product code stays product-only, test-only utilities live in `apps/cli` and `cliCommandsUtils.ts` — is one of the reasons the codebase stays maintainable.
-
-In short: the UI drivers test what the user does; the CLI prepares the world the user does it in. Confusing the two — trying to revoke through the UI, or trying to verify swap UI through CLI subprocesses — wastes test time and produces fragile suites.
-
-### 5.1.3 The two CLIs — apps/cli vs apps/wallet-cli
-
-The monorepo contains two CLI applications. **Only `apps/cli` is the QAA canonical CLI.** Use it. Teach it. Read its source.
-
-| | `apps/cli` | `apps/wallet-cli` |
-|---|---|---|
-| Package name | `@ledgerhq/live-cli` | `@ledgerhq/wallet-cli` |
-| Stack | Node + Commander | Bun + Bunli + DMK |
-| Status | Mature, used by E2E | Experimental |
-| QAA usage | **Canonical** — every E2E CLI helper invokes it | Not used by QAA |
-| Binary | `ledger-live` (`bin/index.js`) | Separate, not wired into E2E helpers |
-| Coverage in this part | Full | Out of scope |
-
-`apps/wallet-cli` is a future-facing rewrite using Bun and the new Device Management Kit. It is not part of the QAA workflow today. Earlier drafts of this onboarding guide taught wallet-cli; that material was wrong. If you read it elsewhere, ignore it. Everything in Part 5 from here on refers to `apps/cli`.
-
-> **Verify:** if a future PR adds wallet-cli wrappers in `cliCommandsUtils.ts`, the canonical-CLI claim must be revisited. As of `support/qaa_add_revoke_token` @ `4fa4868a35`, every wrapper invokes `apps/cli/bin/index.js`.
-
-The reason this section exists at all: earlier drafts of Part 5 of the onboarding guide taught wallet-cli as the canonical CLI, complete with Bun setup instructions, Bunli command authoring patterns, and DMK descriptor walkthroughs. That material was wrong — not "out of date", but actively misleading because no QAA test path uses any of it. If you onboard a teammate and they cite "I read in the guide that we use wallet-cli", that's a copy of the obsolete draft. Send them this chapter instead.
-
-A historical note that is occasionally useful: `apps/wallet-cli` was started as the long-term replacement for `apps/cli` once Bun and DMK matured. That replacement has not landed, the wallet-cli command surface is incomplete, and no E2E test currently invokes it. If you see a Slack thread or an old PR description that says "wallet-cli is the future", treat it as aspirational. For the work in front of you in 2025, `apps/cli` is the one that runs in production and the one Part 5 teaches.
-
-### 5.1.4 Where apps/cli sits in the monorepo
+Mobile E2E lives in a **peer workspace** at the repo root: `e2e/mobile/` sits alongside `e2e/desktop/`, each with its own `package.json`, Detox/Playwright config, and Nx `project.json`. The mobile workspace is fully self-contained — it is no longer nested under `apps/ledger-live-mobile/e2e/`.
 
 ```
-apps/
-|-- cli/                              # @ledgerhq/live-cli
-|   |-- bin/
-|   |   `-- index.js                  # entry: `ledger-live` binary
-|   |-- src/
-|   |   |-- commands/
-|   |   |   |-- blockchain/           # 16 blockchain commands (catalog below)
-|   |   |   |-- live/                 # liveData, etc. (account fixtures)
-|   |   |   `-- device/               # firmware / app management (out of QAA scope)
-|   |   |-- transaction.ts            # inferTransactionsOpts (parses --mode, --token, --spender)
-|   |   `-- scan.ts                   # scanCommonOpts (--currency, --index, --scheme)
-|   |-- scripts/
-|   |   |-- gen.mjs                   # zx-driven prebuild: generates command index
-|   |   |-- build.mjs                 # zx-driven build
-|   |   `-- test.mjs                  # zx-driven local tests
-|   `-- package.json
+e2e/mobile/                        # peer to e2e/desktop/
+|-- package.json                   # own workspace package (ledger-live-mobile-e2e-tests)
+|-- project.json                   # Nx target definitions
+|-- detox.config.js                # Detox device/app configuration
+|-- jest.config.js                 # Jest configuration
+|-- jest.environment.ts            # Custom Jest environment (per-worker device swap)
+|-- jest.globalSetup.ts            # Pre-test setup (delegates to Detox)
+|-- jest.globalTeardown.ts         # Post-run cleanup
+|-- babel.config.js                # Babel for the test transform
+|-- tsconfig.test.json             # TS config for specs (experimentalDecorators)
 |
-`-- wallet-cli/                       # OUT OF SCOPE — do not study for QAA work
+|-- specs/                         # TEST FILES (~197 specs)
+|   |-- account/                   #   Account screen tests
+|   |-- addAccount/                #   Add-account flow tests
+|   |-- buySell/                   #   Buy / sell flow tests
+|   |-- delegate/                  #   Staking tests
+|   |-- deleteAccount/             #   Remove account tests
+|   |-- deposit/                   #   Receive tests
+|   |-- earn/                      #   Earn feature tests
+|   |-- ledgerSync/                #   Ledger Sync tests
+|   |-- portfolio/                 #   Portfolio tests
+|   |-- send/                      #   Send flow tests
+|   |-- settings/                  #   Settings tests
+|   |-- subAccount/                #   Token sub-account tests
+|   |-- swap/                      #   Swap tests (incl. otherTestCases/)
+|   |-- verifyAddress/             #   Address verification tests
+|   +-- wallet40/                  #   Wallet 4.0 tests
+|
+|-- page/                          # PAGE OBJECTS
+|   |-- index.ts                   #   `Application` class (lazy-init POM hub, 32 getters)
+|   |-- common.page.ts             #   Shared actions
+|   |-- passwordEntry.page.ts      #   Password entry
+|   |-- speculos.page.ts           #   Speculos-device POM
+|   |-- error.page.ts              #   Error screen POM
+|   |-- accounts/                  #   Account management screens
+|   |-- discover/                  #   Discover screens
+|   |-- drawer/                    #   Modular drawers
+|   |-- liveApps/                  #   Live-app screens (e.g. swap live app)
+|   |-- manager/                   #   Manager screens
+|   |-- market/                    #   Market screens
+|   |-- onboarding/                #   Onboarding flow
+|   |-- settings/                  #   Settings screens
+|   |-- stax/                      #   Stax-specific screens
+|   |-- trade/                     #   Send / receive / swap / stake / earn
+|   +-- wallet/                    #   Portfolio and wallet navigators
+|
+|-- bridge/
+|   |-- server.ts                  #   WebSocket bridge server (~307 lines)
+|   +-- types.ts                   #   Canonical bridge message types
+|
+|-- helpers/                       # HELPER FUNCTIONS
+|-- models/                        # Test models (transactions, etc.)
+|-- userdata/                      # JSON fixtures (accounts, settings)
+|-- scripts/                       # Workspace scripts (typecheck, etc.)
+|-- types/                         # Shared TS types
++-- utils/                         # Utilities (initUtil, speculos, cli, constants)
 ```
 
-The `package.json` highlights:
+> **Legacy residue.** A small set of specs still lives under `apps/ledger-live-mobile/e2e/` (roughly 17 files: onboarding, password, deeplinks, language, manager, market, plus a few send/receive/delegate/swap specs). They are being migrated; treat `e2e/mobile/` as the canonical workspace for new work.
 
-```json
-{
-  "name": "@ledgerhq/live-cli",
-  "bin": { "ledger-live": "./bin/index.js" },
-  "scripts": {
-    "prebuild": "zx ./scripts/gen.mjs",
-    "build": "zx ./scripts/build.mjs",
-    "test": "zx ./scripts/test.mjs"
-  }
-}
-```
+### 5.1.2 The Initialization Flow
 
-`zx` is Google's Bash-in-JavaScript helper. The `prebuild` step regenerates the command index — a single file that imports every command in `src/commands/**` so Commander can register them. After cloning and installing, you must `pnpm --filter @ledgerhq/live-cli build` once before E2E tests can find the binary.
-
-The runtime stack is Node + Commander. No Bun, no Bunli, no DMK. Reading the source is straightforward TypeScript.
-
-A handful of Commander idioms recur across the blockchain commands and are worth recognising on first read:
-
-- `scanCommonOpts` — a shared options bundle (`--currency`, `--index`, `--scheme`, `--xpub`, etc.) attached to every command that needs to identify an account.
-- `inferTransactionsOpts` — a shared options bundle for transaction-shaped commands (`--amount`, `--recipient`, `--token`, `--mode`, `--approveAmount`, etc.). Lives in `apps/cli/src/transaction.ts` and dispatches into family-specific handlers (e.g. `libs/coin-modules/coin-evm/src/cli-transaction.ts`).
-- `--format` — most commands accept `default | json | silent` and swap their output writer accordingly. The wrappers in `cliCommandsUtils.ts` always pass `--format json` when they need to parse output (`tokenAllowance`, mainly).
-- `--ignore-errors` — sometimes used to keep the rxjs pipeline from short-circuiting on partial failures.
-
-You will not need to touch the CLI source on day one of a QAA fix campaign. But when something goes wrong — the wrapper passes args that the CLI doesn't recognise, or the output format changed and the parser breaks — being able to read `send.ts` end-to-end is the difference between a 30-minute fix and a half-day of guessing.
-
-A note on `bin/index.js` itself: it is a thin shim. It imports the auto-generated commands index produced by `prebuild`, registers each command with Commander, and dispatches based on argv. There is no bespoke argument parsing in the entry point — Commander handles it. This is why a stale `prebuild` (no commands index, or a commands index that omits a recently-added command) produces "unknown command" errors instead of silent failures. If `apps/cli` doesn't seem to know about a command you can see in the source, run `pnpm --filter @ledgerhq/live-cli build` and try again.
-
-### 5.1.5 The 16 blockchain commands at a glance
-
-Path: `apps/cli/src/commands/blockchain/`.
-
-| File | Purpose | QAA uses? |
-|---|---|---|
-| `bot.ts` | Speculos bot (long-running test stress) | No — out of QAA scope |
-| `botPortfolio.ts` | Bot portfolio management | No |
-| `botTransfer.ts` | Bot-driven transfers | No |
-| `broadcast.ts` | Broadcast a pre-signed tx | Maybe (debug only) |
-| `confirmOp.ts` | Confirm an operation | No |
-| `derivation.ts` | Derivation path utility | No |
-| `estimateMaxSpendable.ts` | Estimate max sendable amount | No |
-| `generateTestScanAccounts.ts` | Test fixture generator | No |
-| `generateTestTransaction.ts` | Test fixture generator | No |
-| **`getAddress.ts`** | **Read device address** | **YES** — `runCliGetAddress` |
-| `getTransactionStatus.ts` | Get tx status | No |
-| `receive.ts` | Receive flow utility | No |
-| **`send.ts`** | **Sign + (maybe) broadcast a tx; supports `--mode approve\|revokeApproval`** | **YES** — `runCliTokenApproval` |
-| `signMessage.ts` | Sign EIP-191 / EIP-712 messages | No |
-| `sync.ts` | Account sync | No |
-| `testDetectOpCollision.ts`, `testGetTrustedInputFromTxHash.ts` | Test utilities | No |
-| **`tokenAllowance.ts`** | **Read ERC-20 allowance** | **YES** — `runCliGetTokenAllowance` |
-
-Plus `apps/cli/src/commands/live/`:
-
-- `liveData.ts` — generates the account fixture file Ledger Live consumes at startup. Used by `runCliLiveData` and is QAA's most heavily used CLI helper. Every spec that needs a pre-loaded account fans out from here.
-
-And `apps/cli/src/commands/device/` — firmware / app management, out of QAA scope.
-
-Of the 16 blockchain commands, **four** are part of the QAA workflow. Everything else is either bot infrastructure (long-running stress tests, separate concern) or low-level test utilities the wrappers in `cliCommandsUtils.ts` do not expose. Stay focused on the four.
-
-A few of the "out of scope" entries are worth a one-line description so you don't waste time on them:
-
-- `bot.ts` — runs a Speculos-driven stress loop that exercises send / sync / portfolio over many accounts and many currencies. It is its own product surface, owned by a different team. If you find yourself reading it, you've taken a wrong turn.
-- `botTransfer.ts`, `botPortfolio.ts` — building blocks for the bot above.
-- `broadcast.ts` — takes a hex-encoded signed transaction and broadcasts it. Useful only for very specific debug scenarios where you have a signed tx blob from somewhere else and want to push it to chain.
-- `confirmOp.ts`, `getTransactionStatus.ts` — utilities for waiting on or inspecting an operation by hash. The QAA wrappers fold the equivalent functionality into the `--wait-confirmation` flag of `send`.
-- `derivation.ts` — derive an address for a given path / xpub combo. The QAA equivalent is `getAddress` on a real device, which gives you both the path and the on-device confirmation that the device computes the same thing.
-- `signMessage.ts` — EIP-191 / EIP-712 signing. The QAA E2E layer doesn't currently exercise this through the CLI; message-signing flows are tested via the UI driver.
-
-If the day-job lands you in any of these, ask first whether you're solving the right problem at the right layer. Most of the time the answer is "use one of the four canonical commands instead".
-
-**Why `liveData` lives under `commands/live/` and not `commands/blockchain/`.** Because it's not a blockchain command. It builds an off-chain JSON userdata file from public derivation data — no transaction, no signature, no RPC call. Putting it under `commands/live/` makes the boundary clear: blockchain commands talk to chains and devices; live commands prepare client-side state. The directory layout is a hint about what each command does.
-
-This split also explains why `liveData` has no Speculos requirement: it doesn't need a device because it doesn't sign anything. It can run on a laptop with no Docker, no emulator, no network, and produce a fully populated userdata file in milliseconds. Tests that only need account fixtures (most of them) thus avoid the full Speculos overhead — they just consume the userdata file the fixture engine generated.
-
-### 5.1.6 The four commands QAA actually uses
-
-**`liveData`** (under `commands/live/`) — the workhorse. Generates a JSON userdata file with the accounts your test needs. Called via `runCliLiveData` and wrapped in the curried fixture helpers `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithParentAddressCommand`, `liveDataWithRecipientAddressCommand`. Every desktop test fixture's `cliCommands: [...]` array starts with one of these. Forward-ref Chapter 5.4 for the curried-function pattern. The reason this command is so central: a single `liveData` invocation can produce a userdata snapshot covering Bitcoin, Ethereum, Polygon, Solana, an ERC-20 sub-account, and a derivation-path variant — enough world to run almost any spec.
-
-**`getAddress`** — reads a device address for a given currency and derivation path. Called via `runCliGetAddress`. Used implicitly through `getAccountAddress(account)`, which both fetches the address and writes it back onto the in-memory account object so subsequent assertions can reference it. This command is the bridge between "the test thinks the account is at index 0 on path m/44'/60'/0'/0/0" and "the chain agrees that's address `0xabc...def`": without it, send-flow assertions ("verify the recipient on screen matches the address you expect") cannot be written.
-
-**`tokenAllowance`** — reads the on-chain ERC-20 allowance for `(owner, spender, token)`. Called via `runCliGetTokenAllowance`. Wrapped by `isTokenAllowanceSufficientCommand` — the pre-check that lets `ensureTokenApproval` skip the device dance when the allowance is already large enough. Output is parsed by `parseTokenAllowanceCliOutput`. This is a read-only RPC call — no signing, no broadcast, no Speculos required, fast (~1 second). The pre-check pattern (read first, only act if necessary) is what keeps `ensureTokenApproval` cheap on warm seeds.
-
-**`send --mode approve|revokeApproval`** — the same `send` command does both. With `--mode approve` and `--approveAmount N` it sets `allowances[you][spender] = N`. With `--mode revokeApproval` it sets it back to `0`. Wrapped by `runCliTokenApproval`, then by `approveTokenCommand` / `revokeTokenCommand` in `cliCommandsUtils.ts`. Forward-ref Chapter 5.4 for the layer-by-layer walkthrough and Chapter 5.6 for the broadcast gate that sits inside this command.
-
-That's the surface. Four commands. Eight or nine wrappers. Everything in Part 5 is built on these.
-
-A useful mental model: `liveData` is the "before" hook (set up state cheaply, no device required); `getAddress` and `tokenAllowance` are the "during" reads (cheap queries the test driver makes to decide what to do); `send --mode ...` is the "before / after" hook that actually moves on-chain state (expensive, requires a Speculos device, optionally broadcasts). The four commands cover the full lifecycle: prepare, observe, mutate.
-
-| Command | Cost | Speculos required? | Network call? | Mutates state? |
-|---|---|---|---|---|
-| `liveData` | low | no | no | local file only |
-| `getAddress` | low | yes (cheap, no signing) | no | no |
-| `tokenAllowance` | low | no | yes (RPC read) | no |
-| `send --mode approve\|revokeApproval` | high | yes (full signing) | yes (RPC + broadcast) | yes (when not gated) |
-
-The cost asymmetry here is exactly why the test fixtures lean so heavily on `liveData` and the pre-check pattern: the cheap operations run unconditionally; the expensive ones run only when necessary.
-
-**A note on `runCliTokenApproval`'s broadcast-on assumption.** The wrapper that produces the `send --mode approve|revokeApproval` command line does not itself manage the broadcast env. That's why both `approveTokenCommand` and `revokeTokenCommand` (the higher-level wrappers around `runCliTokenApproval`) explicitly flip `DISABLE_TRANSACTION_BROADCAST` to `"0"` before calling and restore it after. If you call `runCliTokenApproval` directly without flipping the env first — and the calling test had broadcast disabled by default — your approve / revoke will sign and silently not land. Always go through `approveTokenCommand` / `revokeTokenCommand` for approve and revoke flows; that's where the env discipline lives.
-
-### 5.1.7 The five-layer integration at a glance
-
-| # | Path | Role |
-|---|---|---|
-| 1 | `apps/cli/bin/index.js` | Legacy CLI binary (Node, Commander) |
-| 2 | `libs/ledger-live-common/src/e2e/runCli.ts` | `child_process.spawn` engine + retries |
-| 3 | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | Typed TypeScript wrappers |
-| 4 | `libs/ledger-live-common/src/e2e/families/evm.ts` | Speculos device-tap automation |
-| 5 | `e2e/desktop/tests/page/swap.page.ts`, `e2e/mobile/page/trade/swap.page.ts` | POM methods orchestrating Speculos + CLI |
-
-Read this table top-down: it's the call stack of a single revoke. A POM method (5) calls a typed wrapper (3); the wrapper builds an arg string and hands it to the spawn engine (2); the engine forks `node apps/cli/bin/index.js` (1); meanwhile, in parallel, the device-tap helper (4) drives Speculos's REST API to walk the on-screen review and press hold-to-sign. Both halves must finish for the revoke to land. Chapter 5.4 walks the full path line by line.
-
-Why five layers? Because each one solves a different concern.
-
-- Layer 1 is the binary itself, the only thing that knows how to actually build, sign, and broadcast a transaction.
-- Layer 2 isolates "spawn a Node child process" from "construct CLI args" — the spawn engine is generic, and the same `runCliCommand` services every helper.
-- Layer 3 is where typing lives: `revokeTokenCommand(account: TokenAccount, spender: string)` is checkable at compile time; the equivalent string-building inside a spec would not be.
-- Layer 4 is the bridge to Speculos. The CLI subprocess and the device-tap helper run *concurrently*: the CLI blocks waiting for an APDU response; the helper drives the screens in parallel until a hold-to-sign completes; only then does the CLI receive its signature and broadcast.
-- Layer 5 is per-feature orchestration: the swap POM knows it needs to flip `DISABLE_TRANSACTION_BROADCAST`, snapshot the Speculos port, swap to an Ethereum-app device, run the revoke, restore the port, and unflip the env. None of that belongs in a CLI wrapper; it's swap-specific glue.
-
-A diagram for orientation:
+The mobile E2E suite has a 7-phase initialization:
 
 ```
-   Spec (Playwright / Detox test file)
-       |
-       v
-   POM method (e.g. swap.page.ts:revokeTokenApproval)
-       |  flips DISABLE_TRANSACTION_BROADCAST="0"
-       |  snapshots SPECULOS_API_PORT
-       |  starts new Speculos for the right app
-       v
-   Typed wrapper (cliCommandsUtils.ts:revokeTokenCommand)
-       |  builds args: send --currency X --mode revokeApproval ...
-       v
-   Spawn engine (runCli.ts:runCliCommand)              ─╮
-       |  child_process.spawn("node", [bin, ...args])  │
-       v                                               │ in parallel
-   apps/cli (Node + Commander)                         │
-       |  signOperation → broadcast (gated by env)     │
-       |  blocks on device APDU response               │
-       ^                                               │
-       │ APDU                                          │
-       │                                               │
-   Speculos Docker container (REST API)                │
-       ^                                               │
-       │ /button, /touch, /screenshot                  │
-       │                                               │
-   families/evm.ts:approveToken()  ─────────────────── ╯
-       walks screens, presses Hold to sign for 3s
+1. GLOBAL SETUP
+   +-- Validate .env.mock, install signal handlers, configure video recording
+
+2. ENVIRONMENT SETUP
+   +-- Initialize Detox environment, configure multi-worker devices, set globals
+
+3. SUITE SETUP (beforeAll in jest.environment.ts)
+   +-- Launch app with bridge, reverse TCP ports (Android), set Allure metadata
+
+4. TEST INIT (app.init())
+   |-- Launch Speculos Docker containers in parallel
+   |-- Execute CLI commands with retry logic
+   |-- Register Speculos ports via bridge
+   |-- Load feature flag overrides via bridge
+   +-- Import accounts via bridge
+
+5. TEST RUNS (your test code)
+
+6. SUITE TEARDOWN (afterAll)
+   +-- Close bridge, stop Speculos containers
+
+7. GLOBAL TEARDOWN
+   +-- Docker cleanup, artifact collection
 ```
 
-Read this as: the typed wrapper calls the spawn engine, which forks a CLI subprocess; the CLI dials Speculos for signing; the device-tap helper, started in parallel by the POM method, drives Speculos's REST API to walk through the on-screen review and execute the hold-to-sign. When the device-tap completes, Speculos returns the APDU response to the CLI, which broadcasts (or doesn't) and exits.
+### 5.1.3 The WebSocket Bridge In Depth
 
-Every chapter from here unpacks one slice of this diagram.
-
-### 5.1.8 Footguns to know upfront
-
-Five things will catch you out if you don't know them.
-
-**The CLI is invoked as a subprocess, not a programmatic API.** `runCli.ts` calls `child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])` and reads stdout. There is no `import { send } from "@ledgerhq/live-cli"`. Every call pays Node startup cost (~300-500 ms). This is by design — the CLI was a standalone binary first, the E2E harness wrapped it later. Don't try to short-circuit with a programmatic call; the wrappers expect stdout strings.
-
-A small but important consequence: stdout parsing is the wrappers' contract. When `tokenAllowance` outputs `--format json`, the wrapper expects a parseable JSON line; when `send` outputs default text, the wrapper expects specific success / error markers. If a CLI command's output format changes — even for a "harmless" log line addition — the wrappers can break in non-obvious ways. The `parseTokenAllowanceCliOutput` helper is fragile in exactly this way: it greps for a known JSON shape inside potentially noisy stdout. This is a known sharp edge, and Chapter 5.4 covers the parsing layer in detail.
-
-**The `+` separator in arg lists.** The engine joins args with `+` and splits them back inside the spawn call:
-
-```ts
-const args = command.split("+");
-const child = spawn("node", [LEDGER_LIVE_CLI_BIN, ...args], { ... });
-```
-
-So `runCliTokenApproval` builds:
+The bridge is a WebSocket server running on the Jest side that the React Native app connects to:
 
 ```
-"send+--currency+ethereum+--mode+revokeApproval+--token+ethereum/erc20/usd_coin+--spender+0xRouter+--index+0+--wait-confirmation"
+[Jest + Detox]  <--- WebSocket --->  [React Native App]
+     |                                      |
+     |  importAccounts                      |  Receives accounts JSON
+     |  overrideFeatureFlag                 |  Toggles feature flag
+     |  navigate                            |  Changes screen
+     |  getLogs                             |  Returns app logs
+     |  addKnownSpeculos                    |  Registers Speculos device
+     +  acceptTerms                         +  Skips onboarding
 ```
 
-…which splits into the ten-element argv `apps/cli` expects. The reason: shell-escape pain is awful when args are forwarded across multiple processes and `+` never appears in real CLI arg values. If you build a custom command string with literal `+` characters in a value, you will break the splitter. Don't.
+**Why is a bridge needed?** Detox can interact with native UI elements (tap, scroll, type), but it cannot directly access or manipulate React Native app state. The bridge is the channel for state manipulation — injecting accounts, overriding flags, navigating programmatically.
 
-**`DISABLE_TRANSACTION_BROADCAST` env can silently flip behaviour.** The CLI's broadcast step is gated on `process.env.DISABLE_TRANSACTION_BROADCAST` (and the equivalent CLI flag `--disable-broadcast`). When set to `"1"` the CLI signs locally and exits without calling `bridge.broadcast(...)`. When unset or `"0"` it broadcasts. Many test files set the flag at module load; the approve / revoke wrappers temporarily flip it back to `"0"` inside a try/finally. If the finally is missing, every subsequent CLI call in the run silently broadcasts. Chapter 5.6 deep-dives this.
+### 5.1.4 Why `app.init()` is in `beforeAll` (not `beforeEach`)
 
-The "silent" part is what gets people. There is no error message when broadcast is suppressed, no warning, no log line in the default format. The CLI looks like it succeeded (it did sign), the test driver continues, and only later — when the next test reads on-chain state and finds the previous "approval" never actually landed — does the failure surface, often far from the cause. Discipline around the env flag is non-negotiable; treat it like an `O_NONBLOCK` flag on a file descriptor.
+Desktop uses Playwright fixtures which automatically create fresh state per test (new userdata directory, new Electron process). Mobile cannot afford this — launching a native app, connecting the bridge, and populating data is expensive (10-30 seconds per setup).
 
-**Speculos port mutation is global state.** The Speculos lifecycle helpers set `process.env.SPECULOS_API_PORT` (and the live-env mirror `setEnv("SPECULOS_API_PORT", port)`) so the spawned CLI knows which Docker container to connect to. This is a global mutation. Two parallel tests cannot both start Speculos on different ports without serialising the env update. Chapter 5.5 walks the snapshot/restore pattern.
+So `app.init()` runs once per describe block in `beforeAll`. All tests in that block share the app instance. This is faster but means **tests in the same block are not fully isolated** — one test's side effects can affect the next.
 
-This is also why Playwright's per-worker test parallelism interacts oddly with CLI-driven specs: each worker is its own Node process with its own `process.env`, so workers don't fight each other directly — but tests *within* the same worker that both want their own Speculos on different ports definitely do. The discipline is "one Speculos at a time per worker, snapshot/restore around any swap-in".
+**Mitigation**: Group tests that need the same setup in the same describe block. Tests that need different setups go in separate files.
 
-**Two Speculos instances cannot share a port.** Each Speculos Docker container binds to a host port to expose its REST API. The CLI subprocess uses the env-var port to dial that container. If two containers needed to share one port, the OS would reject the second `bind()`. The harness prevents this by running one Speculos at a time per worker and serialising port swaps. A test that already has one Speculos running for the Exchange app, and now wants to start a second Ethereum-app Speculos to issue a revoke, must save the previous port, launch the new device, run the revoke, and restore the previous port in `finally`. The senior's `revokeTokenApproval` POM method on `swap.page.ts` does exactly this:
+### 5.1.5 Key Differences from Desktop (Summary)
 
-```ts
-const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-try {
-  // do the revoke
-} finally {
-  await cleanSpeculos(speculos, previousSpeculosPort);
-}
-```
-
-Without the snapshot you leak the port; without the restore you break the swap test that runs next.
-
-A sixth thing worth flagging early: **there is no transactional rollback**. If a CLI revoke broadcasts and then the test fails for an unrelated reason, the on-chain state is already mutated. The revoke is permanent. Tests that broadcast must be designed assuming every successful broadcast lands and every failed broadcast leaves state in an undefined intermediate place — typically "broadcast succeeded but the harness crashed before it noticed". This is why broadcast-enabled tests almost always run on testnets with cheap, recoverable state, and why `DISABLE_TRANSACTION_BROADCAST=1` is the default in most CI paths.
-
-**Output parsing assumes a stable format.** Already mentioned in passing, but it's worth its own bullet because it is the source of the most surprising regressions. The wrappers in `cliCommandsUtils.ts` parse stdout — sometimes greping for a substring, sometimes parsing JSON. If a CLI command starts emitting an extra log line (debug print, deprecation warning, even a leading newline) the parser can break. The fix is always in the parser, not the CLI: the canonical output format is whatever the CLI emits, and the parsers accommodate it. But "test fails because the CLI now logs an extra warning" is a real failure mode. When triaging a sudden mass test failure, run the failing CLI command by hand and eyeball the stdout against what the parser expects.
-
-**Retry semantics are coarse.** The spawn engine's `runCliCommandWithRetry` retries on a list of "retryable" error patterns (network blips, RPC timeouts, transient Speculos issues). It does not retry on signing rejections, calldata errors, or "no such command". The retry policy is shared by every CLI helper, so a flake in one helper benefits all helpers — but the policy is also a cudgel: a non-retryable error fails fast and surfaces as the test failure. If you're seeing a "command failed" without retries, check the error message against `isRetryableError`'s pattern list to confirm whether the error type was eligible.
-
-### 5.1.9 What this part covers and what it does not
-
-**Covers.** `apps/cli` and the four commands above; the spawn engine in `runCli.ts`; the typed wrappers in `cliCommandsUtils.ts`; the Speculos device-tap automation in `families/evm.ts`; the POM methods in `swap.page.ts`; Speculos lifecycle (`speculosUtils.ts`); the `DISABLE_TRANSACTION_BROADCAST` flow; the daily QAA workflow; and a line-by-line walkthrough of the QAA-615 commit.
-
-**Does not cover.**
-- `apps/wallet-cli` — out of QAA scope, do not study.
-- The Speculos bot at `apps/cli/src/commands/blockchain/bot.ts` — separate stress-test surface, not part of QAA's E2E loop.
-- WalletSync via CLI (`runCliKeyRingProtocol`, `runCliLedgerSync`) — used by Ledger Sync features, not part of the approve/revoke story.
-- Deep coin-evm internals — Chapter 5.2 covers what you need about ERC-20 calldata; the bridge layer at `libs/coin-modules/coin-evm/src/cli-transaction.ts:inferTransactions` is referenced but not traced line-by-line.
-
-If a question lands in your inbox about wallet-cli, redirect to the team that owns it. QAA owns `apps/cli`.
-
-**A minimal mental model to carry into the next chapters.** The CLI exists for state. State is either off-chain (account fixtures via `liveData`) or on-chain (allowances via `tokenAllowance` to read, `send --mode approve|revokeApproval` to write). State writes need a Speculos device because the CLI needs to obtain a hardware-style signature. State writes are gated by `DISABLE_TRANSACTION_BROADCAST` — the difference between "sign and stop" (no chain mutation) and "sign and broadcast" (chain mutation). Tests choose between those modes deliberately; the wrappers help by encapsulating the env management inside try/finally blocks.
-
-Hold that picture in mind for Chapters 5.3 onward and the rest of Part 5 will compose cleanly.
-
-### 5.1.10 A first orientation in practice
-
-To make this concrete, here is what your first ten minutes with `apps/cli` look like in a typical fix-campaign flow.
-
-**Step 1 — locate the binary.** From the monorepo root:
-
-```
-$ ls apps/cli/bin/index.js
-apps/cli/bin/index.js
-```
-
-If that path doesn't exist, the prebuild hasn't run. Run `pnpm --filter @ledgerhq/live-cli build` and try again.
-
-**Step 2 — find the wrappers.** Open `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` and read end-to-end. It is short — under 250 lines — and every helper you'll touch is named in there. Pay attention to `setDisableTransactionBroadcastEnv` and the try/finally pattern around `approveTokenCommand` / `revokeTokenCommand`.
-
-**Step 3 — find the spawn engine.** Open `libs/ledger-live-common/src/e2e/runCli.ts`. Eighty lines. Read `runCliCommand` once; you now understand how every CLI invocation is wired.
-
-**Step 4 — find the device-tap layer.** Open `libs/ledger-live-common/src/e2e/families/evm.ts`. The two functions `approveTokenTouchDevices` and `approveTokenButtonDevice` are the entire device-side of the approve / revoke flow. Note that they share `approveToken()` as the entry point, which dispatches based on `isTouchDevice()`.
-
-**Step 5 — find an existing call site.** `e2e/desktop/tests/page/swap.page.ts` imports `approveTokenCommand`, `isTokenAllowanceSufficientCommand`, and (on the senior's branch) `revokeTokenCommand`. Read `ensureTokenApproval` once. This is the canonical pattern.
-
-**Step 6 — find a fixture-style call site.** Open `e2e/desktop/tests/specs/earn.v2.spec.ts` and look at any of the `cliCommands: [liveDataCommand(...)]` entries. This is the *other* canonical pattern: instead of calling a CLI helper imperatively from a POM method, you declare the CLI calls the test needs as part of the test's metadata, and the desktop fixture engine in `e2e/desktop/tests/fixtures/common.ts` runs them at the right moment. Most spec authors interact with the CLI exclusively through this pattern — they never call `runCli*` themselves; they list the curried fixture helpers in their test's `cliCommands` array and trust the engine.
-
-You now have the full call stack in your head: spec → POM method → wrapper → spawn engine → CLI binary, with the device-tap helper running in parallel. You also have the alternative entry point: spec metadata → fixture engine → curried wrapper → spawn engine → CLI binary. Everything else in Part 5 is depth on top of this skeleton.
-
-### 5.1.11 Resources
+| Aspect | Desktop | Mobile |
+|--------|---------|--------|
+| Framework | Playwright | Detox + Jest |
+| App launch | `electron.launch()` | `device.launchApp()` |
+| Fixture system | Per-test Playwright fixtures | Global `app.init()` in `beforeAll` |
+| Page access | `({ app }) =>` destructured | `app.` global variable |
+| Bridge | Not needed (Electron access) | WebSocket bridge required |
+| Parallelism | Full parallel (random ports) | 1-3 workers (device limitation) |
+| Build | Rspack bundle (~2 min) | Xcode/Gradle native (~10-30 min) |
+| Test isolation | Full (fresh app per test) | Partial (shared app per describe) |
 
 <div class="resource-box">
 <h4>Resources</h4>
 <ul>
-<li><code>apps/cli/README.md</code> — the binary's own quickstart</li>
-<li>Branch <code>support/qaa_add_revoke_token</code> @ commit <code>4fa4868a35</code> — the senior's reference implementation of <code>revokeTokenCommand</code> + <code>revokeTokenApproval</code></li>
-<li><code>libs/ledger-live-common/src/e2e/runCli.ts</code> — the spawn engine (~80 lines, read it once end-to-end)</li>
-<li><code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code> — the typed wrappers (~250 lines)</li>
-<li><code>libs/ledger-live-common/src/e2e/families/evm.ts</code> — Speculos device-tap helpers</li>
-<li><a href="https://github.com/google/zx">Google zx</a> — the prebuild scripting layer</li>
-<li><a href="https://github.com/tj/commander.js">Commander.js</a> — the CLI argument parser</li>
+<li><a href="https://wix.github.io/Detox/docs/introduction/project-setup">Detox Project Setup</a></li>
+<li><a href="https://wix.github.io/Detox/docs/guide/testing-in-ci">Detox: Testing in CI</a></li>
+<li><a href="https://jestjs.io/docs/configuration">Jest Configuration</a></li>
+<li><a href="https://reactnative.dev/docs/testing-overview">React Native Testing Overview</a></li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> <code>apps/cli</code> is the canonical QAA CLI. Sixteen blockchain commands exist; four matter (<code>liveData</code>, <code>getAddress</code>, <code>tokenAllowance</code>, <code>send --mode approve|revokeApproval</code>). The CLI is not a library — it is a subprocess invoked via <code>child_process.spawn</code>, and its behaviour is shaped by two pieces of global state: <code>SPECULOS_API_PORT</code> and <code>DISABLE_TRANSACTION_BROADCAST</code>. Get those two right and the rest of Part 5 lands cleanly.
+<strong>Key takeaway:</strong> Mobile E2E testing has more constraints than desktop: slower builds, limited parallelism, and the WebSocket bridge as an indirection layer. But the patterns are similar — Page Object Model, Speculos for device emulation, feature flag overrides. Understanding the constraints helps you design better tests.
 </div>
 
-### 5.1.12 Quiz
+### 5.1.6 Quiz
 
 <!-- ── Chapter 5.1 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 5.1 Quiz</h3>
+<h3>Quiz</h3>
 <p class="quiz-subtitle">5 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="A">
-<p><strong>Q1.</strong> Which CLI is the QAA canonical CLI?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>apps/cli</code> (<code>@ledgerhq/live-cli</code>) — Node + Commander</button>
-<button class="quiz-choice" data-value="B">B) <code>apps/wallet-cli</code> (<code>@ledgerhq/wallet-cli</code>) — Bun + Bunli + DMK</button>
-<button class="quiz-choice" data-value="C">C) Both, depending on the test</button>
-<button class="quiz-choice" data-value="D">D) Neither — QAA uses a programmatic API instead</button>
-</div>
-<p class="quiz-explanation"><code>apps/cli</code> is canonical and is what every E2E helper in <code>cliCommandsUtils.ts</code> spawns. <code>apps/wallet-cli</code> is experimental and out of scope for QAA.</p>
-</div>
-
 <div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> Why does QAA need a CLI surface in addition to Playwright (desktop) and Detox (mobile)?</p>
+<p><strong>Q1.</strong> How many spec files does the mobile E2E suite have?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The UI drivers cannot launch Ledger Live</button>
-<button class="quiz-choice" data-value="B">B) Playwright and Detox are too slow for any test</button>
-<button class="quiz-choice" data-value="C">C) The CLI handles test-data infrastructure (seeding accounts, reading allowances, signing one-shot approve / revoke tx) more cheaply and deterministically than UI drivers</button>
-<button class="quiz-choice" data-value="D">D) The CLI is required to compile the desktop app</button>
+<button class="quiz-choice" data-value="A">A) 26 (same as desktop)</button>
+<button class="quiz-choice" data-value="B">B) 73</button>
+<button class="quiz-choice" data-value="C">C) 184</button>
+<button class="quiz-choice" data-value="D">D) 250</button>
 </div>
-<p class="quiz-explanation">UI drivers test what users do; the CLI prepares the world they do it in. Allowance state determinism (Chapter 5.2) is the headline reason a CLI revoke hook exists.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q3.</strong> The CLI is invoked from tests via what mechanism?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Direct TypeScript import of <code>send</code> / <code>tokenAllowance</code> from <code>@ledgerhq/live-cli</code></button>
-<button class="quiz-choice" data-value="B">B) <code>child_process.spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])</code> in <code>runCli.ts</code></button>
-<button class="quiz-choice" data-value="C">C) HTTP request to a running CLI daemon</button>
-<button class="quiz-choice" data-value="D">D) WebSocket bridge from Detox</button>
-</div>
-<p class="quiz-explanation">The CLI is a Node subprocess, not a library. <code>runCli.ts</code> spawns <code>node apps/cli/bin/index.js</code>, captures stdout, and reports exit codes. Every call pays Node startup cost.</p>
+<p class="quiz-explanation">The mobile suite has 184 spec files covering send (68), swap (23), addAccount (17), delete (13), verify address (12), delegate (10), earn (9), settings (6), and more.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Why does <code>runCliCommand</code> join args with <code>+</code> and split them inside the spawn call?</p>
+<p><strong>Q2.</strong> Why is <code>app.init()</code> called in <code>beforeAll</code> instead of <code>beforeEach</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Commander requires <code>+</code>-separated args</button>
-<button class="quiz-choice" data-value="B">B) It enables Bash globbing of arg lists</button>
-<button class="quiz-choice" data-value="C">C) It is required by Speculos's REST API</button>
-<button class="quiz-choice" data-value="D">D) To avoid shell-escape pain when forwarding args across processes; <code>+</code> never appears in real CLI arg values</button>
+<button class="quiz-choice" data-value="A">A) Because Detox doesn't support <code>beforeEach</code></button>
+<button class="quiz-choice" data-value="B">B) Because the tests don't need any setup</button>
+<button class="quiz-choice" data-value="C">C) Because Jest requires it for parallel execution</button>
+<button class="quiz-choice" data-value="D">D) Because launching a native app, connecting the bridge, and populating data is expensive (10-30s) — doing it per test would be prohibitively slow</button>
 </div>
-<p class="quiz-explanation">The <code>+</code> separator is a convention. The engine splits on <code>+</code> before passing argv to <code>spawn</code>, which itself does not invoke a shell — the trick is purely about safely composing the arg string in a single TypeScript variable.</p>
+<p class="quiz-explanation">Unlike desktop (where Playwright fixtures quickly create fresh state), mobile app launch and bridge connection take 10-30 seconds. Running this per test would make the suite impractically slow.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q3.</strong> What is the consequence of mobile tests sharing the app instance within a <code>describe</code> block?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Tests run faster but can't use Speculos</button>
+<button class="quiz-choice" data-value="B">B) Tests are not fully isolated — one test's side effects can affect the next</button>
+<button class="quiz-choice" data-value="C">C) Tests must be run sequentially and can never be parallelized</button>
+<button class="quiz-choice" data-value="D">D) Test results are merged into a single pass/fail outcome</button>
+</div>
+<p class="quiz-explanation">Shared state means a test that navigates to a different screen or changes a setting can affect subsequent tests. This is why test grouping (same setup = same describe) is critical in mobile E2E.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q5.</strong> What does <code>LEDGER_LIVE_CLI_BIN</code> resolve to?</p>
+<p><strong>Q4.</strong> What does the WebSocket bridge do that Detox cannot?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) An absolute path to <code>apps/cli/bin/index.js</code> computed via <code>path.resolve(__dirname, "../../../../apps/cli/bin/index.js")</code></button>
-<button class="quiz-choice" data-value="B">B) The string <code>"ledger-live"</code> resolved via <code>$PATH</code></button>
-<button class="quiz-choice" data-value="C">C) An npm package URL</button>
-<button class="quiz-choice" data-value="D">D) The path to <code>apps/wallet-cli/bin/index.js</code></button>
+<button class="quiz-choice" data-value="A">A) Manipulate React Native app state (inject accounts, override feature flags, navigate programmatically)</button>
+<button class="quiz-choice" data-value="B">B) Tap on UI elements and scroll through lists</button>
+<button class="quiz-choice" data-value="C">C) Take screenshots and record video</button>
+<button class="quiz-choice" data-value="D">D) Launch the app and manage the device lifecycle</button>
 </div>
-<p class="quiz-explanation">The constant in <code>runCli.ts</code> is a relative-path resolution from the compiled location of <code>runCli.ts</code> back up to the monorepo root and into <code>apps/cli/bin/index.js</code>. It does not depend on <code>$PATH</code> and it does not use the <code>ledger-live</code> bin alias.</p>
+<p class="quiz-explanation">Detox handles UI interaction (tap, type, scroll) and device management. The bridge handles state injection — things like loading accounts, setting feature flags, and navigating to specific screens that would be slow or impossible via UI interaction alone.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> Mobile E2E build times are significantly longer than desktop. What is the approximate range?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) ~30 seconds (Rspack bundle)</button>
+<button class="quiz-choice" data-value="B">B) ~2 minutes (same as desktop)</button>
+<button class="quiz-choice" data-value="C">C) ~10-30 minutes (Xcode/Gradle native build)</button>
+<button class="quiz-choice" data-value="D">D) ~1 hour (full monorepo rebuild)</button>
+</div>
+<p class="quiz-explanation">Mobile builds require native compilation through Xcode (iOS) or Gradle (Android), which is significantly slower than desktop's Rspack JavaScript bundle. This is why mobile CI caches build artifacts aggressively.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -407,647 +221,631 @@ You now have the full call stack in your head: spec → POM method → wrapper �
 ---
 
 
-## Approvals and revokes — the blockchain primer
+## Writing Your First Mobile E2E Test
 
 <div class="chapter-intro">
-Before we walk the five layers of CLI integration, you need a mental model of what an ERC-20 approval actually <em>is</em> on chain — and why the state it creates is the QA problem the revoke hook exists to solve. This chapter is a focused primer: ERC-20 storage, the <code>approve</code> selector, calldata layout, the unlimited-approval footgun, and how the Ledger device clear-signs the operation.
+Time to write mobile code. This chapter mirrors Chapter 4.2 but for the mobile platform. You will see real mobile test patterns, the helper functions that simplify Detox interactions, and how to translate between desktop and mobile test styles. By the end, you will have a template for your first mobile E2E test.
 </div>
 
-### 5.2.1 What you'll learn
+### 5.2.1 Simple Mobile Test (No Device)
 
-You will learn how ERC-20 token contracts store balances and allowances; what the `approve(address,uint256)` function does at the calldata level; why allowances persist across test runs and break determinism; and how `revoke` is the same function with `amount = 0`. Forty minutes of theory, then we wire it into the CLI in Chapter 5.3 onward. If you already know ERC-20 inside out, skim 5.2.6 (the QA framing of why the state matters) and 5.2.9 (clear-sign behaviour on the device) — those are the QA-specific pieces that connect the blockchain primer to the rest of Part 5.
+```typescript
+describe("Language Change", () => {
+  beforeAll(async () => {
+    await app.init({
+      speculosApp: undefined,  // No device needed
+      cliCommands: [],
+      featureFlags: {},
+    });
+  });
 
-### 5.2.2 ERC-20 storage model
-
-An ERC-20 token contract holds two pieces of state, both indexed by Ethereum address:
-
-```
-USDC contract @ 0xA0b8...eB48:
-  balances: {
-    0xYou:   100_000_000   // 100 USDC (6 decimals)
-    0xAlice:  50_000_000   // 50 USDC
-    ...
-  }
-  allowances: {
-    0xYou: {
-      0xUniswap: 0
-      0xLifi:    0
-      0xRouter:  100_000_000   // you've allowed Router to spend 100 USDC of yours
-    }
-    0xAlice: { ... }
-  }
+  it("should change app language to French", async () => {
+    await app.portfolio.navigateToSettings();
+    await app.settings.openGeneralSettings();
+    await app.settingsGeneral.changeLanguage("Francais");
+    await expect(element(by.text("General"))).toBeVisible();
+  });
+});
 ```
 
-`balances[addr]` answers "how much do I own?". `allowances[owner][spender]` answers "how much of `owner`'s balance is `spender` allowed to move on `owner`'s behalf?". Both are persistent on-chain state. Both survive every off-chain restart you can think of: simulator restarts, repo re-clones, CI runner recycles, your laptop reboot.
+### 5.2.2 Mobile Test With Speculos
 
-The only way to change `allowances[you][spender]` is to send a transaction that calls a function on the token contract — almost always `approve(spender, newAmount)`.
+```typescript
+const transaction = {
+  accountToDebit: Account.ETH_1,
+  accountToCredit: Account.ETH_2,
+  amount: "0.00001",
+  speed: Fee.SLOW,
+};
 
-Two storage details matter for QA work. First, `balances[addr]` and `allowances[owner][spender]` are *separate* mappings; spending allowance does not move balance. A spender contract calls `transferFrom(owner, recipient, amount)`, which atomically decreases `allowances[owner][spender]` by `amount` and decreases `balances[owner]` by `amount` (transferring it to `recipient`). A revoke does not refund balance — it only zeroes the delegation. Second, every token contract is its own state silo: USDC's allowances map is independent of USDT's, of DAI's, of every other ERC-20. Revoking USDC does nothing for USDT. Tests that touch multiple tokens need a revoke per token they touched.
+describe("Send ETH", () => {
+  beforeAll(async () => {
+    await app.init({
+      speculosApp: transaction.accountToDebit.currency.speculosApp,
+      cliCommands: [
+        liveDataCommand(transaction.accountToDebit),
+        getAddressCommand(transaction.accountToCredit),
+      ],
+      featureFlags: {},
+    });
+  });
 
-A worked illustration of the two-mapping separation:
+  afterAll(async () => {
+    await app.common.removeSpeculos();
+  });
 
-```
-Before:
-  USDC.balances[Alice]            = 1000
-  USDC.allowances[Alice][Router]  = 100
-
-Alice signs and sends:
-  Router.swapExactTokensForETH(100, ...) on Router contract
-
-Inside Router.swap(...):
-  Router calls USDC.transferFrom(Alice, Router, 100)
-  USDC contract atomically:
-    balances[Alice]            -= 100   → 900
-    balances[Router]           += 100   → +100
-    allowances[Alice][Router]  -= 100   → 0
-  Router then routes the 100 USDC through pools, eventually
-  sending ETH to Alice.
-
-After:
-  USDC.balances[Alice]            = 900
-  USDC.allowances[Alice][Router]  = 0   (consumed exactly)
-  Alice received some ETH (off the USDC contract)
-```
-
-In this example the swap consumed the allowance exactly, so the post-state allowance is already zero — no explicit revoke needed. In practice, most swaps approve a slippage-padded amount (the `× 1.2` in `ensureTokenApproval`), the swap consumes only the actual amount, and a small leftover allowance remains. That leftover is benign but persistent — the next test sees a non-zero allowance and may take a different on-device path. Hence the revoke hook.
-
-### 5.2.3 Why allowances exist
-
-ERC-20 was finalised as EIP-20 in late 2015. The original design separated two concerns:
-
-1. **Ownership.** Only the address that owns tokens can move them.
-2. **Delegation.** A protocol (a DEX, a lending market, a staking contract) needs to move user tokens during a swap or deposit, but the user does not want to send tokens to the protocol first and then trust it to send them back.
-
-Allowances are the delegation primitive. The user calls `approve(spender, N)` once, and afterwards the spender contract can call `transferFrom(user, anywhere, ≤N)` without the user signing each individual movement. The user remains the owner; the spender is a bounded delegate.
-
-This is why every ERC-20 swap, every Aave deposit, every Compound supply, every staking deposit starts with an approval transaction. It's also why "infinite approvals" became the industry default — and why they're a security footgun (5.2.8).
-
-The flow for a typical swap, from the chain's point of view:
-
-```
-Tx 1:  user --approve(Router, 100)--> USDC contract
-       (sets allowances[user][Router] = 100; gas: ~46k)
-
-Tx 2:  user --swap(usdc=100, ...)--> Router
-       Inside Router's logic:
-         Router --transferFrom(user, Router, 100)--> USDC contract
-         (atomically: allowances[user][Router] -= 100, balances[user] -= 100,
-          balances[Router] += 100)
-         …Router then routes those 100 USDC through one or more pools,
-         eventually delivering output tokens back to the user…
+  it("should send ETH successfully", async () => {
+    await runSendTest(transaction);
+  });
+});
 ```
 
-Two transactions, two signatures. The approval is the user saying "yes, this Router can take up to 100 USDC of mine"; the swap is what the Router does with that permission. After the swap completes, `allowances[user][Router]` is back to 0 (the swap consumed exactly the approved amount). If the user had infinite-approved, the allowance would still be near-infinite afterwards — which is convenient, and dangerous.
-
-### 5.2.4 The approve operation
-
-`approve(address spender, uint256 amount)` is a standard ERC-20 function. Its 4-byte selector is the first four bytes of the keccak-256 hash of the function signature:
-
-```
-keccak256("approve(address,uint256)")[0:4] = 0x095ea7b3
-```
-
-Calldata for `approve(0xRouter, 100)` is sixty-eight bytes:
-
-```
-0x095ea7b3                                                          // 4-byte selector
-  000000000000000000000000<20-byte-spender-address>                 // 32 bytes: spender, left-padded
-  000000000000000000000000000000000000000000000000000000000000_0064 // 32 bytes: amount = 100, left-padded
-```
-
-Concretely, an approve-100-USDC tx to Router `0x1111...2222` looks like:
-
-```
-0x095ea7b3
-00000000000000000000000011111111111111111111111111111111_22222222
-0000000000000000000000000000000000000000000000000000000000000064
-```
-
-(Whitespace and `_` added for readability; the on-chain bytes are contiguous.)
-
-The Ledger device, when displaying this transaction, recognises the selector `0x095ea7b3` and decodes the two arguments. Instead of the generic "Contract Data — Are you sure?" warning that unrecognised contract calls trigger, the device renders a clear-sign screen: "Approve <token>", amount, spender. We come back to this in 5.2.9.
-
-For QAA work, the calldata is built by `getErc20ApproveData(spender, amount)` in the EVM family of `libs/coin-modules/coin-evm`. You do not construct the calldata yourself — the CLI does it for you when you pass `--mode approve --token X --spender Y --approveAmount N`. Knowing the layout matters only when you're debugging: if a test broadcasts a tx and Etherscan decodes the input data unexpectedly, walk the bytes against this table to confirm the selector is `0x095ea7b3` and the two 32-byte words match the expected spender and amount. A mismatch usually means the test passed the wrong `--token` or `--spender` flag and the CLI built calldata against the wrong contract or recipient.
-
-A worked decode of a real revoke calldata blob:
-
-```
-0x095ea7b3                                                         ← approve selector
-000000000000000000000000a73c628eaf6e283e26a7b1f8001cf186aa4c0e8e   ← spender (the Router)
-0000000000000000000000000000000000000000000000000000000000000000   ← amount = 0 (revoke)
-```
-
-That's all 68 bytes. The transaction's `to` field is the token contract (e.g. USDC's `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` on mainnet), the `value` is `0` (you're not sending ETH), and the `data` field is the 68 bytes above. The signed transaction wraps these in the standard Ethereum tx envelope — nonce, gas params, signature — but the *intent* is fully captured in the calldata.
-
-If you ever need to hand-verify what `apps/cli` produced, an Etherscan tx-input decoder or a quick Python `eth_abi.decode(['address','uint256'], data[4:])` will give you back the spender and amount. This is how Chapter 5.8 verifies that the senior's revoke commit produces the right calldata for the right spender.
-
-A short note on EVM endianness: all `uint256` values, including `amount`, are encoded as **big-endian** 32-byte words. The decimal value `100` becomes `0x...0064` at the rightmost end of the 32-byte slot, padded with zeros on the left. The decimal value `2^256 − 1` becomes `0xFFFF...FFFF` (all 32 bytes set). Do not get confused if you eyeball calldata and see "lots of leading zeros, then a small number at the end" — that is the canonical encoding, not a bug. The selector itself (`0x095ea7b3`) is the only piece that's not 32-byte-aligned; selectors are 4 bytes by design, and Solidity dispatch logic reads exactly the first 4 bytes of calldata.
-
-Token decimals also matter when reading amounts. USDC has 6 decimals: `100_000_000` in the calldata means 100 USDC. ETH and most tokens have 18 decimals: `100000000000000000000` means 100 tokens. If a test logs an amount as raw smallest-units, multiplying by `10^decimals` in your head saves a lot of "wait, did we approve 100 USDC or 100 micro-USDC?" confusion.
-
-### 5.2.5 Three operations, one function
-
-| Op | Calldata | On-chain effect |
-|---|---|---|
-| Approve N | `0x095ea7b3 + spender(32) + N(32)` | `allowances[you][spender] = N` |
-| Revoke | `0x095ea7b3 + spender(32) + 0(32)` | `allowances[you][spender] = 0` |
-| Unlimited | `0x095ea7b3 + spender(32) + (2^256 − 1)(32)` | `allowances[you][spender] = 2^256 − 1` |
-
-All three are the same function. The only difference is the amount. There is no separate `revoke()` function on standard ERC-20 — revoke is a convention that means "approve zero".
-
-Some newer tokens implement `increaseAllowance` and `decreaseAllowance` to mitigate a 2017-era race condition (the "approve front-running" bug), but those are extensions; the core ERC-20 spec only has `approve`.
-
-The race condition: if `allowances[user][spender] = 100` and the user wants to change it to `50`, the spender can race the new approval — `transferFrom` 100 first, then receive the new approval of 50, then `transferFrom` another 50, for a total of 150 against the user's stated intent. The mitigation that wallets and dApps adopted: revoke first (set to 0), then re-approve to the new value. Two transactions, two signatures, no race window. This is why most "change allowance" UIs do the two-step dance even today.
-
-For QAA, the practical implication is that a clean test pre-state is *zero allowance*, not "the right allowance". The revoke hook gets you to a known floor; the test then sets up the exact allowance it wants. That's structurally simpler than trying to detect "is the current allowance the one I want?" and conditionally adjusting it.
-
-The race condition also clarifies why "approve, do the thing, revoke" is the safe full-cycle test pattern: every step has a deterministic on-chain effect, and the post-state matches the pre-state (zero), so the test is fully reversible. Compare with "increase by N, do the thing, decrease by N": same in-flight semantics, but it relies on `increaseAllowance` / `decreaseAllowance` being implemented (not all tokens do) and on no other test having mutated the slot in between.
-
-**Why no separate revoke ABI?** Because adding a function to a deployed token contract is impossible without redeploying. ERC-20 was finalised in late 2015; tokens deployed since then ship with whatever ABI they had at deploy time. A new function in the standard would only apply to newly-deployed tokens. Convention won out: every wallet, every dApp, every block explorer agreed that "revoke" means "approve zero", and that convention is now load-bearing. The same logic applies to anything else you might wish ERC-20 had — there's no way to add it retroactively to existing tokens, so the ecosystem either lives without it or layers external infrastructure (off-chain indexers, helper contracts) on top.
-
-This convention does have a gotcha. Some token contracts implement non-standard `approve` semantics — refusing to allow a non-zero approve when the current allowance is non-zero (USDT historically did this). For those tokens, the only path to change a non-zero allowance is "approve zero, then approve the new amount" — two transactions. QAA tests that touch such tokens need the revoke step woven into normal flow, not just as an end-of-test cleanup.
-
-### 5.2.6 Why allowance state is the QA problem
-
-Allowance state lives on the token contract on-chain. It is not in your repo. It is not in `~/.ledger-live`. It is not in the Speculos Docker volume. It is on the chain.
-
-That means:
-
-- A run that broadcasts `approve(Router, 100)` permanently leaves `allowances[seed][Router] = 100`.
-- The next run starts with `allowances[seed][Router] = 100` already in place, regardless of how clean your local environment is.
-- A "fresh approval" device screen now reads "you already approved 100 — approve 50 more?" — different copy, different screen count, different hold-to-sign timing.
-- Any test that asserts the device shows "Approve 50 USDC" against the previous state's "Approve 50 more USDC" fails on a string mismatch.
-
-**Worked example.** Nightly run #1 issues `approve(Router, 100)` against the QAA test seed at 02:00. The test passes. The on-chain allowance is now 100. Nightly run #2 starts at 02:00 the next day. The test fixture imports the same seed, opens the same swap flow, taps "Allow", and the device — which queries the token contract via the network plugin — reads the existing 100 and renders an "increase allowance" flow instead of an "initial approval" flow. The test driver waits for the "Initial approval — Hold to sign" label, never sees it, times out, fails.
-
-Nothing in the test driver, the simulator, or the harness changed between run #1 and run #2. Only the chain state did. Without a revoke hook between iterations, every nightly run after the first is a different test from the first one.
-
-That is the QA problem. Manual revoke tools (Chapter 5.3) are the human fallback. The CLI revoke hook (the senior's commit, walked in Chapter 5.8) is the automated solution.
-
-Three more failure modes worth naming, because each one looks like a different bug but has the same root cause:
-
-- **"Test passes locally, fails in CI."** The CI runner uses a shared seed that nightlies have already touched; your laptop uses a freshly-revoked seed because you ran revoke.cash an hour ago. Same code, different chain state, different test outcome.
-- **"Test passes the first time, fails on the second."** First run leaves an allowance behind; second run sees the increase-allowance flow instead of the fresh-approval flow.
-- **"Test passes for a week, then starts failing for no reason."** Some other test in the same suite started broadcasting (perhaps a teammate flipped `DISABLE_TRANSACTION_BROADCAST` to `0` for a debugging session and forgot the `finally`), accumulated allowance state on the shared seed, and now your assertion against fresh-approval copy breaks.
-
-All three are the same problem in different costumes. The cure is the same: revoke between iterations, on a known-clean seed, with discipline around the broadcast env (Chapter 5.6).
-
-**The seed matters.** QAA's test seed is shared infrastructure. Multiple developers, multiple CI runs, multiple debugging sessions touch the same address space on the same testnets. The chain doesn't care that "this allowance came from Alice's local debugging at 3pm and should be irrelevant to Bob's nightly at 2am" — they're the same `(owner, spender, token)` triple as far as the storage slot is concerned. Hygiene around the test seed is a team-level discipline, not just a per-test concern. Chapter 5.3 covers the manual cleanup tools because human-driven hygiene is a real part of the workflow, not just an emergency fallback.
-
-A useful comparison: think of the test seed like a shared development database. You wouldn't expect tests to run reliably on a database that other people are mutating concurrently and that doesn't get cleaned between runs. The seed-on-chain situation is structurally identical, except (a) you can't `TRUNCATE TABLE allowances` to reset, you have to issue revoke transactions one by one, and (b) the cleanup costs gas. Hence the importance of making the cleanup automatic via the CLI hook, and of running broadcast-enabled tests on testnets where gas is free and transaction throughput is high.
-
-**The opposite of "broadcast" is not "do nothing" — it's "sign and discard".** The CLI still runs through the full sign flow when broadcast is disabled: it prompts the device, walks the screens, builds an APDU, gets a signature back, and then does *not* push the signed bytes to chain. This is the right behaviour for tests that want to assert "the device shows the right approval screen" without touching state — the signing exercise is real, but the on-chain consequence is absent. The wrappers around `approveTokenCommand` and `revokeTokenCommand` flip this exact behaviour: they need broadcast on, because the *point* of the call is the on-chain mutation, not the screen flow assertion.
-
-A subtler point about the `Approval` event: every `approve(spender, N)` emits `Approval(owner, spender, N)`. Indexers and block explorers consume this event to display "current allowances per token" views. revoke.cash, for example, builds its UI by walking `Approval` events for a given owner and computing the current state per `(token, spender)` pair. That is why a revoke that doesn't actually change state still emits the event, and why you can verify a revoke landed by looking for the `Approval(_, _, 0)` log on the broadcast tx receipt. If the receipt has the event but the on-chain `allowance(owner, spender)` query returns non-zero, you've found a divergence — most likely between the broadcast you observed and a later approve that crossed it on the wire. This rarely happens in QA testing because tests run sequentially per worker, but it's a useful debugging concept.
-
-The cross-check is also useful when verifying that a CLI revoke actually landed in CI. The CLI returns "broadcast successful" when the RPC accepts the tx — that doesn't mean it's mined. A test that needs the post-revoke state to be observable should `--wait-confirmation` (which polls until the tx is included in a block), and afterwards a `tokenAllowance` read can confirm the slot is zero. Three sources of truth: the wait-confirmation succeeded, the tx receipt has the `Approval(_, _, 0)` event, and the `allowance(owner, spender)` query returns zero. All three agreeing is the definition of "the revoke landed".
-
-### 5.2.7 Revoke = approve(spender, 0)
-
-Mechanically, a revoke is identical to an approve with `amount = 0`. Same selector, same calldata layout, same gas profile, same APDU shape on the Ledger device, same on-chain receipt format. There is no distinct "revoke" event in the ERC-20 standard; the `Approval(owner, spender, 0)` event a revoke emits is the same shape as the event an "approve zero" emits.
-
-The Ledger device's clear-sign decoder is what makes the user-facing experience differ. When the firmware's ERC-20 plugin recognises `amount == 0`, it may render the screen as "Revoke <token>" instead of "Approve <token>, Amount: 0". The exact wording depends on firmware version and device family.
-
-> **Verify:** the exact device-screen text on Stax / Flex / Nano S+ for `amount == 0` (e.g., "Revoke USDC" vs "Approve USDC — Amount: 0"). Confirm by running `apps/cli` in `--mode revokeApproval` against a Speculos Ethereum device and reading <code>fetchCurrentScreenTexts</code> output. The CLI integration tests use whichever literal label `DeviceLabels.HOLD_TO_SIGN` resolves to; the QAA E2E layer never needs to assert the visual revoke vs approve-zero wording explicitly.
-
-The on-chain receipt is indistinguishable from any other allowance change. A block explorer like Etherscan typically labels both `approve(spender, 0)` and `approve(spender, N)` as "Approve" in its decoded function-call view, with the amount column reading 0 for revokes.
-
-Practically, this means three things for QAA work:
-
-1. The CLI's `--mode revokeApproval` produces the same calldata shape as `--mode approve` with `amount = 0`. There is no separate "revoke" code path inside `apps/cli`; both modes route through the same EVM transaction builder, just with different amounts.
-2. The Speculos device-tap helper `approveToken()` works for both modes without modification. Same screen sequence, same hold-to-sign, same final APDU.
-3. The on-chain receipt for a revoke is fungible with any zero-amount approve: a tx that sets allowance to zero by any means produces the same `Approval(owner, spender, 0)` event. This is why Etherscan's "Token Approvals" view treats both interchangeably and why revoke.cash's "is this revoked?" check is a simple "is the current allowance zero?" query.
-
-A subtle behaviour: the EVM allows zero-amount approvals to skip the actual SSTORE if the slot is already zero. Some token contracts implement this optimisation (writing to a slot that's already `0` costs gas; emitting a no-op event might be skipped). Most don't. From the test's point of view, calling `approve(spender, 0)` against an already-zero slot is a no-op — it broadcasts, costs gas, emits an `Approval(owner, spender, 0)` event, and the post-state is still zero. Idempotent in the on-chain sense.
-
-This idempotence is why `revokeTokenApproval` has no pre-check the way `ensureTokenApproval` does. `ensureTokenApproval` checks "is the allowance already at least N?" and skips if yes (saves a device dance and a broadcast). `revokeTokenApproval` just always revokes — the cost is small, the result is deterministic, and the conditional logic to skip would itself be a possible source of bugs. "Always revoke" is simpler and correct.
-
-### 5.2.8 Unlimited approval — the security footgun
-
-`amount = 2^256 − 1` (the max `uint256` value, often displayed as `0xFFFF...FFFF`) is the "infinite approval" pattern. dApps adopted it for two reasons:
-
-- **Gas savings.** One `approve(spender, ∞)` is cheaper than approving each swap individually.
-- **UX.** The user signs one approval, then every subsequent swap is a single signature instead of two (approve + swap).
-
-The cost: if the spender contract is ever compromised — by an upgrade, an admin-key takeover, a logic bug, a governance attack — the attacker can `transferFrom(victim, attacker, victim_balance)` for every victim that infinite-approved that contract. This was the vector in the BadgerDAO front-end compromise of December 2021 (~$120M drained), in multiple 2022 phishing campaigns where users were tricked into infinite-approving drainer contracts, and in the rolling pattern of "approval phishing" that revoke.cash exists to clean up.
-
-The industry response: wallet UI warnings on infinite approvals, the rise of EIP-2612 `permit` (signature-based approvals with no on-chain allowance write), and revoke.cash itself.
-
-EIP-2612 `permit` is worth a sentence because it occasionally appears in test scenarios. It lets a token holder sign an off-chain message authorising a spender for a specific amount with a specific deadline; the spender contract then submits both the user's `permit` signature and the swap call in a single transaction. Net effect: the user signs once instead of twice, and there's no persistent on-chain allowance to clean up afterwards. From a QAA determinism perspective, `permit`-based flows are easier — they leave no allowance state behind. But not all tokens implement `permit`, and Ledger's clear-sign for `permit` is a separate device flow with its own labels. If a test exercises a permit flow, the device-tap helper needs a different label set and `revokeTokenApproval` is irrelevant (no allowance to revoke). For now, the QAA mainstream is still classic `approve` + revoke.
-
-The pragmatic posture for tests: assume classic `approve` until proven otherwise; if a token is `permit`-capable and the dApp under test uses `permit`, design the test around the no-allowance semantics; if a test mixes both (some flows use `permit`, some don't), keep the revoke hook for the classic-approve flows and skip it for `permit` flows. A single test should not change which flow it uses run-to-run; deterministic test design picks one and sticks with it.
-
-QAA tests almost never use unlimited approval. The `ensureTokenApproval` helper passes `minAmount × 1.2` (a 20% slippage buffer over the swap amount), not `2^256 − 1`. We use exact, finite amounts so the device renders the same screen flow every run, and so the revoke hook can cleanly zero the slot when the test ends.
-
-There is one place QAA might legitimately want to test infinite approval: a regression test for the device's "infinite-approval warning" screen. If product behaviour requires a different on-device warning when the amount is `2^256 − 1`, that path needs explicit coverage. But that's a single-purpose test, not the default. Every other ERC-20 swap / earn / delegate test uses finite amounts.
-
-> **Verify:** the exact threshold above which Ledger firmware considers an amount "effectively infinite" and shows a warning screen. Older firmware checks for the literal `2^256 − 1`; newer firmware may use a heuristic threshold (e.g. amount > 10^28). If a test needs to assert "the warning appears", confirm with current firmware behaviour first.
-
-**A subtle gas point.** A revoke transaction costs gas. On Ethereum mainnet that's anywhere from a few cents (when the network is quiet) to several dollars (when it's congested). On testnets it's effectively free. QAA tests run on testnets specifically so the cost-per-revoke doesn't matter. If a future test ever needs to run against mainnet (e.g. a real-money smoke test), the cumulative cost of revoke hooks across many test runs becomes a budget item — at which point the team would weigh "broadcast disabled" coverage against "fully on-chain" coverage and make an explicit choice. For day-to-day work, "always revoke after every test that approved" is the right default.
-
-### 5.2.9 Clear-sign behaviour on the Ledger device
-
-When the Ledger device receives an Ethereum transaction whose `to` field is an ERC-20 contract and whose calldata starts with `0x095ea7b3`, the firmware's ERC-20 plugin decodes the calldata into structured fields:
-
-- The token symbol (resolved from the `to` address via the device's bundled token registry, or via a "trusted name" plugin response signed by Ledger's services).
-- The spender address.
-- The amount, formatted with the token's decimals.
-
-Instead of the fallback "Contract Data — Are you sure?" warning that displays for unrecognised contract calls, the device shows a sequence like:
-
-```
-Review transaction
-Approve <token>
-Amount: <human-readable>
-Spender: <0xabc...def>
-[Hold to sign]
+### 5.2.3 Desktop to Mobile Translation
+
+Here's a side-by-side comparison:
+
+| Desktop (Playwright) | Mobile (Detox) |
+|---------------------|----------------|
+| `import { test } from "tests/fixtures/common"` | `import { app } from "../page"` (global) |
+| `test.describe("...", () => {` | `describe("...", () => {` |
+| `test.use({ userdata: "..." })` | `beforeAll(() => app.init({ ... }))` |
+| `test("...", async ({ app }) => {` | `it("...", async () => {` |
+| `await app.mainNavigation.openSettings()` | `await app.portfolio.navigateToSettings()` |
+| `page.getByTestId("btn")` | `element(by.id("btn"))` |
+| `page.getByTestId("btn").click()` | `element(by.id("btn")).tap()` |
+| `page.getByTestId("input").fill("text")` | `element(by.id("input")).typeText("text")` |
+| `expect(locator).toBeVisible()` | `await waitFor(element(by.id("x"))).toBeVisible().withTimeout(10000)` |
+
+### 5.2.4 Template: Write Your Own Mobile Test
+
+New specs live under `e2e/mobile/specs/<area>/<name>.spec.ts` (e.g. `e2e/mobile/specs/settings/myFeature.spec.ts`). Shared test enums (`Account`, `Provider`, `Addresses`, `Fee`, …) live in `@ledgerhq/live-common/e2e/enum/...`; local page objects, helpers, and utils use relative imports inside `e2e/mobile/`.
+
+```typescript
+// e2e/mobile/specs/<area>/myFeature.spec.ts
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+
+describe("MY FEATURE NAME", () => {
+  beforeAll(async () => {
+    await app.init({
+      speculosApp: undefined,       // or account.currency.speculosApp
+      cliCommands: [],               // or [liveDataCommand(account)]
+      featureFlags: {},              // or { myFlag: { enabled: true } }
+    });
+  });
+
+  afterAll(async () => {
+    await app.common.removeSpeculos();
+  });
+
+  it("should do something", async () => {
+    await app.portfolio.waitForPortfolioPageToLoad();
+    await app.portfolio.navigateToSettings();
+    await waitForElementById("settings-screen", 10000);
+  });
+});
 ```
 
-This is the screen sequence `families/evm.ts:approveTokenTouchDevices` walks via `pressUntilTextFound(DeviceLabels.HOLD_TO_SIGN)` and `longPressAndRelease(DeviceLabels.HOLD_TO_SIGN, 3)`. The button-device variant uses `pressUntilTextFound(DeviceLabels.SIGN_TRANSACTION)` and a both-buttons press to confirm.
+The `beforeAll(() => app.init({...}))` pattern above is the one most specs use directly (see `e2e/mobile/specs/languageChange.spec.ts` for a canonical example).
 
-Two things matter for QAA. First, the device-tap automation is keyed off the *labels* (`DeviceLabels.*` constants), not absolute screen positions, so it survives minor copy changes. Second, both `--mode approve` and `--mode revokeApproval` go through the *same* clear-sign path on the device — only the amount field differs. The Speculos device-tap helper does not need to branch on mode; it just walks "Review → press until Hold to sign → hold". Forward-ref Chapters 5.4 and 5.5.
+**Alternative idiom — thin spec + shared driver.** Several feature areas (notably `specs/swap/`) have moved to a pattern where the `.spec.ts` file is a short data bundle that delegates to a `runXxx(...)` driver in a sibling `*.other.ts` / `*.ts` module. The driver owns `describe()`, `beforeAll()`, and `it()`. This keeps dozens of closely-related scenarios DRY. You'll see this in the QAA-702 walkthrough (Chapter 5.10).
 
-If clear-sign is *not* available — for an unrecognised token contract, an unrecognised chain, or a firmware that lacks the ERC-20 plugin — the device falls back to the generic "Contract Data — Are you sure?" warning. That warning *can* be signed (with a "I accept the risk" toggle in the firmware's settings on some device families), but the test would need to drive a different label sequence. QAA tests by default run on chains and tokens where clear-sign is reliable; if you add a new chain to the matrix and the device falls back to generic-contract-data, expect the device-tap helper to need a new label set.
+### 5.2.5 Helper Functions Reference
 
-Two more subtleties of clear-sign worth noting:
+The most commonly used helpers from `e2e/mobile/helpers/elementHelpers.ts`:
 
-- **Token recognition is data-driven.** The firmware ships a registry of known token contracts; for tokens outside that registry, Ledger's "trusted name" service can sign a JSON descriptor at the wallet level that the firmware verifies before rendering. If neither path resolves, clear-sign degrades to "Approve <unknown token at 0x...>" — which is still better than the fully generic warning but worse than a clean named display.
-- **Spender display.** The device shows the spender as a hex address by default. Some firmware versions can resolve known spender addresses (e.g. major DEX routers) to human-readable names via the same trusted-name infrastructure. If your test asserts on the spender display, know whether the spender for the chain / version under test resolves to a name or to a raw hex.
+```typescript
+await tapById("send-button");                    // Tap by test ID
+await tapByText("Confirm");                      // Tap by visible text
+await typeTextById("amount-input", "0.001");     // Type into a text field
+await waitForElementById("success-msg", 30000);  // Wait for element
+await scrollToId("account-row-bitcoin");         // Scroll until element visible
+const text = await getTextOfElement("balance");  // Read text content
+```
 
-For most QAA work on mainstream EVM chains and well-known tokens, clear-sign just works. The edge cases above are worth knowing exist; they're rarely the thing that breaks a test on a normal day.
+These wrappers reduce the verbosity of raw Detox API calls and provide consistent timeout handling.
 
-> **Verify:** older firmware versions or non-ERC-20 token standards (ERC-721, ERC-1155, BEP-20 on BSC) may render different labels. The QAA-canonical path is ERC-20 on EVM L1s with current production firmware. If a test introduces a new chain or asset class, re-verify the device labels with <code>fetchCurrentScreenTexts</code> on a real Speculos run before relying on <code>approveToken()</code>.
-
-An aside on the touch-device flow specifically: on Stax and Flex, the "Hold to sign" gesture is a three-second hold on a specific UI region, not a button press. The Speculos device-tap helper simulates this with `longPressAndRelease(DeviceLabels.HOLD_TO_SIGN, 3)`. If the user releases early — or the helper sleeps less than three seconds — the firmware aborts the signature and the CLI subprocess waits forever (or until its `--wait-confirmation-timeout` fires). When a test hangs at the device-tap stage on touch devices, "did the long-press actually hit three seconds?" is the first thing to check.
-
-### 5.2.10 The QA bridge — why the QAA-615 hook exists
-
-Putting the pieces together:
-
-1. Allowances are persistent on-chain state (5.2.6).
-2. Regression tests that broadcast leave allowances behind every run (5.2.6).
-3. Revoke is `approve(spender, 0)` — same selector, same shape, no special primitive (5.2.7).
-4. The Ledger device clear-signs both approve and revoke through the same screen flow (5.2.9).
-5. Therefore: a CLI hook that issues `send --mode revokeApproval` between test iterations cleanly resets state, and the existing Speculos device-tap helper (`approveToken()` in `families/evm.ts`) drives the device side without modification.
-
-That is exactly what the senior's QAA-615 commit on `support/qaa_add_revoke_token` adds: `revokeTokenCommand` in `cliCommandsUtils.ts` (the typed wrapper), `revokeTokenApproval` on `swap.page.ts` (the POM method), and the swap spec switching from `ensureTokenApproval` to `revokeTokenApproval` for the dev loop. Chapters 5.3 through 5.8 unpack each layer.
-
-The manual alternative — revoke.cash, Etherscan's Write tab — is what humans use when the harness isn't available. Same on-chain effect, different UX, same primitive: `approve(spender, 0)`.
-
-**Why `revokeTokenApproval` is a POM method and not a CLI helper.** The senior's commit puts `revokeTokenApproval` on `swap.page.ts`, not in `cliCommandsUtils.ts`. The CLI wrapper layer (`revokeTokenCommand`) does the typed CLI call; the POM method (`revokeTokenApproval`) does the swap-test-specific orchestration: snapshot the Speculos port, swap to an Ethereum-app device, run the revoke, restore the port, attach the result to the Allure report. That separation matters: the CLI wrapper is reusable across any spec that needs to revoke an allowance; the POM method is specific to "I am in the middle of a swap test and need to inject a revoke at this point". Chapter 5.4 walks both. If a future feature needs revokes outside the swap context — say, a test for the new "Manage approvals" UI in Ledger Live — it would import `revokeTokenCommand` directly and write its own POM method, without touching the swap-page version.
-
-**Connection to the rest of Part 5.** Everything from here builds on the picture in 5.2.5: same selector, three amounts, one function. Chapter 5.3 covers the manual tools that read and write that slot for human cleanup. Chapter 5.4 walks how the CLI wrapper builds the calldata for you. Chapter 5.5 covers the Speculos lifecycle that makes the device-side signing possible. Chapter 5.6 is about choosing whether to actually mutate chain state. Chapter 5.7 is the daily workflow. Chapter 5.8 is the senior's QAA-615 commit annotated line by line. By the end of Part 5 you should be able to read the senior's `revokeTokenApproval` method, point at every line, name the layer it touches, and explain why each choice was made.
-
-**One more framing.** The blockchain primer in this chapter is the *what*. The five-layer integration in Chapter 5.4 is the *how*. The footguns in Chapter 5.6 are the *what could go wrong*. Hold these three together as you go: every line of code in Part 5 is doing one of three things — describing what to do on chain, wiring how to do it through the test harness, or guarding against a known footgun. If you can map a piece of code to one of those three categories you understand it well enough to maintain it.
-
-A final pre-Chapter-5.3 checklist. Before moving on, you should be able to:
-
-- Name the four QAA-canonical CLI commands (5.1.6).
-- Draw the five-layer integration diagram from memory (5.1.7).
-- Explain why a CLI exists in addition to UI drivers (5.1.2).
-- State the `approve` selector and the calldata layout from memory (5.2.4 / 5.2.5).
-- Give one sentence on why allowance state breaks test determinism (5.2.6).
-- Name the two pieces of global state the CLI workflow depends on: `SPECULOS_API_PORT` and `DISABLE_TRANSACTION_BROADCAST` (5.1.8).
-
-If any of those don't come easily, re-read the relevant subsection. The rest of Part 5 will be friendlier when these are second-nature.
-
-**A small reading order recommendation.** If you came to this guide as a backend engineer who's never written E2E tests, read Chapters 5.3 (manual tools, hands-on UX), then 5.7 (daily workflow, more hands-on UX), then 5.4 (the layered architecture). The hands-on chapters give you a concrete picture before the layered architecture asks you to hold five abstractions at once. If you came as a UI-test engineer who's never touched ERC-20, read Chapter 5.2 carefully (this one), then 5.4 to see how it's wired into the harness, then 5.6 to understand the safety controls. Both paths converge at Chapter 5.8.
-
-**Glossary anchors for what's coming.** Quick definitions you'll see across the next chapters:
-
-- **Speculos** — the Ledger device emulator, runs as a Docker container, exposes a REST API the test harness drives.
-- **APDU** — Application Protocol Data Unit, the binary message format the host uses to talk to the (real or emulated) Ledger device.
-- **Bridge** (in `bridge.signOperation`, `bridge.broadcast`) — the per-currency adapter inside live-common that knows how to build, sign, and broadcast transactions for that currency. Not to be confused with the WebSocket bridge in mobile E2E (Part 4).
-- **POM** — Page Object Model. The convention where each app screen is an object with methods that perform the actions a test needs.
-- **Allure** — the test reporting framework. The `allure.description(...)` calls you'll see attach human-readable context to test results.
-- **Userdata** — the JSON file format Ledger Live consumes at startup to pre-populate accounts and settings. `liveData` produces it; the desktop fixture engine points the app at it via `--userdata <path>`.
-
-These names recur. Knowing what they mean now means the next chapters read at full speed.
-
-**Where Chapter 5.3 picks up.** The next chapter walks the manual revoke tools — revoke.cash, Etherscan's Read and Write tabs — that humans use when the harness is unavailable, when something has gone wrong, or when you want to audit chain state directly. The mechanics are the same as everything in this chapter: same `approve(spender, 0)` selector, same on-chain effect, same `Approval(_, _, 0)` event. The difference is the UX: a human in a browser instead of a CLI subprocess. Knowing both is essential, because the manual tools are the ground truth you fall back to when the automation lies.
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://wix.github.io/Detox/docs/api/actions-on-element">Detox Actions API</a></li>
+<li><a href="https://wix.github.io/Detox/docs/api/expect">Detox Expect API</a></li>
+<li><a href="https://wix.github.io/Detox/docs/api/matchers">Detox Matchers</a></li>
+<li><a href="https://wix.github.io/Detox/docs/troubleshooting/running-tests">Detox Troubleshooting</a></li>
+</ul>
+</div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> An ERC-20 allowance is one slot in the token contract's nested mapping <code>allowances[owner][spender]</code>. Approve sets it; revoke sets it to zero; both are calls to the same <code>approve(address,uint256)</code> function with selector <code>0x095ea7b3</code>. Allowance state is on-chain and persistent — and that persistence is the determinism problem the CLI revoke hook (Chapter 5.8) exists to solve. Up next, Chapter 5.3 covers the manual revoke tools you reach for when the harness isn't available.
+<strong>Key takeaway:</strong> Mobile tests follow the same logical structure as desktop — describe block, setup, test steps, teardown. The differences are in the APIs (Detox vs Playwright) and the lifecycle (<code>app.init()</code> in <code>beforeAll</code> vs per-test fixtures). Use the helper functions to keep your tests concise and readable.
 </div>
 
-### 5.2.11 Quiz
+### 5.2.6 Quiz
 
 <!-- ── Chapter 5.2 Quiz ── -->
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 5.2 Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<h3>Quiz</h3>
+<p class="quiz-subtitle">4 questions · 75% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> What is the function selector <code>0x095ea7b3</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The selector for <code>transfer(address,uint256)</code></button>
-<button class="quiz-choice" data-value="B">B) The selector for <code>approve(address,uint256)</code> — <code>keccak256("approve(address,uint256)")[0:4]</code></button>
-<button class="quiz-choice" data-value="C">C) The selector for <code>revoke(address)</code> — a separate ERC-20 function</button>
-<button class="quiz-choice" data-value="D">D) The selector for <code>permit(...)</code> from EIP-2612</button>
-</div>
-<p class="quiz-explanation">Standard ERC-20 has no separate revoke function. Revoke is <code>approve(spender, 0)</code> — same selector <code>0x095ea7b3</code>, same calldata shape, just <code>amount = 0</code>.</p>
-</div>
-
 <div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> What on-chain state does a successful revoke transaction move?</p>
+<p><strong>Q1.</strong> Translate this Playwright code to Detox: <code>await page.getByRole("button", { name: "Send" }).click();</code></p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>balances[you] = 0</code> on the token contract</button>
-<button class="quiz-choice" data-value="B">B) An entry in a global revoke registry contract</button>
-<button class="quiz-choice" data-value="C">C) <code>allowances[you][spender] = 0</code> on the token contract</button>
-<button class="quiz-choice" data-value="D">D) Nothing — revoke is purely off-chain wallet state</button>
+<button class="quiz-choice" data-value="A">A) <code>await element(by.id("Send")).click();</code></button>
+<button class="quiz-choice" data-value="B">B) <code>await device.tap("Send");</code></button>
+<button class="quiz-choice" data-value="C">C) <code>await element(by.text("Send")).tap();</code></button>
+<button class="quiz-choice" data-value="D">D) <code>await tapByRole("button", "Send");</code></button>
 </div>
-<p class="quiz-explanation">Allowances live on the token contract, indexed by <code>(owner, spender)</code>. A revoke writes <code>0</code> into the slot for that pair. It does not touch the owner's balance and there is no global revoke registry.</p>
+<p class="quiz-explanation">Detox doesn't have role-based matchers like Playwright. The closest equivalent for a button with text "Send" is <code>element(by.text("Send")).tap()</code>. In Detox, <code>click()</code> is called <code>tap()</code>.</p>
 </div>
 
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> A nightly E2E run yesterday broadcast <code>approve(Router, 100)</code>. Today's run starts the same swap test. What screen will the Ledger device most likely render when the user reaches the approval step?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> What does <code>await app.common.removeSpeculos()</code> do in <code>afterAll</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) An approval flow that reflects the existing 100 allowance — different copy / step count from a "fresh approval" flow, and a likely test failure if the test asserts fresh-approval text</button>
-<button class="quiz-choice" data-value="B">B) The same fresh-approval flow as yesterday, because allowance state resets when Speculos restarts</button>
-<button class="quiz-choice" data-value="C">C) The same fresh-approval flow as yesterday, because allowance state resets when the repo is re-cloned</button>
-<button class="quiz-choice" data-value="D">D) An error screen, because the previous allowance blocks any new approve</button>
+<button class="quiz-choice" data-value="A">A) Uninstalls the Speculos npm package</button>
+<button class="quiz-choice" data-value="B">B) Stops and removes the Speculos Docker container used by the test</button>
+<button class="quiz-choice" data-value="C">C) Deletes the Speculos configuration file</button>
+<button class="quiz-choice" data-value="D">D) Disconnects the WebSocket bridge</button>
 </div>
-<p class="quiz-explanation">Allowance state is persistent on-chain and survives Speculos restarts and repo re-clones. The device queries the token contract for the current allowance and renders a different flow when one already exists. This is exactly the determinism problem the revoke hook solves.</p>
+<p class="quiz-explanation">After all tests in a describe block finish, <code>removeSpeculos()</code> stops the Docker container that was started in <code>app.init()</code>. This prevents Docker container leaks between test suites.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Why does QAA almost never use unlimited approval (<code>amount = 2^256 − 1</code>) in tests?</p>
+<p><strong>Q3.</strong> Why do mobile E2E tests use explicit timeouts like <code>waitFor(...).withTimeout(10000)</code> while desktop tests usually don't?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The Ledger device refuses to sign infinite approvals</button>
-<button class="quiz-choice" data-value="B">B) Speculos cannot represent <code>uint256</code> max</button>
-<button class="quiz-choice" data-value="C">C) Infinite approvals cost more gas than finite ones</button>
-<button class="quiz-choice" data-value="D">D) Finite, exact amounts (e.g. <code>minAmount × 1.2</code>) keep device screens reproducible run-to-run and make revoke cleanup verifiable; infinite approvals are also the historical attack vector behind major DeFi drains</button>
+<button class="quiz-choice" data-value="A">A) Mobile tests are written in a different language</button>
+<button class="quiz-choice" data-value="B">B) Detox doesn't support any form of auto-waiting</button>
+<button class="quiz-choice" data-value="C">C) Mobile apps are always faster than desktop apps</button>
+<button class="quiz-choice" data-value="D">D) Playwright has built-in auto-wait (retries until element appears), while Detox requires explicit <code>waitFor().withTimeout()</code> for reliable waiting</button>
 </div>
-<p class="quiz-explanation">The <code>ensureTokenApproval</code> helper passes <code>minAmount × 1.2</code> as a slippage buffer, not infinity. Determinism (same screens every run) is the testing reason; infinite-approval drainer attacks (BadgerDAO 2021 etc.) are the broader security context.</p>
+<p class="quiz-explanation">Playwright auto-waits by default — actions like <code>click()</code> automatically wait for the element to be visible, stable, and enabled. Detox does not have this built-in behavior, so you must use <code>waitFor</code> with explicit timeouts.</p>
 </div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> The Ledger device's clear-sign behaviour for <code>approve(spender, N)</code> depends on…</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q4.</strong> What is the Detox equivalent of Playwright's <code>page.getByTestId("amount").fill("0.5")</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Nothing — every contract call shows the generic "Contract Data — Are you sure?" warning</button>
-<button class="quiz-choice" data-value="B">B) The firmware recognising the selector <code>0x095ea7b3</code> and decoding the calldata into token / amount / spender fields, displaying a structured Approve / Revoke screen instead of the generic warning</button>
-<button class="quiz-choice" data-value="C">C) The CLI passing a <code>--clear-sign</code> flag</button>
-<button class="quiz-choice" data-value="D">D) Speculos special-casing the screen on the host side</button>
+<button class="quiz-choice" data-value="A">A) <code>await element(by.id("amount")).typeText("0.5");</code></button>
+<button class="quiz-choice" data-value="B">B) <code>await element(by.id("amount")).fill("0.5");</code></button>
+<button class="quiz-choice" data-value="C">C) <code>await typeTextById("amount", "0.5");</code> (either answer is correct)</button>
+<button class="quiz-choice" data-value="D">D) Both A and C are correct</button>
 </div>
-<p class="quiz-explanation">Clear-sign is a firmware feature: the ERC-20 plugin recognises selectors like <code>0x095ea7b3</code> and decodes the args into structured fields. The CLI doesn't pass a clear-sign flag and Speculos doesn't special-case it — Speculos just renders whatever the firmware outputs.</p>
+<p class="quiz-explanation">Both <code>element(by.id("amount")).typeText("0.5")</code> (raw Detox) and <code>typeTextById("amount", "0.5")</code> (helper wrapper) are correct. The helper is preferred for consistency and built-in error handling.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
 ---
-## Manual Revoke Tools — revoke.cash and Etherscan
+
+
+## React Native Primer for TypeScript Engineers
 
 <div class="chapter-intro">
-The CLI is the QAA's first tool, but it is not the only one. When local Speculos breaks, when CI revoke fails and you need on-chain truth, when you want to audit a real test seed without spinning up the harness — you reach for browser-based tools. revoke.cash and Etherscan together cover every operational need a QAA has when the automation is unavailable or untrustworthy. This chapter is short, practical, and ends with a hygiene checklist you should internalise before touching the shared QAA test seed.
+If you already know TypeScript and a bit of React, you are 70% of the way to understanding React Native. The remaining 30% is about what happens under the hood — how JavaScript ends up driving a native iOS or Android UI. This chapter explains that gap so that, by the time we introduce Detox, you understand exactly <em>what</em> Detox is automating and <em>why</em> the <code>testID</code> prop is the single most important line of code a QA engineer will ever add to a component.
 </div>
 
-### 5.3.1 Why Manual Tools Exist Alongside the CLI
+### 5.3.1 What Is React Native?
 
-The CLI hook revokes allowances during nightly runs. So why bother with manual tools at all?
+**React Native (RN)** is a framework from Meta that lets you write native mobile apps using TypeScript/JavaScript and React. The "native" part is not marketing — your `<View>` in JSX really does become a `UIView` on iOS and an `android.view.ViewGroup` on Android. It is **not** a web browser, not a webview, not a PWA.
 
-Four scenarios force the question.
+**Key facts:**
+- Language: TypeScript/JavaScript + React component model
+- Created by: Meta (Facebook), 2015
+- What it is: a JavaScript runtime + a bridge to the host platform's native UI toolkit
+- Used by: Meta, Shopify, Discord, Microsoft Teams, and **Ledger Live Mobile**
+- Not to be confused with: Cordova, Ionic, Capacitor (all of which render inside a `WebView`)
 
-**1. Local Speculos broke mid-test.** You ran a swap spec by hand on a feature branch. Speculos crashed halfway through the device dance. The CLI never reached the broadcast step, but the previous test already left a non-zero allowance on-chain. Now your local seed is dirty, the Speculos container is in a bad state, and re-running the harness keeps failing on setup. You need a way to clean the on-chain state without restarting the entire e2e suite.
+#### The bridge model (Old Architecture) vs the New Architecture
 
-**2. You need to audit a real seed.** Someone hands you a Sepolia address and asks "what's this seed approving?" You don't want to write a one-off script. You want a UI that lists every active allowance in two seconds.
+Classic RN apps run on two threads:
 
-**3. CI revoke failed, and you want to see on-chain truth.** A nightly run failed. Allure shows the revoke step threw an error. You don't trust the test logs — they could be wrong about which spender was approved or how much. You go to the block explorer and read the allowance directly from the contract.
+- **JS thread** — executes your bundled JavaScript in a JavaScript engine (Hermes by default since RN 0.70). This is where React reconciliation, your `useState`, your business logic, and your Redux store all live.
+- **UI thread (main thread)** — the platform's native thread. Draws the actual pixels. On iOS this is driven by UIKit, on Android by the Android View system (or Jetpack Compose for newer widgets).
 
-**4. You're verifying after the hook ran.** The CI logs say "revoke succeeded." You want to confirm the on-chain state matches the log claim before you tell the team the test seed is clean.
+These two threads communicate through a **bridge** (old arch) or a **JSI + TurboModules** layer (new arch):
 
-In each case, the manual tool is the ground-truth oracle. The CLI is part of the system under test; revoke.cash and Etherscan are not. They read the same blockchain the CLI writes to, but through a completely independent code path. That independence is what makes them useful for debugging.
+```
++---------------------------+          +-------------------------------+
+|      JS Thread (Hermes)   |          |   UI / Main Thread (Native)   |
+|  ----------------------   |  bridge  |   --------------------------  |
+|   React tree              | <======> |   UIView tree (iOS)           |
+|   setState / reconciler   |  (JSON   |   ViewGroup tree (Android)    |
+|   Your TypeScript code    |  or JSI) |   Native modules (Camera,     |
+|   Redux / Zustand state   |          |   USB, Bluetooth, Keychain)   |
++---------------------------+          +-------------------------------+
+              ^                                        ^
+              |                                        |
+              | (in dev) Metro bundler serves JS       | (always) platform SDK
+              | over http://localhost:8081             | drives real pixels
+```
 
-### 5.3.2 revoke.cash
+Every time your JS calls `setState`, RN diffs the virtual tree and sends a batch of "mutate this view, set this prop" instructions across the bridge. The UI thread applies them.
 
-`revoke.cash` is the canonical manual revoke tool. Open-source, run by Rosco Kalis, hosted at `https://revoke.cash`. Source on GitHub at `RevokeCash/revoke.cash`. Multi-chain: Ethereum, Polygon, Arbitrum, Optimism, BSC, Avalanche, plus most testnets including Sepolia and Holesky.
+> **Note:** The New Architecture (JSI, Fabric, TurboModules) replaces JSON serialization over the bridge with direct C++ function calls exposed to JS. From a QA perspective the mental model is the same — there is still a JS side and a native side — but it is faster and the error messages look a bit different.
 
-#### Connect modes
+#### React Native vs web React
 
-Three ways to point revoke.cash at an address.
+| Aspect | Web React | React Native |
+|--------|-----------|--------------|
+| Rendering target | DOM (`<div>`, `<span>`) | Native views (`UIView`, `ViewGroup`) |
+| Styling | CSS, class names | `StyleSheet` objects (a JS subset of CSS) |
+| Layout engine | Browser's CSS engine | Yoga (Flexbox-only, no block/inline) |
+| Routing | `react-router`, `next/router` | `react-navigation` |
+| File loading | Webpack / Vite | Metro |
+| DOM APIs | `document.querySelector` | None — there is no DOM |
+| Events | `onClick`, `onChange` | `onPress`, `onChangeText` |
 
-**WalletConnect.** You scan a QR code with a wallet on your phone (Ledger Live, MetaMask Mobile, Rabby, etc.). The wallet exposes its current address; revoke.cash reads allowances for that address.
+> **Gotcha:** There is **no DOM**. `document` does not exist. `window` exists but is mostly empty. If a library assumes a browser, it does not work in RN.
 
-**MetaMask (or other browser wallet).** Click "Connect Wallet." MetaMask pops up. You pick the account. revoke.cash now sees that address.
+#### React Native vs Electron vs Flutter
 
-**Paste-an-address (read-only).** The most useful mode for QAA work. Drop any address into the search bar and revoke.cash will list its allowances without any wallet connection at all. You can audit a seed without proving you own it. Obviously, with a paste-only connection, you cannot click "Revoke" — that requires a signing wallet — but the audit view is what you need 80 percent of the time.
+- **Electron** (what Desktop Ledger Live uses): ships Chromium + Node.js. Every UI element is an HTML element. No native views.
+- **Flutter**: ships its own rendering engine (Skia). It does *not* use native views — it paints pixels itself. Fast, but "looks native" rather than "is native".
+- **React Native**: uses the host platform's actual native views. When you put a `<Text>` on screen, it is a real `UILabel` / `TextView`. This is why testing frameworks like Detox can find it by the platform's accessibility ID.
 
-#### What it lists
+### 5.3.2 Core Primitives
 
-For a connected (or pasted) address, revoke.cash queries on-chain allowance state across the chains it supports and renders:
+Instead of HTML elements, RN exposes a small set of built-in components. These are the only ones you need to read 90% of Ledger Live Mobile source.
 
-- **ERC-20 allowances** — every spender with a non-zero `allowance(you, spender)` on every token the address has ever interacted with. Each row shows token name, spender (with a label if the spender is a known router or aggregator — Uniswap, 1inch, LiFi, ParaSwap, etc.), and the current allowance amount (decoded into the token's display units, with a "unlimited" badge when the value is `2^256 - 1`).
-- **ERC-721 approvals** — both per-token approvals (`approve(spender, tokenId)`) and operator-level approvals (`setApprovalForAll(operator, true)`).
-- **ERC-1155 approvals** — operator approvals only (ERC-1155 doesn't have per-id approval).
+#### `View` — the `<div>` of React Native
 
-Each row has a "Revoke" button. If you connected with a signing wallet, clicking it builds an `approve(spender, 0)` (or `setApprovalForAll(operator, false)` for NFTs) and asks the wallet to sign. After signing, the wallet broadcasts the tx; revoke.cash polls until the allowance reads zero, then strikes the row out.
+```tsx
+import { View, StyleSheet } from "react-native";
 
-#### Cost
+export function Card(): JSX.Element {
+  return (
+    <View style={styles.card}>
+      {/* children */}
+    </View>
+  );
+}
 
-Gas only. revoke.cash takes no fee, no commission, no premium. Each revoke is one ERC-20 `approve` call (~46 000 gas typical, less if the storage slot was already touched in this block) per spender per token. On mainnet at 30 gwei that's around $3 per revoke; on testnets it's free if you have faucet ETH.
+const styles = StyleSheet.create({
+  card: {
+    padding: 16,
+    borderRadius: 8,
+    backgroundColor: "#fff",
+  },
+});
+```
 
-#### What the UI looks like
+A `View` is a flex container. By default `flexDirection` is `column` (not `row` like on the web) and every `View` is itself a flex container (no need to set `display: flex`).
 
-Picture a tabular list. Each row carries a token logo, the token symbol, the spender address (often pretty-printed: "Uniswap V3 Router"), the current allowance, the chain badge, the date of the last interaction, and a red "Revoke" button on the right edge. A search bar at the top filters by token name or spender address. A chain selector at the top right switches between Ethereum, Sepolia, Polygon, etc. — the address stays connected; only the chain changes.
+#### `Text` — **the only** way to put text on screen
 
-If you arrive with a paste-only connection, the "Revoke" buttons are greyed out and a banner at the top says "connect a wallet to revoke." All other inspection capabilities work.
+```tsx
+import { Text } from "react-native";
 
-### 5.3.3 Etherscan Read Contract Tab
+<Text style={{ fontSize: 16 }}>Hello, Ledger</Text>;
+```
 
-`https://etherscan.io/token/<contract>#readContract`
+> **Gotcha:** You cannot put a string directly inside a `View`. `<View>Hello</View>` throws at runtime. Every visible string must be wrapped in `<Text>`. This trips up almost every new RN developer.
 
-This is the read-only inspection path. No wallet, no JavaScript wallet handshake, no risk. You arrive at the contract page on Etherscan, click the "Contract" tab, then "Read Contract." A list of every public read function the contract exposes appears.
+#### `Pressable` — the modern tap handler
 
-For ERC-20 you care about `allowance(owner, spender)`. Type the owner address (your seed) and the spender address (the router you're auditing). Click "Query." Etherscan does an `eth_call` to a public node and returns the raw `uint256`.
+```tsx
+import { Pressable, Text } from "react-native";
 
-The number is in the token's smallest unit — you must divide by `10^decimals` to get the human-readable amount. For USDC (6 decimals) a return of `1000000000` means 1000 USDC. For DAI (18 decimals) the same hex value would be a tiny fraction. Always check the `decimals()` view (right above `allowance` in most ERC-20 contracts) before you interpret the number.
+<Pressable
+  testID="portfolio-add-account-button"
+  onPress={() => handleAdd()}
+  style={({ pressed }) => [styles.btn, pressed && styles.btnPressed]}
+>
+  <Text>Add account</Text>
+</Pressable>;
+```
 
-This is the cheapest possible audit. No wallet connect, no transaction, no gas, no JavaScript trust assumption. You're just reading public state via Etherscan's hosted RPC.
+`Pressable` is the recommended way to make anything tappable. It exposes the `pressed` state and supports `onPressIn`, `onPressOut`, `onLongPress`, and hit-slop configuration. See [`reactnative.dev/docs/pressable`](https://reactnative.dev/docs/pressable).
 
-The same UI works on every Etherscan-family explorer:
+#### `TouchableOpacity` — the older, still-everywhere alternative
 
-- `sepolia.etherscan.io` — Sepolia testnet
-- `holesky.etherscan.io` — Holesky testnet
-- `polygonscan.com` — Polygon
-- `arbiscan.io` — Arbitrum
-- `optimistic.etherscan.io` — Optimism
-- `bscscan.com` — BSC
-- `snowtrace.io` — Avalanche
+```tsx
+import { TouchableOpacity, Text } from "react-native";
 
-The path is always `/token/<contract>#readContract`. Layout differs cosmetically; the function list and "Query" button are the same.
+<TouchableOpacity testID="continue-button" onPress={onContinue}>
+  <Text>Continue</Text>
+</TouchableOpacity>;
+```
 
-### 5.3.4 Etherscan Write Contract Tab
+`TouchableOpacity` fades the button when pressed. It predates `Pressable`. Ledger Live Mobile still uses it extensively in legacy screens. Functionally equivalent for QA purposes.
 
-`https://etherscan.io/token/<contract>#writeContract`
+#### `ScrollView` — scrolls any children
 
-This is the manual write path. Same contract page, different tab — "Write Contract" instead of "Read Contract." The list of public write functions appears, including `approve(spender, amount)`.
+```tsx
+import { ScrollView } from "react-native";
 
-Click "Connect to Web3." MetaMask (or another supported wallet) pops up. Pick the account that holds the allowance you want to change. Etherscan shows your address as connected.
+<ScrollView contentContainerStyle={{ padding: 16 }}>
+  <LongForm />
+</ScrollView>;
+```
 
-Click `approve`. Two fields: `_spender` and `_value`. Enter the spender address and `0` for the value. Click "Write." MetaMask asks for signature. Confirm. Etherscan returns a tx hash and links to the explorer view of the pending tx.
+Use `ScrollView` for a **small, bounded** list of items. It renders every child immediately — bad for 500 accounts.
 
-Once mined, the allowance is zero. Verify by going back to the Read tab and querying `allowance(owner, spender)`.
+#### `FlatList` — virtualized lists
 
-#### When you reach for this instead of revoke.cash
+```tsx
+import { FlatList } from "react-native";
 
-revoke.cash covers 99 percent of cases. The 1 percent where Etherscan Write wins:
+type Account = { id: string; name: string };
 
-- **Weird testnet tokens** that revoke.cash doesn't index (its scanner pulls from a few public APIs; obscure testnet deployments slip through).
-- **Custom or vanity ERC-20s** deployed for QA-only purposes and never registered with token lists.
-- **Forked or modified `approve` semantics** — some non-standard tokens have weird `approve` (e.g., revert if `from != 0 && to != 0`, the old USDT footgun). Etherscan Write lets you call any function exposed by the contract ABI, so you can work around the ones revoke.cash assumes. For example, on legacy USDT-style tokens you may need two calls: first `approve(spender, 0)`, then verify, then call `approve(spender, newValue)` if you wanted to lower without zeroing first.
-- **Non-standard token contracts that expose extra revoke-like methods** (`decreaseAllowance`, `permit`, custom admin functions). Pick the right method from the function list directly.
+<FlatList<Account>
+  data={accounts}
+  keyExtractor={a => a.id}
+  renderItem={({ item }) => (
+    <AccountRow testID={`account-row-${item.id}`} account={item} />
+  )}
+/>;
+```
 
-The Write tab is also the right tool when you need to read the raw calldata Etherscan generates — you can copy it before signing and paste it into a calldata decoder to confirm the bytes match what you expect.
+`FlatList` only renders the rows currently on screen — essential for the accounts list, operations history, market cap list, etc. See [`reactnative.dev/docs/flatlist`](https://reactnative.dev/docs/flatlist).
 
-### 5.3.5 Other Tools
+> **Gotcha:** If you set `testID` on the `FlatList` itself, it lands on the outer scroll container, not the rows. Row `testID`s must be set **inside `renderItem`** — on the row component — and the row component must actually forward the prop to its top-level `View`/`Pressable`. See 32.3 for why this matters.
 
-Two adjacent tools come up in QAA conversation; neither replaces revoke.cash for this workflow, but both deserve a one-paragraph mention.
+#### Other primitives you will see
 
-**DeBank** (`debank.com`) — a portfolio aggregator that, among many other features, has an "Approvals" page per address. The list overlaps with revoke.cash. DeBank also shows DeFi positions and token balances, so QAA sometimes uses it to sanity-check what's actually held on a seed before testing a swap. It can revoke too, with a connected wallet, the same way revoke.cash does. revoke.cash is the more focused tool for this exact job.
+- `TextInput` — the native text field (`onChangeText`, not `onChange`).
+- `Image` — renders a `UIImageView` / `ImageView`. Source is `{ uri: "https://..." }` or `require("./logo.png")`.
+- `SafeAreaView` — pads children to avoid the notch / home indicator.
+- `Modal` — renders a native modal on top of the app window.
+- `ActivityIndicator` — the spinning wheel (`UIActivityIndicator` / `ProgressBar`).
 
-**Zapper Smart Wallet** (`zapper.xyz`) — similar story: portfolio dashboard with an approvals view. Not actively recommended for QAA work because the allowance list is sometimes stale (cached) compared to revoke.cash's near-real-time read. Useful for one-glance overviews of a seed's overall DeFi exposure but not for clean-up sessions.
+> **Further reading:** [`reactnative.dev/docs/components-and-apis`](https://reactnative.dev/docs/components-and-apis) lists every built-in component and API.
 
-For block explorers across other chains, the pattern is identical to Etherscan:
+### 5.3.3 The `testID` Prop — Your Best Friend
 
-- Sepolia → `sepolia.etherscan.io`
-- Polygon → `polygonscan.com`
-- Arbitrum → `arbiscan.io`
-- Optimism → `optimistic.etherscan.io`
-- BSC → `bscscan.com`
-- Avalanche → `snowtrace.io`
+`testID` is the prop you will encounter, add, and debate more than any other. **It is the single most important prop for mobile QA.**
 
-Same Read Contract / Write Contract tabs, same `allowance(owner, spender)` and `approve(spender, value)` functions. Once you've used Etherscan, you've used all of them.
+```tsx
+<Pressable testID="portfolio-add-account-button" onPress={handleAdd}>
+  <Text>Add account</Text>
+</Pressable>;
+```
 
-### 5.3.6 A Worked Debug Walk-Through
+#### What `testID` becomes on each platform
 
-Concrete picture. Nightly run on the QAA seed `0xBEEF...0001` (Sepolia). Allure shows the swap test failed at the post-condition assertion `expect(allowance).toBe(0)`. The CLI revoke step in the logs reads "exit code 0" — i.e. the subprocess succeeded.
+React Native translates `testID` into the platform's accessibility identifier:
 
-Three possible explanations:
+| Platform | Native attribute | Queried by |
+|----------|------------------|------------|
+| iOS      | `accessibilityIdentifier` on the backing `UIView` | XCUITest, Detox `by.id()` |
+| Android  | `resource-id` (tag on the `View`) | UIAutomator / Espresso, Detox `by.id()` |
 
-1. **The on-chain state is correctly zero**, and the test's post-condition reader is broken (parsing wrong, reading the wrong contract, reading the wrong owner).
-2. **The on-chain state is non-zero**, the CLI subprocess succeeded but the broadcast was disabled (env var not flipped, or `--disable-broadcast` was set somewhere upstream).
-3. **The on-chain state is non-zero**, the CLI broadcast happened but the transaction reverted (out of gas, contract guard, weird non-standard token).
+Detox's `by.id("portfolio-add-account-button")` resolves to `accessibilityIdentifier == "portfolio-add-account-button"` on iOS and `resource-id == "portfolio-add-account-button"` on Android. See [`reactnative.dev/docs/view#testid`](https://reactnative.dev/docs/view#testid).
 
-You diagnose with two manual tabs.
+#### Why not use text or accessibility labels?
 
-**Tab 1: revoke.cash, paste-only.** Drop `0xBEEF...0001`, switch to Sepolia. If the row for the failing token/spender pair shows up with a non-zero allowance, the on-chain state is genuinely dirty — eliminate explanation 1. If the row does not show up (or shows zero), the on-chain state is clean and your test's assertion logic is the bug — that's explanation 1, look in the spec, not in the CLI.
+Same reason as desktop: text changes with i18n, layout, and copy reviews. `testID` is added **for tests**, stays stable across translations, and does not affect the rendered UI.
 
-**Tab 2: Etherscan Read.** Same address pair, query `allowance(0xBEEF...0001, <spenderAddress>)` on the token contract. Cross-check what revoke.cash showed. If they agree on non-zero, you're in explanation 2 or 3.
+#### Common gotchas
 
-**Distinguishing 2 from 3.** Open the CLI log for the failing run. Look for the broadcast line — the live-common send command logs `broadcasted txHash: 0x...` when broadcast happened. If you see the line, broadcast happened; the tx is on-chain. Look it up in the explorer's transaction view: did it succeed, or did it revert? A reverted approve tx looks confusingly successful at the receipt level (status 0 vs 1 is the only difference). If status is 0, that's explanation 3 — token contract rejected the call. Time to look at the contract's `approve` source for non-standard guards.
+1. **`testID` must be on a real view** — not on a `React.Fragment`, not on a `<>`, not on a pure JS object. Some components (like `react-native-svg`'s `<Svg>`) accept it but do not always propagate it to the backing view.
 
-If the `broadcasted txHash` line is missing from the log, broadcast was skipped — that's explanation 2. Search the test code for `setDisableTransactionBroadcastEnv` or `DISABLE_TRANSACTION_BROADCAST` and find where it was set to `"1"` and not restored. The next chapter (5.6) covers the discipline that prevents this.
+2. **Row-level `testID` requires forwarding**. If you write a reusable component:
 
-The whole investigation takes about three minutes once you know the playbook. Without manual tools, you would be re-running the test with extra logging — a 30-minute round trip per data point.
+   ```tsx
+   type Props = { testID?: string; label: string };
+   export function MyRow({ testID, label }: Props) {
+     return (
+       <View testID={testID}>        {/* <- must forward! */}
+         <Text>{label}</Text>
+       </View>
+     );
+   }
+   ```
 
-### 5.3.7 When QAA Reaches for Manual Tools
+   If you forget `testID={testID}` on the outer `View`, Detox will never find the row even though the prop is set on the parent.
 
-A short list of the operational moments when you stop typing CLI commands and open a browser tab:
+3. **Duplicate `testID`s** break Detox with an ambiguous-match error. Make them unique with a stable suffix: `` `account-row-${accountId}` ``.
 
-- **Cleanup after manual testing.** You ran a swap by hand, didn't run the cleanup hook, the test seed is dirty. Open revoke.cash, paste the seed address, click Revoke on each non-zero row. Done in a minute.
-- **One-off audits.** "What's currently approved on the QAA test seed?" Paste the address into revoke.cash. Read the list. No need to write or run a script.
-- **CI revoke debug.** Nightly failed at the revoke step. You go to revoke.cash, see the row still showing a non-zero allowance, confirm the CI hook genuinely didn't land. Or you see the row already at zero — meaning the CI revoke succeeded but the test's post-condition assertion is wrong.
-- **Post-hook verification.** CI just finished, claims success. Five-second sanity check on revoke.cash before you announce the seed is clean.
-- **Auditing a senior's branch.** Reviewing a PR that adds a new revoke flow? Run the e2e against a sandbox seed, then check on revoke.cash that the post-test state matches what the test asserted.
-- **Onboarding a new test seed.** Generated a fresh QA seed for a new project? Check revoke.cash on that address right after first use to confirm the baseline is empty before any tests run.
+4. **`FlatList` cells**. The outer `FlatList` is a scroll container; only rows rendered inside `renderItem` carry row-level `testID`s. To wait for a specific row, scroll the list first with Detox's `scrollTo()`.
 
-### 5.3.8 Hygiene Rules
+5. **Dynamic vs static**. Prefer `testID={currency}` over `testID={\`row-${isSelected ? "sel" : "idle"}\`}` — a `testID` that changes on interaction is a flaky test waiting to happen.
 
-The QAA test seed is shared infrastructure. Multiple engineers across desktop and mobile use the same testnet seeds for swap, send, earn, and delegate specs. Treat it like a shared dev database: clean up after yourself, never assume someone else did.
+> **Note:** In Ledger Live Mobile, `testID` values are kebab-case and read like a breadcrumb: `settings-general-language-row`, `send-recipient-input`, `modal-confirm-button`. Follow the existing convention when adding new ones.
 
-A short discipline:
+### 5.3.4 Platform Module & Cross-Platform Branching
 
-- **Never connect someone else's wallet.** If a colleague hands you a seed-phrase, do not import it into your MetaMask just to revoke. Use the paste-only audit mode of revoke.cash, identify what needs to be cleaned, and ask them to clean it themselves with their wallet. The principle: only your wallet talks to your wallet.
-- **Prefer testnets.** All QA work should target Sepolia, Holesky, or another testnet. If a test is touching mainnet, that's a flag — talk to the senior. Mainnet allowances cost real gas to revoke.
-- **Clean up after manual sessions.** If you ran a flow by hand, end the session by checking revoke.cash and reverting any non-zero allowances you created. Don't leave the seed dirty for the next engineer.
-- **Verify before announcing.** Don't tell the team "the test seed is clean" until you've checked it on a block explorer or revoke.cash. Test logs lie when assertions are weak; on-chain state is the ground truth.
-- **Document non-obvious approvals.** If a test deliberately creates and leaves an approval (rare, but it happens — for example a regression test for "what does the UI do when an approval already exists"), add a comment in the spec and a note in the team doc so the next person doesn't try to clean it.
-- **Never paste your personal address into a test slot.** The QAA test seed is the QAA test seed. Don't substitute your own seed because the QAA seed ran out of test ETH. Top up the QAA seed from the faucet instead.
+A single RN codebase produces two native apps. Sometimes you need to branch per platform:
 
-### 5.3.9 Past Incidents — Why This Tooling Matters
+```tsx
+import { Platform } from "react-native";
 
-Infinite ERC-20 approvals were the attack vector in several major DeFi drains. The pattern: a user clicks "approve unlimited" once on a dapp, the dapp (or its compromised contract) later calls `transferFrom(user, attacker, all_tokens)`, the user's tokens leave their wallet without any second user signature. The allowance is the standing authorisation; the attacker just needs to find a way to trigger the transfer.
+if (Platform.OS === "ios") {
+  // iOS-specific logic
+}
 
-**BadgerDAO, December 2021.** Frontend compromise injected malicious approval prompts. Users who had previously approved the legitimate Badger contracts had nothing to fear from old approvals — but the injected prompts asked for new, broader approvals on tokens like WBTC. Users approved, the attackers' contract drained around $120m worth of tokens. The takeaway: even users who knew about approvals were not protected if they were socially engineered into signing new ones. The mitigation was post-hoc — revoke any approval you don't actively need.
+// Or, cleaner:
+const headerPaddingTop = Platform.select({
+  ios: 20,    // under the notch
+  android: 0, // status bar is handled by the system
+  default: 0,
+});
+```
 
-**Multiple 2022 phishing campaigns.** Throughout 2022, dozens of phishing sites mimicking real dapps asked users to "claim an airdrop" or "verify their wallet," but the actual signature presented was an unlimited `approve(attackerContract, 2^256-1)` on the user's most valuable token. Once signed, the attacker drained at their leisure. Some campaigns ran for weeks before being fully shut down.
+`Platform.OS` is `"ios" | "android" | "windows" | "macos" | "web"`. For Ledger Live it is always `"ios"` or `"android"`. See [`reactnative.dev/docs/platform`](https://reactnative.dev/docs/platform).
 
-The industry response had three parts:
+#### Why E2E tests often branch on platform
 
-- **revoke.cash adoption.** The tool existed before these incidents but became standard wallet-hygiene practice afterwards. Many wallet UIs now link directly to revoke.cash from their settings page.
-- **Wallet UI warnings on infinite approvals.** Modern Ledger Live, MetaMask, and Rabby flag unlimited approvals at signing time, often with red banners and explicit "this gives the contract permission to spend any amount" wording. The clear-sign decoder on Ledger devices does the same — when you see `approve(spender, 0xff..ff)` on a Nano S Plus screen, the device labels it unambiguously.
-- **EIP-2612 permit.** Newer ERC-20 tokens implement `permit(owner, spender, value, deadline, v, r, s)` — a signature-based approval that doesn't write to allowance storage. Each `permit` is single-use and time-limited. No standing allowance to drain. USDC, DAI, and most major tokens deployed since 2021 implement this. Older tokens (USDT, WBTC) don't, which is why allowance hygiene still matters for those specifically.
+Detox exposes `device.getPlatform()` so tests can branch at runtime. Patterns you will see in Ledger Live Mobile E2E:
 
-For QAA, the lesson is concrete: when you see an unlimited approval in test logs, that's almost always a test bug or a UX regression worth flagging. Tests should approve only the amount needed — `ensureTokenApproval` in `swap.page.ts` uses `1.2 × minAmount` for slippage, not infinity, deliberately. Anything that approves `2^256-1` in a test is suspicious and should be challenged in code review.
+```ts
+export const isAndroid = (): boolean => device.getPlatform() === "android";
+export const isIos = (): boolean => device.getPlatform() === "ios";
+```
+
+Why? A handful of reasons recur:
+
+- **Keyboard**: Android auto-dismisses the keyboard on `Enter`; iOS does not. Tests may need `device.pressBack()` on Android only.
+- **Permissions dialogs**: On iOS, push/biometric dialogs are system alerts handled by the iOS alert API; on Android they are shown by the app itself.
+- **Scrolling behavior**: iOS supports bounce/over-scroll; Android does not. Some tests calibrate pixel offsets.
+- **File/attachment picker**: completely different implementations.
+- **Back button**: only Android has a hardware-equivalent back button.
+
+> **Gotcha:** Avoid scattering `if (isAndroid())` through tests. Put the branching inside a page-object method so tests stay clean.
+
+### 5.3.5 Metro — The JavaScript Bundler
+
+Metro is RN's dedicated bundler. It exists because Webpack was too heavy and too web-centric when RN was created.
+
+**What Metro does:**
+- Walks your `import` graph starting from `index.js`
+- Transpiles TypeScript/JSX with Babel
+- Produces a **single** JavaScript bundle (no code-splitting by default)
+- Serves the bundle over HTTP at `http://localhost:8081/index.bundle`
+- Hot-reloads modules in dev mode
+
+#### Debug vs release builds
+
+| Mode | Who serves JS? | When used |
+|------|----------------|-----------|
+| **Debug** | Metro dev server on port 8081 | Local development, Detox `*.debug` configs |
+| **Release** | JS is bundled into the `.ipa` / `.apk` at build time | TestFlight, Play Store, Detox `*.release` configs |
+
+A debug build loads the JS over HTTP each time the app starts. A release build has the JS baked in as a static file inside the app bundle. This is why you can edit code and reload without rebuilding in debug, but not in release.
+
+> **Note:** For E2E we use both. Debug builds iterate fast locally. Release builds are what CI runs to catch bundler-only issues (dead-code elimination, Hermes bytecode). See [`reactnative.dev/docs/metro`](https://reactnative.dev/docs/metro).
+
+### 5.3.6 Deep Links & the `Linking` API
+
+A **deep link** is a URL that opens a specific screen inside your app. Ledger Live Mobile uses the `ledgerlive://` scheme.
+
+```
+ledgerlive://portfolio
+ledgerlive://account?currency=bitcoin
+ledgerlive://wc?uri=wc:abc123...
+ledgerlive://discover/swap
+```
+
+When the OS sees a URL with a registered scheme, it launches the app and hands the URL to it. In RN you subscribe with the `Linking` module:
+
+```tsx
+import { Linking } from "react-native";
+
+useEffect(() => {
+  const sub = Linking.addEventListener("url", ({ url }) => {
+    navigateFromDeeplink(url);
+  });
+  return () => sub.remove();
+}, []);
+```
+
+See [`reactnative.dev/docs/linking`](https://reactnative.dev/docs/linking).
+
+#### How deep links are used in E2E
+
+Deep links are the fastest way to jump a test to a specific screen without tapping through navigation. Detox exposes `device.openURL()`, and Ledger Live Mobile wraps it in an `openDeeplink()` helper:
+
+```ts
+await openDeeplink("ledgerlive://account?currency=bitcoin");
+```
+
+This skips onboarding, the portfolio tab, the account list — straight to the Bitcoin account screen. Huge time saver and fewer flaky steps.
+
+### 5.3.7 Dev Menu & React DevTools
+
+When you run a debug build on a simulator/emulator, you can open the **dev menu**:
+
+- iOS simulator: **Device → Shake** or **⌘D**
+- Android emulator: **⌘M** (macOS) / **Ctrl+M**
+
+From here you can reload JS, enable/disable Fast Refresh, toggle the performance overlay, and open the in-app element inspector.
+
+The **element inspector** is the RN equivalent of the web's DOM inspector: tap a component on screen and the menu shows its props, source location, and accessibility info. This is how you discover which component owns which `testID` — critical when designing new E2E tests.
+
+**React DevTools** (a standalone app: `npx react-devtools`) attaches over the network and shows the full component tree. Use it when designing page objects to understand the rendered hierarchy. See [`reactnative.dev/docs/debugging`](https://reactnative.dev/docs/debugging) and [`reactnative.dev/docs/react-devtools`](https://reactnative.dev/docs/react-devtools).
+
+> **Gotcha:** The dev menu is only available in debug builds. Release builds strip it.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://reactnative.dev/">React Native</a> — official landing page</li>
+<li><a href="https://reactnative.dev/docs/components-and-apis">Core Components and APIs</a> — every built-in primitive</li>
+<li><a href="https://reactnative.dev/docs/view#testid">View: testID prop</a> — how testID maps to native platform attributes</li>
+<li><a href="https://reactnative.dev/docs/pressable">Pressable</a> — modern touchable component</li>
+<li><a href="https://reactnative.dev/docs/flatlist">FlatList</a> — virtualized list rendering</li>
+<li><a href="https://reactnative.dev/docs/platform">Platform</a> — detect iOS vs Android at runtime</li>
+<li><a href="https://reactnative.dev/docs/metro">Metro</a> — the RN bundler</li>
+<li><a href="https://reactnative.dev/docs/linking">Linking</a> — deep linking API</li>
+<li><a href="https://reactnative.dev/docs/debugging">Debugging</a> — dev menu and inspectors</li>
+<li><a href="https://reactnative.dev/docs/react-devtools">React DevTools</a> — component tree inspection</li>
+</ul>
+</div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> revoke.cash is the daily driver. Etherscan Read is the audit oracle. Etherscan Write is the escape hatch when revoke.cash doesn't list a token. The shared QAA test seed is infrastructure — clean up after yourself, verify on-chain before you announce anything, and remember why allowance hygiene matters in the first place.
+<strong>Key takeaway:</strong> React Native runs your TypeScript on a JS thread and drives real native views on the UI thread via a bridge. The <code>testID</code> prop becomes <code>accessibilityIdentifier</code> on iOS and <code>resource-id</code> on Android — which is what Detox queries. Master <code>View</code>, <code>Text</code>, <code>Pressable</code>, <code>FlatList</code>, the <code>Platform</code> module, Metro, and deep links, and you can read any screen in Ledger Live Mobile.
 </div>
 
-### 5.3.10 Quiz
-
-<!-- ── Chapter 5.3 Quiz ── -->
+### 5.3.8 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 5.3 Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<h3>Quiz — React Native for TypeScript Engineers</h3>
+<p class="quiz-subtitle">6 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> Which manual revoke tool is open-source and run by Rosco Kalis?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Etherscan Write Contract</button>
-<button class="quiz-choice" data-value="B">B) revoke.cash</button>
-<button class="quiz-choice" data-value="C">C) DeBank</button>
-<button class="quiz-choice" data-value="D">D) Zapper Smart Wallet</button>
-</div>
-<p class="quiz-explanation">revoke.cash is the open-source, multi-chain canonical revoke tool. Source on GitHub at RevokeCash/revoke.cash. Etherscan is closed-source; DeBank and Zapper are commercial portfolio aggregators.</p>
-</div>
-
 <div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> When would you reach for Etherscan's Write Contract tab instead of revoke.cash?</p>
+<p><strong>Q1.</strong> What does the <code>testID</code> prop on a <code>&lt;Pressable&gt;</code> become at runtime on the native side?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) When you don't have a wallet connected at all</button>
-<button class="quiz-choice" data-value="B">B) When you only need to read the current allowance</button>
-<button class="quiz-choice" data-value="C">C) When revoke.cash doesn't list the token (weird testnet token, custom ABI, non-standard approve semantics)</button>
-<button class="quiz-choice" data-value="D">D) When you want to revoke for someone else's wallet</button>
+<button class="quiz-choice" data-value="A">A) A CSS class on the Chromium DOM node</button>
+<button class="quiz-choice" data-value="B">B) A custom React context consumed by Detox</button>
+<button class="quiz-choice" data-value="C">C) <code>accessibilityIdentifier</code> on the backing UIView on iOS, and <code>resource-id</code> on the Android View</button>
+<button class="quiz-choice" data-value="D">D) Nothing — it is stripped at build time in release mode</button>
 </div>
-<p class="quiz-explanation">revoke.cash covers ~99% of cases. Etherscan Write is the escape hatch when revoke.cash's scanner doesn't index a token, or when you need to call a non-standard function (decreaseAllowance, permit, custom admin methods).</p>
+<p class="quiz-explanation">React Native forwards <code>testID</code> to the platform's native accessibility identifier. Detox's <code>by.id()</code> query resolves to those native attributes, which is why the same test locator works on both platforms.</p>
 </div>
 
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> Calling <code>allowance(owner, spender)</code> on Etherscan's Read Contract tab returns:</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> Why does <code>&lt;View&gt;Hello&lt;/View&gt;</code> crash at runtime?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) A raw uint256 in the token's smallest unit — you must divide by 10^decimals to get the display amount</button>
-<button class="quiz-choice" data-value="B">B) A pre-formatted human-readable amount</button>
-<button class="quiz-choice" data-value="C">C) A boolean indicating whether an allowance exists</button>
-<button class="quiz-choice" data-value="D">D) The list of all spenders with non-zero allowances</button>
+<button class="quiz-choice" data-value="A">A) <code>View</code> is self-closing and cannot take children</button>
+<button class="quiz-choice" data-value="B">B) Plain strings must be wrapped in <code>&lt;Text&gt;</code> — <code>View</code> is not a text container</button>
+<button class="quiz-choice" data-value="C">C) Only <code>ScrollView</code> accepts string children</button>
+<button class="quiz-choice" data-value="D">D) It works — the question is wrong</button>
 </div>
-<p class="quiz-explanation">Solidity returns the raw uint256. USDC has 6 decimals, so a returned value of 1000000000 means 1000 USDC. DAI has 18 decimals, so the same hex would be a tiny fraction. Always check decimals() before interpreting.</p>
+<p class="quiz-explanation">Unlike a <code>&lt;div&gt;</code> in the DOM, <code>&lt;View&gt;</code> does not render text. Every visible string must be inside <code>&lt;Text&gt;</code>, which maps to <code>UILabel</code> / <code>TextView</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Which is NOT a hygiene rule for the shared QAA test seed?</p>
+<p><strong>Q3.</strong> What happens if you put <code>testID="account-row"</code> directly on a <code>&lt;FlatList&gt;</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Clean up non-zero allowances after manual testing sessions</button>
-<button class="quiz-choice" data-value="B">B) Verify on-chain (revoke.cash or Etherscan Read) before announcing the seed is clean</button>
-<button class="quiz-choice" data-value="C">C) Prefer testnets for all QA work</button>
-<button class="quiz-choice" data-value="D">D) Import a colleague's seed phrase into your wallet so you can revoke on their behalf</button>
+<button class="quiz-choice" data-value="A">A) Every row receives the same <code>testID</code></button>
+<button class="quiz-choice" data-value="B">B) Only the first row receives the <code>testID</code></button>
+<button class="quiz-choice" data-value="C">C) It is ignored entirely</button>
+<button class="quiz-choice" data-value="D">D) It lands on the outer scroll container, not on rows. Row <code>testID</code>s must be set inside <code>renderItem</code></button>
 </div>
-<p class="quiz-explanation">Never import someone else's seed phrase. The principle is: only your wallet talks to your wallet. If a colleague's seed needs cleaning, ask them to do it. The other three are correct hygiene practices.</p>
+<p class="quiz-explanation"><code>FlatList</code> is a virtualized scroll container. Its own <code>testID</code> identifies the list. To address a row, pass a unique <code>testID</code> inside <code>renderItem</code> — and ensure the row component forwards it to its outer <code>View</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q4.</strong> What is the role of the <strong>bridge</strong> (or JSI in the new architecture) in React Native?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It connects the JS thread (Hermes) to the UI / native thread so state changes in JS become native view mutations</button>
+<button class="quiz-choice" data-value="B">B) It connects the app to Metro over HTTP</button>
+<button class="quiz-choice" data-value="C">C) It is Detox's test runner channel</button>
+<button class="quiz-choice" data-value="D">D) It converts JSX to HTML</button>
+</div>
+<p class="quiz-explanation">The bridge (old arch) serialized calls between the JS thread and the UI thread. The new architecture replaces that with JSI — direct synchronous function calls exposed to JS via C++ — but the role is the same: move data and commands between JS and native.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> Why was EIP-2612 permit introduced as a response to allowance-vector incidents?</p>
+<p><strong>Q5.</strong> How does a debug build differ from a release build with respect to JavaScript?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It cancels all existing on-chain allowances at once</button>
-<button class="quiz-choice" data-value="B">B) It replaces standing allowance storage with single-use, time-limited signed approvals — no standing approval for an attacker to drain</button>
-<button class="quiz-choice" data-value="C">C) It encrypts approval transactions so attackers can't see them</button>
-<button class="quiz-choice" data-value="D">D) It requires a Ledger device for every transfer</button>
+<button class="quiz-choice" data-value="A">A) Debug uses Hermes, release uses JavaScriptCore</button>
+<button class="quiz-choice" data-value="B">B) Debug loads the JS bundle from Metro over HTTP at app start; release bakes the JS bundle into the app package</button>
+<button class="quiz-choice" data-value="C">C) Debug has a dev menu, release also has a dev menu</button>
+<button class="quiz-choice" data-value="D">D) There is no difference — both download from Metro</button>
 </div>
-<p class="quiz-explanation">EIP-2612 permit lets a user sign an approval off-chain that the spender then redeems in the same transaction as the transfer. Each permit is one-shot and time-bounded. There is no standing allowance in storage, so no allowance-drain attack vector. USDC and DAI implement permit; older tokens (USDT, WBTC) do not.</p>
+<p class="quiz-explanation">In debug the app fetches <code>index.bundle</code> from Metro on launch (which is why you need Metro running). In release the bundle is embedded in the <code>.ipa</code> / <code>.apk</code>, the dev menu is removed, and you cannot hot-reload.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> A test needs to jump directly to the Bitcoin account screen. What is the idiomatic way?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Tap through Portfolio → Accounts → Bitcoin</button>
+<button class="quiz-choice" data-value="B">B) Call a native Detox API to push a screen onto the stack</button>
+<button class="quiz-choice" data-value="C">C) Use a deep link such as <code>ledgerlive://account?currency=bitcoin</code> via <code>openDeeplink()</code></button>
+<button class="quiz-choice" data-value="D">D) Edit the React navigation state from the test runner</button>
+</div>
+<p class="quiz-explanation">Deep links skip the tap-through navigation and cut flakiness. Detox's <code>device.openURL()</code> is wrapped by an <code>openDeeplink()</code> helper in Ledger Live Mobile E2E. The <code>Linking</code> API on the app side receives and routes the URL.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -1055,3250 +853,5410 @@ For QAA, the lesson is concrete: when you see an unlimited approval in test logs
 
 ---
 
-## The Five-Layer Integration
+
+## Mobile Toolchain & Environment Setup
 
 <div class="chapter-intro">
-The CLI does not stand alone. When a Playwright spec calls <code>app.swap.revokeTokenApproval(account, provider)</code>, the line of code you wrote in a page object reaches across <strong>five distinct layers</strong> before a Speculos-emulated Ledger device finally signs an ERC-20 <code>approve(spender, 0)</code> transaction and broadcasts it to a public testnet. Each layer absorbs a different concern: subprocess plumbing, typed wrappers, device-tap automation, Speculos lifecycle, test orchestration. Most QA work — by far — lives in the topmost layer (the page object methods you write per ticket). The four layers below it are infrastructure that already exists and rarely changes. This chapter catalogues those layers, shows the real code from the senior engineer's <code>support/qaa_add_revoke_token</code> branch, and traces the complete end-to-end call path. Keep this open when you land on a CLI integration ticket: it will tell you which layer to touch and which to leave alone.
+Unlike desktop E2E — where <code>pnpm i</code> is roughly enough — mobile E2E requires you to install a small operating system's worth of native tooling: Xcode, Android Studio, CocoaPods, Ruby, Bundler, Java, Gradle, adb, simctl, applesimutils, a handful of emulators, and at least one simulator. This chapter is the definitive checklist. If anything breaks during the rest of Part 5, come back here.
 </div>
 
-### 5.4.1 Why Five Layers
+### 5.4.1 The Toolchain at a Glance
 
-The CLI integration is not a tower of abstraction for its own sake. Each layer absorbs a concern that the layers above it should not see. If you collapsed the architecture into one big function — say, a page object method that called `child_process.spawn` directly and also drove Speculos — the result would be unreadable, untestable, and impossible to reuse across the desktop and mobile test workspaces. The five-layer split is the price the codebase pays for two properties:
+Here is every moving part you will touch, grouped by role:
 
-1. **Reuse.** Both `e2e/desktop/` (Playwright) and `e2e/mobile/` (Detox/Jest) import the exact same `cliCommandsUtils` from `libs/ledger-live-common/src/e2e/`. There is no desktop CLI helper and a separate mobile CLI helper. The CLI integration is genuinely shared infrastructure, and that is only possible because the lower four layers know nothing about Playwright or Detox.
-2. **Locality of change.** When you add a new CLI helper for a ticket — say, "give me a typed wrapper for the new `tokenAllowance --json` output" — you touch one file (Layer 3). When you add a new POM method that uses an existing helper, you touch one file (Layer 5). The layer boundaries are designed so that the most common QA work touches the smallest surface area.
+```
+                +---------------------------------------------+
+                |             YOUR LAPTOP (macOS)             |
+                |                                             |
+                |   proto / mise  ──>  Node, pnpm, Ruby       |
+                |         │                                   |
+                |         ├─> pnpm  ──>  monorepo packages    |
+                |         │                                   |
+                |         └─> Bundler  ──>  CocoaPods (gem)   |
+                |                           │                 |
+                |                           v                 |
+                |                     Podfile / Pods          |
+                |                                             |
+                |   Xcode ──┬─> iOS Simulator                 |
+                |           ├─> simctl (CLI to sim)           |
+                |           └─> applesimutils (QA CLI)        |
+                |                                             |
+                |   Android Studio ──┬─> AVD Manager          |
+                |                    ├─> emulator (CLI)       |
+                |                    ├─> adb (device bridge)  |
+                |                    └─> Gradle / JDK         |
+                |                                             |
+                |   Metro (localhost:8081)                    |
+                |        ▲                                    |
+                |        │ http (debug only)                  |
+                |        │                                    |
+                |   +----+-----------------+                  |
+                |   |  Simulator / Emulator                   |
+                |   |   runs Ledger Live Mobile .ipa / .apk   |
+                |   +------------------------------------+    |
+                +---------------------------------------------+
+```
 
-Here is the layer table, with the path you would `cd` into to read the source:
+Pay attention to the arrows. Metro is a **dev-time** HTTP server that the app connects to **only for debug builds**. On iOS the simulator shares `localhost` with the host automatically. On Android the emulator does *not* — you must use `adb reverse` to forward port 8081 (see 33.5).
 
-| # | Path | Role | Touch frequency for QA |
-|---|---|---|---|
-| 1 | `apps/cli/bin/index.js` (and `apps/cli/src/commands/blockchain/*`) | The legacy CLI binary — Node + Commander, package `@ledgerhq/live-cli`, bin name `ledger-live`. | **Rare.** Only when adding a brand-new CLI subcommand. |
-| 2 | `libs/ledger-live-common/src/e2e/runCli.ts` | The spawn engine. `child_process.spawn`, the `+` arg separator, retry policy, error envelope. | **Rare.** Engine extensions only. |
-| 3 | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | Typed TypeScript wrappers — the curried `liveDataCommand`, plus `approveTokenCommand`, `revokeTokenCommand`, `isTokenAllowanceSufficientCommand`, etc. | **Occasional.** New helper per new ticket family. |
-| 4 | `libs/ledger-live-common/src/e2e/families/evm.ts` | Speculos device-tap automation — `approveToken`, `approveTokenTouchDevices`, `approveTokenButtonDevice`, the screen primitives. | **Rare.** New device-tap pattern. |
-| 5 | `e2e/desktop/tests/page/swap.page.ts`, `e2e/mobile/page/trade/swap.page.ts`, and per-spec `*.spec.ts` files | The POM methods (`ensureTokenApproval`, `revokeTokenApproval`) and the specs that call them. | **Frequent.** This is where most of your tickets land. |
+### 5.4.2 macOS-Only Reality (for iOS)
 
-The unwritten rule is: a layer-5 author should never have to read or edit anything in layers 1, 2, or 4. If a ticket forces you down that far, raise it as a question — the senior engineers will either point you at an existing helper or extend layer 3 for you. Layer 3 is the negotiated boundary between QA work and platform work.
+Apple legally restricts iOS development tooling to macOS:
 
-### 5.4.2 Layer 1 — The Binary `apps/cli`
+- **iOS builds require a Mac** running macOS + Xcode. There is no supported way around this.
+- **Android builds** work on macOS, Linux, and Windows.
+- Linux contributors to Ledger Live Mobile can work on Android E2E only; the CI runs iOS jobs on macOS runners.
 
-The bottom of the stack is a regular Node CLI. It lives at `apps/cli/` and is published as `@ledgerhq/live-cli`. The bin entry from `apps/cli/package.json`:
+Windows is not supported for iOS. If you are on a Ledger-issued MacBook you are fine.
+
+### 5.4.3 Version Management — `proto` and `mise`
+
+A monorepo this big needs pinned tool versions. Ledger Live uses [`mise`](https://mise.jdx.dev/) (and historically [`proto`](https://moonrepo.dev/proto)) as the single source of truth.
+
+At the repo root:
+
+```
+.prototools      (minimal: node, npm, pnpm)
+mise.toml        (full: node, pnpm, npm, bun, gitleaks, pkl, plus plugins)
+```
+
+Example `mise.toml` entries (paraphrased from the actual repo):
+
+```toml
+min_version = '2026.3.1'
+
+[plugins]
+bundler   = "jonathanmorley/asdf-bundler"
+cocoapods = "mise-plugins/mise-cocoapods"
+
+[tools]
+node = '24.14.0'
+pnpm = '10.24.0'
+npm  = '10.3.0'
+```
+
+Install `mise` once (`brew install mise`), then run `mise install` at the repo root. It reads the file and pulls down the exact versions, putting shims on your `PATH`. You never `nvm use` or `rbenv global` again — `mise` does it automatically when you `cd` into the repo.
+
+> **Note:** `mise` can also manage Ruby, Bundler, CocoaPods, and Java via plugins. The current repo comments out Ruby management (install Ruby via Homebrew), but the plugins are declared so the team can flip them on. Check `mise.toml` on the branch you are working on.
+
+> **Further reading:** [`mise.jdx.dev`](https://mise.jdx.dev/) and [`moonrepo.dev/proto`](https://moonrepo.dev/proto).
+
+### 5.4.4 iOS Side — Xcode to CocoaPods
+
+#### Xcode
+
+Install from the Mac App Store. Version should match what the repo expects (check the `ios/` project's build settings). After install, run **once**:
+
+```
+sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+sudo xcodebuild -license accept
+xcodebuild -downloadPlatform iOS
+```
+
+This accepts the license and downloads the required iOS simulator platform. See [`developer.apple.com/documentation/xcode`](https://developer.apple.com/documentation/xcode).
+
+#### iOS Simulator
+
+Bundled with Xcode. Run it via **Xcode → Open Developer Tool → Simulator**, or from the CLI through `xcrun simctl`:
+
+```
+xcrun simctl list devices         # list all simulators
+xcrun simctl boot "iPhone 15"     # boot a specific one
+xcrun simctl shutdown all         # stop all
+```
+
+Reference: [`developer.apple.com/documentation/xcode/xcrun`](https://developer.apple.com/documentation/xcode/xcrun) and [`developer.apple.com/documentation/xcode/running-your-app-in-simulator-or-on-a-device`](https://developer.apple.com/documentation/xcode/running-your-app-in-simulator-or-on-a-device).
+
+#### applesimutils
+
+The Apple `simctl` CLI is powerful but misses a few operations Detox needs — granting permissions, clearing keychains, resetting push tokens. [`applesimutils`](https://github.com/wix/AppleSimulatorUtils) from the Wix team (who also maintain Detox) fills those gaps:
+
+```
+brew tap wix/brew
+brew install applesimutils
+```
+
+If you skip this, Detox will complain at startup on iOS.
+
+#### Ruby + Bundler + CocoaPods
+
+CocoaPods is the iOS dependency manager. It is a **Ruby gem**. You do not install it globally — you use Bundler to install the exact version pinned by the repo's `Gemfile`:
+
+```ruby
+# apps/ledger-live-mobile/Gemfile (excerpt)
+source "https://rubygems.org"
+
+gem "fastlane", '~> 2.228.0'
+gem 'cocoapods', '>= 1.13', '!= 1.15.0', '!= 1.15.1', '!= 1.16.0'
+gem 'xcodeproj', '< 1.26.0'
+```
+
+Workflow:
+
+```
+cd apps/ledger-live-mobile
+bundle install                # installs all gems locally (vendor/bundle)
+bundle exec pod install --project-directory=ios
+```
+
+- `bundle install` reads the `Gemfile` + `Gemfile.lock` and installs the exact gem versions.
+- `bundle exec pod install` runs CocoaPods via Bundler, so you use the pinned version instead of whatever is on your machine.
+- `pod install` reads `ios/Podfile`, resolves all native iOS dependencies (React Native itself, Firebase SDK, WalletConnect, etc.), and generates `ios/Pods/` plus the `ios/ledgerlivemobile.xcworkspace`.
+
+> **Gotcha:** After a big dependency bump, you will often need to run `pod install` again. Symptom: the app builds but crashes on launch with a missing class. Running `bundle exec pod install --project-directory=ios` and rebuilding almost always fixes it.
+
+> **Further reading:** [`bundler.io/guides/getting_started.html`](https://bundler.io/guides/getting_started.html), [`cocoapods.org`](https://cocoapods.org/), [`guides.cocoapods.org/using/getting-started.html`](https://guides.cocoapods.org/using/getting-started.html), [`guides.cocoapods.org/using/the-podfile.html`](https://guides.cocoapods.org/using/the-podfile.html).
+
+### 5.4.5 Android Side — Studio to Gradle to adb
+
+#### Android Studio
+
+Install from [`developer.android.com/studio`](https://developer.android.com/studio). The first launch walks you through installing:
+
+- A JDK (Android Studio ships with one; you can use it)
+- The Android SDK
+- A default system image (pick API 34 or higher — check the repo's `android/build.gradle` for the target SDK)
+- At least one AVD (Android Virtual Device)
+
+Set two environment variables in your shell profile (`.zshrc`):
+
+```
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+export PATH="$PATH:$ANDROID_HOME/platform-tools:$ANDROID_HOME/emulator"
+```
+
+`platform-tools` is where `adb` lives. `emulator` is where the `emulator` CLI lives.
+
+#### AVD Manager and the `emulator` CLI
+
+AVDs are created in Android Studio: **Device Manager → Create device**. Name each one consistently, e.g. `Pixel_7_API_34`. List them from the CLI:
+
+```
+emulator -list-avds
+emulator -avd Pixel_7_API_34                 # boot one
+emulator -avd Pixel_7_API_34 -no-snapshot    # cold boot, useful after crashes
+```
+
+See [`developer.android.com/studio/run/managing-avds`](https://developer.android.com/studio/run/managing-avds) and [`developer.android.com/studio/run/emulator-commandline`](https://developer.android.com/studio/run/emulator-commandline).
+
+#### `adb` — Android Debug Bridge
+
+`adb` is the CLI that talks to connected devices and running emulators. Core commands:
+
+```
+adb devices                          # list attached devices / emulators
+adb install app.apk                  # install an APK
+adb shell pm clear com.ledger.live   # clear app data
+adb logcat                           # stream device logs
+adb reverse tcp:8081 tcp:8081        # <-- KEY for Metro
+```
+
+Reference: [`developer.android.com/tools/adb`](https://developer.android.com/tools/adb).
+
+##### Why `adb reverse tcp:8081 tcp:8081` is critical
+
+On iOS, `localhost` inside the simulator is the same as `localhost` on your Mac — so a debug build automatically reaches Metro on `http://localhost:8081/index.bundle`.
+
+On Android it is not. The Android emulator runs in its own network namespace and its `localhost` is the emulator itself, not your machine. Without help, the app opens a connection to `localhost:8081` and gets nothing.
+
+`adb reverse tcp:8081 tcp:8081` tells adb: "any TCP connection from the device to `localhost:8081` should be forwarded to `localhost:8081` on the host." Metro then answers and the debug bundle loads.
+
+In Ledger Live Mobile's E2E setup, this call happens automatically in Detox's `setup.ts`:
+
+```ts
+await device.reverseTcpPort(8081);   // Metro
+await device.reverseTcpPort(wsPort); // Device Bridge (default 8099)
+```
+
+See [`developer.android.com/tools/adb#forwardports`](https://developer.android.com/tools/adb#forwardports).
+
+> **Gotcha:** If Android debug builds crash with "Unable to load script" or an endless red screen, your first instinct should be: "did `adb reverse` run? is Metro running on 8081?"
+
+#### Gradle
+
+Gradle is Android's build system. It resolves Maven dependencies, compiles Kotlin/Java, runs annotation processors, and packages the final `.apk`. You rarely invoke it directly — RN's scripts do. When you do:
+
+```
+cd apps/ledger-live-mobile/android
+./gradlew assembleDebug
+./gradlew assembleRelease
+```
+
+The Android Gradle Plugin version must match the Gradle version, and both must match the Kotlin version the RN release expects. When in doubt, follow the versions the repo pins. See [`docs.gradle.org/current/userguide/userguide.html`](https://docs.gradle.org/current/userguide/userguide.html) and [`developer.android.com/build/releases/gradle-plugin`](https://developer.android.com/build/releases/gradle-plugin).
+
+#### System images and API levels
+
+An AVD is "a device config + a system image." The system image is a specific Android version (e.g. "Android 14, API 34, x86_64 with Google Play"). Install system images from **SDK Manager → SDK Platforms** in Android Studio. For E2E, pick the API level the Android project targets (check `android/build.gradle`'s `compileSdk`). See [`developer.android.com/tools/releases/platforms`](https://developer.android.com/tools/releases/platforms).
+
+### 5.4.6 The Ledger Live Monorepo Relevance
+
+All of the above feeds into two peer locations in the monorepo:
+
+```
+ledger-live/
+  apps/
+    ledger-live-mobile/           <-- the RN app itself
+      android/                    <-- Gradle project, AndroidManifest
+      ios/                        <-- Xcode project, Podfile
+      src/                        <-- TypeScript source
+      .env.mock                   <-- ENVFILE for mock E2E (staging Firebase)
+      .env.mock.prerelease        <-- ENVFILE for prerelease E2E (prod Firebase)
+      Gemfile                     <-- Bundler-managed gems (CocoaPods)
+      scripts/e2e-ci.mjs          <-- zx orchestrator invoked by CI
+  e2e/
+    mobile/                       <-- the canonical mobile E2E workspace (peer of apps/*)
+      detox.config.js             <-- Detox build & device matrix
+      jest.config.js              <-- Jest runner + Allure reporter config
+      specs/                      <-- ~200 .spec.ts files (covered in Ch 5.5+)
+      page/                       <-- Application POM hub (see Ch 5.7)
+      bridge/                     <-- mock device + WS server
+      package.json                <-- scripts: build:ios(:debug), test:ios(:debug), allure
+      project.json                <-- Nx targets (e2e:ci)
+```
+
+> **Migration note:** the mobile E2E code used to live inside `apps/ledger-live-mobile/e2e/`. Most of it now lives at the top-level `e2e/mobile/` peer workspace. A handful of legacy specs (about 17 at the time of writing) still sit at the old path during the in-progress migration — if you see `apps/ledger-live-mobile/e2e/...` in the wild, treat it as legacy and prefer `e2e/mobile/` for new work.
+
+Part 1 Chapter 4 explained the monorepo layout at a high level (apps vs libs vs tools). Zoom in here: the app itself (native projects, TypeScript source, env files, `e2e-ci.mjs`) stays under `apps/ledger-live-mobile/`, while the Detox test suite has been lifted into its own Nx/Turbo workspace at `e2e/mobile/`. Shared code (LLM logic, account model, countervalues) lives in `libs/` and is consumed through the monorepo workspace links, exactly like Desktop.
+
+### 5.4.7 `ENVFILE` — Which Firebase Project Do You Mock Against?
+
+Ledger Live Mobile reads its environment from a dotenv file pointed at by the `ENVFILE` variable. Two files matter for QA:
+
+| File | Firebase / feature-flag backend | When to use |
+|------|--------------------------------|-------------|
+| `.env.mock`             | **Staging** Firebase (feature flags for dev + QA) | Default for local E2E and CI |
+| `.env.mock.prerelease`  | **Production** Firebase (what real users see)     | Pre-release smoke tests only |
+
+The `mock` suffix does not mean "fake everything." It means "run the app against **mocked** Ledger Sync, Countervalues, and Speculos-driven device flows" — the rest (Firebase, deep links, navigation) is still real. We mock because tests must be deterministic and must not spend real crypto or depend on external API availability.
+
+Typical usage (canonical command):
+
+```
+pnpm e2e:mobile run build:ios:debug
+```
+
+The build scripts read `ENVFILE` (set inside `e2e/mobile/detox.config.js` as `apps/ledger-live-mobile/.env.mock` or `.env.mock.prerelease`) and inject it into the native build, so both JS and native code see the same values. The env files themselves still live at the app root (`apps/ledger-live-mobile/.env.mock` / `.env.mock.prerelease`) and are not checked in — see the internal `mobile-env.md` for the list of required keys.
+
+> **Gotcha:** If `ENVFILE` is missing or unreadable, the app crashes on first launch with "Firebase config missing." Running the canonical scripts above is the safe path — they rely on the `detox.config.js` constants so you rarely need to export `ENVFILE` yourself.
+
+### 5.4.8 Build Commands — the `e2e/mobile` workspace scripts
+
+Since the migration, the Detox build and test scripts live in `e2e/mobile/package.json`. There are three equivalent ways to invoke them — pick whichever fits your mental model:
+
+**1. From the repo root via pnpm filter (recommended in docs & CI):**
+
+```
+pnpm e2e:mobile run build:ios:debug
+pnpm e2e:mobile run build:ios        # iOS release
+pnpm e2e:mobile run build:android:debug
+pnpm e2e:mobile run build:android    # Android release
+```
+
+**2. From inside the `e2e/mobile/` workspace:**
+
+```
+cd e2e/mobile
+pnpm build:ios:debug
+pnpm build:ios
+pnpm build:android:debug
+pnpm build:android
+```
+
+**3. Directly via Nx (what CI ultimately runs):**
+
+```
+nx run live-mobile:e2e:build -- --configuration ios.sim.debug
+nx run live-mobile:e2e:build -- --configuration ios.sim.release
+nx run live-mobile:e2e:build -- --configuration android.emu.debug
+nx run live-mobile:e2e:build -- --configuration android.emu.release
+```
+
+Breaking those down:
+
+- `pnpm e2e:mobile` is a root-level alias declared in the monorepo `package.json` (`"e2e:mobile": "pnpm --filter ledger-live-mobile-e2e-tests"`). It forwards the rest of the command to the `e2e/mobile/` workspace. If the alias is missing on your branch, substitute `pnpm --filter ledger-live-mobile-e2e-tests`.
+- `build:ios:debug` ultimately invokes `pnpm --filter live-mobile run e2e:build --configuration ios.sim.debug`, which triggers the Nx target `live-mobile:e2e:build` and runs `detox build -c ios.sim.debug` inside the mobile app.
+- The configuration name (`ios.sim.debug`, `ios.sim.release`, etc.) selects a configuration from `e2e/mobile/detox.config.js`. The full list exposed in the repo is:
+
+| Config                   | Platform | Build type | Firebase / flags source      |
+|--------------------------|----------|------------|------------------------------|
+| `ios.sim.debug`          | iOS      | Debug      | `.env.mock` (staging)        |
+| `ios.sim.staging`        | iOS      | Staging    | Staging Firebase             |
+| `ios.sim.release`        | iOS      | Release    | Production-like, mock flags  |
+| `ios.sim.prerelease`     | iOS      | Prerelease | `.env.mock.prerelease` (prod)|
+| `android.emu.debug`      | Android  | Debug      | `.env.mock` (staging)        |
+| `android.emu.staging`    | Android  | Staging    | Staging Firebase             |
+| `android.emu.release`    | Android  | Release    | Production-like, mock flags  |
+| `android.emu.prerelease` | Android  | Prerelease | `.env.mock.prerelease` (prod)|
+
+Rules of thumb:
+- For iterating on tests locally → `ios.sim.debug` or `android.emu.debug`. Fast, hot-reloadable.
+- For reproducing a CI failure → the same `release` config CI uses. Slower but bytecode-accurate.
+- For smoke-testing a release candidate before store submission → `prerelease`. Runs against production Firebase, so you see the flags real users will see.
+
+The `test:*` scripts then run the already-built app. From inside `e2e/mobile/`:
+
+```
+pnpm test:ios:debug                 # iOS debug
+pnpm test:ios                       # iOS release
+pnpm test:android:debug             # Android debug
+pnpm test:android                   # Android release
+```
+
+Or from the repo root:
+
+```
+pnpm e2e:mobile run test:ios:debug
+```
+
+Each of these ultimately expands to `detox test --configuration <config>` with `detox` resolved from `e2e/mobile/node_modules` and pointing at `e2e/mobile/detox.config.js`.
+
+Chapter 5.5 will dig into the Detox runner side. Here we only care that the **build** step produces an artifact (`.app` or `.apk`) that Detox can install.
+
+### 5.4.9 Verifying Your Setup — A Checklist
+
+Before you ever try to run a real test, go through this list. Each step has an expected output; if yours differs, stop and fix it before moving on.
+
+**1. Tool versions**
+
+```
+mise --version            # >= 2026.3.1
+node -v                   # 24.14.x
+pnpm -v                   # 10.24.x
+ruby -v                   # 3.x (via Homebrew or mise)
+bundle -v                 # 2.x
+pod --version             # 1.13+
+```
+
+**2. Xcode & simulators**
+
+```
+xcodebuild -version       # Xcode <pinned version>
+xcrun simctl list devices | grep Booted    # at least one simulator or nothing yet
+applesimutils --list      # prints simulators; means applesimutils works
+```
+
+**3. Android tools**
+
+```
+adb version               # Android Debug Bridge version
+adb devices               # List of devices — empty is fine, not missing
+emulator -list-avds       # Prints at least one AVD name
+echo $ANDROID_HOME        # Prints /Users/you/Library/Android/sdk
+```
+
+**4. Repo-level install**
+
+From the monorepo root:
+
+```
+pnpm install              # Installs all workspace packages
+cd apps/ledger-live-mobile
+bundle install            # Installs Ruby gems (CocoaPods, fastlane)
+bundle exec pod install --project-directory=ios
+```
+
+Expected: `pnpm install` completes without errors, `bundle install` prints "Bundle complete!", `pod install` prints "Pod installation complete!"
+
+**5. Metro can start**
+
+```
+pnpm mobile start         # Starts Metro on http://localhost:8081
+```
+
+Visit `http://localhost:8081/status` in a browser — you should see `packager-status:running`.
+
+**6. Build a debug app**
+
+```
+pnpm e2e:mobile run build:ios:debug
+# or: cd e2e/mobile && pnpm build:ios:debug
+```
+
+Expected: `xcodebuild` runs for several minutes, ends with "BUILD SUCCEEDED" and the built `.app` lands inside the Detox build output directory (resolved via `detox.config.js` to `apps/ledger-live-mobile/ios/build`).
+
+If all six pass, you are ready for Chapter 5.5 where we finally introduce Detox and wire the first test.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://developer.apple.com/documentation/xcode">Xcode documentation</a></li>
+<li><a href="https://developer.apple.com/documentation/xcode/xcrun">xcrun / simctl</a></li>
+<li><a href="https://developer.apple.com/documentation/xcode/running-your-app-in-simulator-or-on-a-device">Running your app in Simulator</a></li>
+<li><a href="https://developer.android.com/tools/adb">adb reference</a></li>
+<li><a href="https://developer.android.com/tools/adb#forwardports">adb: port forwarding / reverse</a></li>
+<li><a href="https://developer.android.com/studio/run/managing-avds">Managing AVDs</a></li>
+<li><a href="https://developer.android.com/studio/run/emulator-commandline">emulator CLI</a></li>
+<li><a href="https://developer.android.com/tools/releases/platforms">Android platforms &amp; API levels</a></li>
+<li><a href="https://cocoapods.org/">CocoaPods</a> and <a href="https://guides.cocoapods.org/using/getting-started.html">Getting Started</a> / <a href="https://guides.cocoapods.org/using/the-podfile.html">The Podfile</a></li>
+<li><a href="https://bundler.io/">Bundler</a> and <a href="https://bundler.io/guides/getting_started.html">Getting Started</a></li>
+<li><a href="https://docs.gradle.org/current/userguide/userguide.html">Gradle user guide</a> and <a href="https://developer.android.com/build/releases/gradle-plugin">Android Gradle Plugin</a></li>
+<li><a href="https://moonrepo.dev/proto">proto</a> and <a href="https://mise.jdx.dev/">mise</a></li>
+<li><a href="https://github.com/wix/AppleSimulatorUtils">applesimutils</a></li>
+</ul>
+</div>
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Mobile E2E needs an entire platform toolchain on top of Node — Xcode + simulator + applesimutils + CocoaPods/Ruby/Bundler on the iOS side, and Android Studio + AVDs + adb + Gradle on the Android side. <code>mise</code> pins versions; <code>ENVFILE</code> (wired in <code>e2e/mobile/detox.config.js</code>) picks which Firebase backend you test against; <code>pnpm e2e:mobile run build:ios:debug</code> (or the equivalent in-workspace <code>pnpm build:ios:debug</code>, or <code>nx run live-mobile:e2e:build -- --configuration ios.sim.debug</code>) compiles the app for Detox. On Android, <code>adb reverse tcp:8081 tcp:8081</code> is what makes debug builds able to reach Metro — without it, you get a red screen and a very confused developer.
+</div>
+
+### 5.4.10 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Mobile Toolchain &amp; Environment Setup</h3>
+<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> Why does <code>adb reverse tcp:8081 tcp:8081</code> exist in the Android E2E setup?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) To expose Detox's runner to the emulator</button>
+<button class="quiz-choice" data-value="B">B) To reset the emulator's network stack</button>
+<button class="quiz-choice" data-value="C">C) The emulator's <code>localhost</code> is not the host's — this command forwards the device's <code>localhost:8081</code> to the host's Metro on <code>localhost:8081</code></button>
+<button class="quiz-choice" data-value="D">D) It is only used in release builds</button>
+</div>
+<p class="quiz-explanation">Android emulators have their own network namespace. Debug builds need to load the JS bundle from Metro on the host machine. <code>adb reverse</code> forwards the emulator's <code>localhost:8081</code> to the host's <code>localhost:8081</code>. iOS simulators share the host network so this is not needed.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q2.</strong> Why install CocoaPods via <code>bundle install</code> rather than <code>gem install cocoapods</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Bundler installs the exact gem versions pinned in <code>Gemfile</code> / <code>Gemfile.lock</code>, ensuring every engineer uses the same CocoaPods version</button>
+<button class="quiz-choice" data-value="B">B) <code>gem install</code> does not work on macOS</button>
+<button class="quiz-choice" data-value="C">C) Bundler installs faster</button>
+<button class="quiz-choice" data-value="D">D) CocoaPods can only be installed through Bundler</button>
+</div>
+<p class="quiz-explanation">The repo pins specific versions (e.g. excluding known-broken CocoaPods 1.15.0 / 1.15.1 / 1.16.x). Bundler reads <code>Gemfile.lock</code> and installs those exact versions, so <code>bundle exec pod install</code> uses a reproducible CocoaPods on every machine and in CI.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q3.</strong> What is the practical difference between <code>.env.mock</code> and <code>.env.mock.prerelease</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) One enables mocks, the other disables them</button>
+<button class="quiz-choice" data-value="B">B) <code>.env.mock</code> points to the staging Firebase project; <code>.env.mock.prerelease</code> points to the production Firebase project</button>
+<button class="quiz-choice" data-value="C">C) <code>.env.mock</code> is for iOS, <code>.env.mock.prerelease</code> is for Android</button>
+<button class="quiz-choice" data-value="D">D) They are identical — the suffix is cosmetic</button>
+</div>
+<p class="quiz-explanation">Both activate the same mocking strategy for Ledger Sync, countervalues, and device flows. They differ in which Firebase project (therefore which feature-flag set) the app reads from. Day-to-day E2E uses staging; pre-release smoke tests validate against production feature flags before shipping to users.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> What does <code>pnpm e2e:mobile run build:ios</code> (equivalent to <code>nx run live-mobile:e2e:build -- --configuration ios.sim.release</code>) produce, and what is it used for?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A debug <code>.app</code> ready for hot reload</button>
+<button class="quiz-choice" data-value="B">B) A Firebase release tag</button>
+<button class="quiz-choice" data-value="C">C) A signed IPA for TestFlight</button>
+<button class="quiz-choice" data-value="D">D) A release-mode iOS <code>.app</code> for the simulator — JS is pre-bundled (no Metro), ideal for reproducing CI failures</button>
+</div>
+<p class="quiz-explanation">The <code>*.release</code> Detox configs build a release-mode app: Hermes bytecode, bundled JS, no dev menu. This matches what CI runs, so it is the configuration to reach for when reproducing a CI-only bug locally.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> You skipped installing <code>applesimutils</code>. What symptom will you see first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) The iOS build fails in <code>xcodebuild</code></button>
+<button class="quiz-choice" data-value="B">B) Detox fails at startup on iOS because it cannot grant permissions / reset the simulator</button>
+<button class="quiz-choice" data-value="C">C) Metro refuses to start</button>
+<button class="quiz-choice" data-value="D">D) The tests pass but Allure produces no report</button>
+</div>
+<p class="quiz-explanation"><code>applesimutils</code> supplies operations that plain <code>simctl</code> does not cover — granting permissions, clearing keychains, resetting push tokens. Detox calls it during test setup. Without it installed, the iOS run aborts almost immediately.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q6.</strong> What role does <code>mise</code> (or <code>proto</code>) play in the toolchain?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It pins exact versions of Node, pnpm, and optionally Ruby / CocoaPods / Java, and activates them automatically when you <code>cd</code> into the repo</button>
+<button class="quiz-choice" data-value="B">B) It is a replacement for Gradle</button>
+<button class="quiz-choice" data-value="C">C) It is the iOS build system</button>
+<button class="quiz-choice" data-value="D">D) It manages Android AVDs</button>
+</div>
+<p class="quiz-explanation"><code>mise</code> reads <code>mise.toml</code> / <code>.prototools</code> at the repo root and shims the right versions of each tool onto your <code>PATH</code>. This removes the class of bugs where "works on my machine" means "works on <em>my</em> Node version."</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+## Detox from Zero: Core Concepts
+
+<div class="chapter-intro">
+Detox is to React Native what Playwright is to the web — a grey-box end-to-end framework that drives a real application running on a real device (or simulator/emulator). If you have never touched it, this chapter takes you from "what is Detox?" to reading and writing tests confidently. Every concept is anchored in Ledger Live Mobile code. After this chapter you will understand the three-verb grammar of Detox (matcher, action, expectation), the synchronization model, and why mobile E2E feels different from web E2E even though the surface APIs look similar.
+</div>
+
+### 5.5.1 What Is Detox?
+
+Detox is an open-source **grey-box** end-to-end testing framework for React Native, created and maintained by **Wix** since 2016. Wix built it because, at scale, their React Native app was flaky under every black-box tool available (Appium in particular). Their insight: a test runner that has **privileged, in-process knowledge** of the app under test can detect when the app is busy — and wait deterministically — rather than guessing with arbitrary `sleep()` calls.
+
+**Key facts:**
+- Language: TypeScript/JavaScript
+- Created by: Wix (the website builder)
+- First release: 2016
+- Targets: React Native on iOS and Android only
+- Runs on top of: **EarlGrey 2** (iOS) and **Espresso** (Android) — both are Google-maintained native UI test drivers
+- Killer feature: **synchronization** — Detox knows when the app's JS bridge, dispatch queues, animations, timers, and network calls are idle, and it automatically waits until the app is idle before performing the next action
+
+**Grey-box vs black-box — what the difference actually means:**
+
+| Aspect | Black-box (Appium) | Grey-box (Detox) |
+|--------|--------------------|------------------|
+| How it drives the app | Talks to an external OS-level agent (WebDriverAgent on iOS, UIAutomator2 on Android) over HTTP | Injects a native test library into the app itself (EarlGrey/Espresso) |
+| Knowledge of app state | None — sees only what the OS accessibility tree exposes | Full — sees the JS bridge, dispatch queues, animations, timers, network |
+| Waiting strategy | Poll with timeouts (`implicitWait`) | Wait for app to be idle, then act |
+| Flakiness | High — tests need explicit waits and retries everywhere | Low — idle detection eliminates most race conditions |
+| Speed | Slow — every command is an HTTP round-trip to an agent | Fast — commands run inside the app process |
+| Cross-platform real devices | Yes, on real devices + simulators | Simulators and emulators primarily (real device support is experimental) |
+
+> **Why this matters for Ledger Live:** our React Native app talks to a Ledger device over BLE/USB, downloads feature flags, imports Redux state, dispatches mock device events from the bridge — a huge amount happens asynchronously on startup. Black-box testing this with arbitrary waits would be miserable. Detox waits for the bridge to be idle before it does anything.
+
+**Detox vs Playwright — same verbs, very different model:**
+
+| | Playwright (web/Electron) | Detox (React Native) |
+|---|---|---|
+| Driver protocol | Chrome DevTools Protocol (in-process) | Native test library injected into the app |
+| Locator primitive | `Locator` — a lazy, retryable query | `Element` — a matcher reference, not a node |
+| Auto-waiting | Actionability checks (attached, visible, stable, enabled) | App-wide idle detection (bridge + queues + timers + animations) |
+| Assertion syntax | `expect(locator).toBeVisible()` | `expect(element(by.id("x"))).toBeVisible()` |
+| Parallelism | Workers share a browser or spawn many | Each worker needs its own device/simulator |
+| Cleanup granularity | `context` per test | `device` per worker, state management is manual |
+
+The two tools look deceptively similar on the page. The underlying model is very different: Playwright watches the DOM; Detox watches the whole app runtime.
+
+### 5.5.2 The Matcher–Action–Expectation Triad
+
+Every Detox test boils down to three kinds of calls:
+
+1. **Matcher** — how do I describe the element I want? (`by.id("send-button")`)
+2. **Action** — what do I do to it? (`.tap()`)
+3. **Expectation** — what should be true after? (`expect(...).toBeVisible()`)
+
+The three are composed through `element()`:
+
+```typescript
+import { by, element, expect } from "detox";
+
+await element(by.id("send-button")).tap();                 // matcher + action
+await expect(element(by.text("Send"))).toBeVisible();      // matcher + expectation
+```
+
+**Side-by-side examples:**
+
+```typescript
+// (1) Tap a button identified by testID
+await element(by.id("onboarding-skip")).tap();
+
+// (2) Type into a text field then assert visibility of a result
+await element(by.id("search-input")).typeText("Bitcoin");
+await expect(element(by.text("Bitcoin (BTC)"))).toBeVisible();
+
+// (3) Scroll a list until an element appears
+await waitFor(element(by.text("Solana")))
+  .toBeVisible()
+  .whileElement(by.id("currencies-list"))
+  .scroll(200, "down");
+
+// (4) Long-press then assert a context menu opened
+await element(by.id("account-row-bitcoin")).longPress();
+await expect(element(by.id("account-context-menu"))).toExist();
+
+// (5) Replace text (faster than typeText) and assert value
+await element(by.id("amount-input")).replaceText("0.001");
+await expect(element(by.id("amount-input"))).toHaveValue("0.001");
+```
+
+> **Rule:** every Detox statement is either "find + do" (matcher + action) or "find + assert" (matcher + expectation). If a line isn't one of those, you probably want `device.*` (see 34.8) or a `waitFor(...)` polling construct (see 34.7).
+
+### 5.5.3 Matchers — `by.*`
+
+Matchers are small description objects that tell Detox "the element is the one whose *X* equals *Y*". They do **not** find anything yet. They just describe.
+
+| Matcher | What it matches | Android | iOS |
+|---------|-----------------|---------|-----|
+| `by.id("send-btn")` | React Native `testID` prop | `android:tag` | `accessibilityIdentifier` |
+| `by.text("Send")` | Visible text content | `android:text` | label/text |
+| `by.label("Send button")` | Accessibility label | `contentDescription` | `accessibilityLabel` |
+| `by.type("RCTTextInput")` | Native view class name | Full Java class name | Full ObjC class name |
+| `by.traits(["button"])` | iOS accessibility traits | not supported | `accessibilityTraits` |
+
+**`by.id` is the idiomatic choice**, for the same reason `getByTestId` dominates in Playwright: it is stable, short, and injected by developers specifically for tests. The React Native source looks like this:
+
+```tsx
+<Pressable testID="onboarding-skip" onPress={handleSkip}>
+  <Text>Skip</Text>
+</Pressable>
+```
+
+And the test:
+
+```typescript
+await element(by.id("onboarding-skip")).tap();
+```
+
+**Composition** — when a test ID alone is not unique (e.g. many rows in a list), compose matchers with `.and(...)`, `.withAncestor(...)`, `.withDescendant(...)`:
+
+```typescript
+// Combine: the element with testID "row" AND containing text "Bitcoin"
+await element(by.id("row").and(by.text("Bitcoin"))).tap();
+
+// Ancestor: the "delete" button whose ancestor has testID "row-bitcoin"
+await element(by.id("delete").withAncestor(by.id("row-bitcoin"))).tap();
+
+// Descendant: the row that contains a child with testID "badge-selected"
+await element(by.id("row").withDescendant(by.id("badge-selected"))).tap();
+```
+
+When multiple elements match, use `atIndex(n)`:
+
+```typescript
+await element(by.id("account-row")).atIndex(0).tap();  // first account row
+```
+
+This is exactly what Ledger Live does in `e2e/helpers/elementHelpers.ts`:
+
+```typescript
+getElementById(id: string | RegExp, index = 0) {
+  return element(by.id(id)).atIndex(index);
+},
+```
+
+> **Reference:** https://wix.github.io/Detox/docs/api/matchers
+
+### 5.5.4 Actions — `element(...).*`
+
+Once you have a matcher, you pick an action. Actions return promises — always `await` them.
+
+| Action | What it does | Typical use |
+|--------|--------------|-------------|
+| `tap()` | Single tap at the element's centre | Buttons, list rows |
+| `longPress(duration?)` | Press-and-hold | Context menus, reordering |
+| `multiTap(times)` | Tap N times in quick succession | Double-tap to zoom |
+| `tapAtPoint({ x, y })` | Tap at a specific offset inside the element | Click on a map, on a specific part of a custom view |
+| `typeText(text)` | Simulate per-character keystrokes | Inputs that react to each character (autocomplete) |
+| `replaceText(text)` | Replace the whole value atomically (no keystrokes) | Fast form filling — preferred when you don't need the per-char handlers |
+| `clearText()` | Clear an input | Reset before typing |
+| `scroll(amount, direction, startX?, startY?)` | Scroll the element by N pixels | Lists, scroll views |
+| `scrollTo(edge)` | Scroll to `"top"`, `"bottom"`, `"left"`, `"right"` | Jump to list edges |
+| `swipe(direction, speed?, percentage?)` | Swipe gesture on the element | Dismiss rows, pull-to-refresh |
+| `pinch(scale, speed?, angle?)` | Pinch zoom gesture | Maps, images |
+
+**Real examples:**
+
+```typescript
+// Tap a button
+await element(by.id("continue-button")).tap();
+
+// Type a BIP39 word, expect autocomplete to react
+await element(by.id("word-input-1")).typeText("abandon");
+
+// Replace text — faster, skips per-character events
+await element(by.id("amount-input")).replaceText("0.00123");
+
+// Clear then replace
+await element(by.id("amount-input")).clearText();
+await element(by.id("amount-input")).replaceText("1.0");
+
+// Scroll a list 200px down, starting from 80% of its height (Android gotcha)
+await element(by.id("account-list")).scroll(200, "down", NaN, 0.8);
+
+// Swipe left on a row to reveal delete
+await element(by.id("account-row-bitcoin")).swipe("left", "fast", 0.75);
+
+// Pull-to-refresh
+await element(by.id("portfolio-scroll")).swipe("down", "slow", 0.9);
+```
+
+> **Android gotcha (from `elementHelpers.ts`):** on Android, starting a scroll at `y = 0.5` (middle) often triggers a long-press on a list row. The Ledger Live helpers use `startPositionY = 0.8`:
+> ```typescript
+> const startPositionY = 0.8; // Needed on Android to scroll views: https://github.com/wix/Detox/issues/3918
+> ```
+
+> **Reference:** https://wix.github.io/Detox/docs/api/actions
+
+### 5.5.5 Expectations — `expect(...).*`
+
+Expectations retry-wait for up to a small internal timeout (≈ 1s by default, but synchronization-gated — see 35.3) and then throw if the condition is false.
+
+| Expectation | Meaning |
+|-------------|---------|
+| `toBeVisible()` | Element is rendered AND visible on screen (intersection > 75% by default) |
+| `toExist()` | Element exists in the hierarchy (may be off-screen) |
+| `toHaveText(text)` | The element's text content equals `text` |
+| `toHaveValue(value)` | The element's value equals `value` (inputs, switches) |
+| `toHaveLabel(label)` | Accessibility label equals `label` |
+| `toHaveId(id)` | testID equals `id` |
+| `toBeFocused()` | Element currently has input focus |
+| `toHaveSliderPosition(n)` | Slider is at position `n` |
+
+Every expectation can be negated with `.not`:
+
+```typescript
+await expect(element(by.id("loading-spinner"))).not.toBeVisible();
+await expect(element(by.id("error-banner"))).not.toExist();
+```
+
+**Mental model — `toBeVisible` vs `toExist`:**
+
+- `toExist()` only checks the view hierarchy. A detached `View` deep under a collapsed scroll view counts as existing.
+- `toBeVisible()` requires the element's visible area to exceed 75% of its size — it's much stricter, and it is the right default for "the user can see this".
+
+```typescript
+// Correct — assert the user can see the button
+await expect(element(by.id("send-button"))).toBeVisible();
+
+// Correct — assert the row is in the DOM even if off-screen (common for virtualized lists)
+await expect(element(by.id("account-row-42"))).toExist();
+```
+
+> **Reference:** https://wix.github.io/Detox/docs/api/expect
+
+### 5.5.6 `element()` Is Not an Element
+
+This is the number-one source of confusion for people coming from Playwright, Selenium, or DOM manipulation.
+
+```typescript
+const btn = element(by.id("send-button"));
+```
+
+`btn` is **not a reference to a UI node**. It is a reference to a *query* — a matcher wrapped in a proxy — that Detox will resolve **every time** you call an action or expectation on it. There is no `await`, no round-trip to the device here. Nothing has happened yet.
+
+This means:
+
+- You can declare `element()` proxies eagerly at the top of a page object — it is free.
+- The same proxy can resolve to different physical views across navigations — you don't need to re-create it.
+- If the matcher is ambiguous, `element(...)` itself doesn't throw; the action/expectation does.
+
+**Compare to Playwright's `Locator`:** same idea. A `Locator` is also lazy and re-evaluates on each action. The mental model carries over cleanly.
+
+```typescript
+// Declare once, use many times
+const amountInput = element(by.id("amount-input"));
+await amountInput.clearText();
+await amountInput.replaceText("0.001");
+await expect(amountInput).toHaveValue("0.001");
+```
+
+> **Reference:** https://wix.github.io/Detox/docs/api/the-element-object
+
+### 5.5.7 `waitFor(...)` — Polling With a Timeout
+
+Expectations have a short internal wait. When you need to wait longer — for example, for a screen to finish loading, or for a list to scroll until an item comes into view — use `waitFor(...)`:
+
+```typescript
+import { waitFor } from "detox";
+
+// Wait up to 10s for the portfolio screen to appear
+await waitFor(element(by.id("portfolio-screen")))
+  .toBeVisible()
+  .withTimeout(10000);
+```
+
+The chain is:
+1. `waitFor(element(...))` — what to poll
+2. `.toBeVisible()` / `.toExist()` / `.toHaveText(...)` / etc. — the condition
+3. `.withTimeout(ms)` — the overall deadline
+
+**`whileElement(...)` — scroll until visible:**
+
+One of Detox's most useful patterns is "keep scrolling this list until the target is visible":
+
+```typescript
+await waitFor(element(by.text("Solana")))
+  .toBeVisible()
+  .whileElement(by.id("currencies-list"))
+  .scroll(200, "down");
+```
+
+This says: poll for `by.text("Solana")` to be visible; while it isn't, scroll the list 200px down, then re-check. It is the idiomatic way to find items in long lists.
+
+The Ledger Live wrapper is simply a tiny default-timeout helper:
+
+```typescript
+// e2e/helpers/elementHelpers.ts
+waitForElementById(id: string | RegExp, timeout: number = DEFAULT_TIMEOUT) {
+  return waitFor(element(by.id(id)))
+    .toBeVisible()
+    .withTimeout(timeout);
+},
+```
+
+With `DEFAULT_TIMEOUT = 60000` — 60 seconds. Long, because mobile startup + Speculos handshake takes time.
+
+> **Reference:** https://wix.github.io/Detox/docs/api/waitfor
+
+### 5.5.8 The `device` Global
+
+`device` is the process-wide handle to the simulator/emulator. It is imported from `detox`:
+
+```typescript
+import { device } from "detox";
+```
+
+| Method | What it does |
+|--------|--------------|
+| `device.launchApp(opts?)` | Launch/relaunch the app under test with optional `launchArgs`, `permissions`, `languageAndLocale`, `newInstance`, etc. |
+| `device.reloadReactNative()` | Reload the JS bundle without restarting the native side. Fast test isolation for pure-RN state. |
+| `device.terminateApp()` | Kill the app process cleanly |
+| `device.sendToHome()` | Send the app to background (home screen). Used to test backgrounding |
+| `device.takeScreenshot(name)` | Capture a screenshot, attached to the Detox artifacts folder |
+| `device.generateViewHierarchyXml()` | Dump the entire native view tree as XML — gold for debugging "why doesn't this match?" |
+| `device.openURL({ url })` | Open a deeplink (e.g. `ledgerlive://portfolio`) |
+| `device.sendUserNotification(payload)` | Simulate a push notification tap |
+| `device.getPlatform()` | `"ios"` or `"android"` — use to branch test logic |
+| `device.reverseTcpPort(port)` | Android only: forward `emulator:port → host:port` (see 35.7) |
+| `device.disableSynchronization()` | Turn off idle detection for stubborn screens (see 35.4) |
+
+**Real usage from Ledger Live `commonHelpers.ts`:**
+
+```typescript
+const BASE_DEEPLINK = "ledgerlive://";
+
+/** @param path the part after "ledgerlive://", e.g. "portfolio" */
+export async function openDeeplink(path?: string) {
+  await device.openURL({ url: BASE_DEEPLINK + path });
+}
+
+export function isAndroid() {
+  return device.getPlatform() === "android";
+}
+```
+
+And the launch call:
+
+```typescript
+await device.launchApp({
+  launchArgs: {
+    wsPort: port,                                  // which port the bridge server is on
+    detoxURLBlacklistRegex: '\\(...\\)',           // URLs to NOT wait on (analytics, etc.)
+    mock: getEnv("MOCK") ? getEnv("MOCK") : "1",   // mock mode flag
+    IS_TEST: true,
+  },
+  languageAndLocale: { language: "en-US", locale: "en-US" },
+  permissions: { camera: "YES" },                  // pre-grant iOS permissions
+});
+```
+
+The `launchArgs` object is turned into CLI-style flags that the native code reads on boot (via `react-native-launch-arguments`). This is how the bridge client learns which WebSocket port to connect to.
+
+> **Reference:** https://wix.github.io/Detox/docs/api/device
+
+### 5.5.9 Your First Detox Test — Line by Line
+
+Here is the minimal possible Detox spec. Nothing Ledger-specific, just the framework:
+
+```typescript
+// firstTest.spec.ts
+import { by, device, element, expect } from "detox";
+
+describe("First Detox test", () => {
+  beforeAll(async () => {
+    await device.launchApp();               // (1)
+  });
+
+  beforeEach(async () => {
+    await device.reloadReactNative();       // (2)
+  });
+
+  it("shows the welcome screen on boot", async () => {
+    await expect(element(by.id("welcome"))).toBeVisible();  // (3)
+  });
+
+  it("navigates to settings when the gear is tapped", async () => {
+    await element(by.id("gear-button")).tap();              // (4)
+    await expect(element(by.text("Settings"))).toBeVisible();
+  });
+});
+```
+
+**Walk-through:**
+
+1. `device.launchApp()` — installs (if needed) and launches the app on the configured device. This happens once before all tests in the file.
+2. `device.reloadReactNative()` — between every test, reload only the JS bundle. Much faster than a full `launchApp()` and enough to reset RN state for most tests. (When you need a full reset — e.g. the bridge client has to reconnect — use `device.launchApp({ newInstance: true })`.)
+3. Matcher + expectation: find the element whose `testID === "welcome"`, assert it is visible. Detox synchronizes internally: if the splash screen is still animating, it waits.
+4. Matcher + action: tap the gear button. Detox waits for the app to be idle (no pending animations, no pending JS, no in-flight network in the non-blacklisted set), then taps, then waits again.
+
+There is no `sleep()`, no `waitForTimeout()`, no polling loop. That is the entire point of Detox.
+
+### 5.5.10 The Platform Split — EarlGrey vs Espresso
+
+Detox is a thin-ish cross-platform façade over two very different native drivers:
+
+- **iOS:** [EarlGrey 2](https://github.com/google/EarlGrey) — Google's iOS UI test driver. Runs in the same process as the app. Hooks into `CADisplayLink`, `NSURLSession`, `NSOperationQueue`, main dispatch queue, etc., to detect idle.
+- **Android:** [Espresso](https://developer.android.com/training/testing/espresso) — Google's Android UI test driver. Runs in an instrumented test process. Hooks into the main looper, `IdlingResource`s, view tree observer.
+
+**Consequences you will hit in practice:**
+
+| Symptom | iOS (EarlGrey) | Android (Espresso) |
+|---------|----------------|--------------------|
+| Test IDs resolve to | `accessibilityIdentifier` | `android:tag` |
+| `by.text` matches against | `UILabel`/`UITextView` text | `android:text` (excludes children's text unless the view is a merged node) |
+| `scroll()` starting position | Safe at `(NaN, 0.5)` | Often fails — use `(NaN, 0.8)` (see 34.4 gotcha) |
+| Long lists | Virtualized `FlatList` rows exist when scrolled near, so `toExist` works after reaching them | Same |
+| Networking idle | Watches `NSURLSession` | Watches OkHttp via an IdlingResource |
+| Per-worker isolation | One Simulator per worker (simulator shutdown is cheap) | One Emulator per worker (emulator boot is expensive) |
+
+You rarely need to branch by platform in test logic, but you *do* have to remember that:
+
+- **`reverseTcpPort` is Android-only.** On iOS simulator, `localhost` in the app === `localhost` on the host, so no port forwarding is needed (see 35.7).
+- **Android APKs ship as a pair**: the app APK plus a `testBinaryPath` (the instrumentation APK that hosts Espresso). The `detox.config.js` declares both. iOS ships a single `.app` bundle.
+
+> **Why this matters for flakiness:** most "my test works on iOS but fails on Android" bugs trace back to one of: (a) wrong `by.text` match because Android excludes nested text, (b) scroll gesture rejected because it started on a pressable, (c) a missing `device.reverseTcpPort()` so the bridge client can't reach the host.
+
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://wix.github.io/Detox/docs/introduction/getting-started">Detox: Getting Started</a> — official onboarding doc</li>
+<li><a href="https://wix.github.io/Detox/docs/api/matchers">Detox: Matchers API</a> — full <code>by.*</code> reference</li>
+<li><a href="https://wix.github.io/Detox/docs/api/actions">Detox: Actions API</a> — every action with options</li>
+<li><a href="https://wix.github.io/Detox/docs/api/expect">Detox: Expectations API</a> — assertion reference</li>
+<li><a href="https://wix.github.io/Detox/docs/api/the-element-object">Detox: The element() Object</a> — why it's a proxy, not a node</li>
+<li><a href="https://wix.github.io/Detox/docs/api/waitfor">Detox: waitFor API</a> — polling and <code>whileElement</code></li>
+<li><a href="https://wix.github.io/Detox/docs/api/device">Detox: device API</a> — the process-wide device handle</li>
+<li><a href="https://github.com/google/EarlGrey">EarlGrey 2</a> — the iOS driver Detox wraps</li>
+<li><a href="https://developer.android.com/training/testing/espresso">Espresso</a> — the Android driver Detox wraps</li>
+</ul>
+</div>
+
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Detox is a grey-box React Native E2E framework. Every test reduces to three verbs — matcher, action, expectation — composed through a lazy <code>element()</code> proxy. It synchronizes automatically with the app's internal queues, so you almost never write <code>sleep()</code>. Under the hood, iOS runs on EarlGrey and Android on Espresso, and the small platform seams (scroll start position, <code>reverseTcpPort</code>, APK vs app bundle) are the ones you'll hit in practice.
+</div>
+
+### 5.5.11 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Detox Core Concepts</h3>
+<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> What does "grey-box" mean in the context of Detox?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It uses a greyscale screenshot diffing algorithm</button>
+<button class="quiz-choice" data-value="B">B) The test driver is injected into the app process itself, giving it privileged knowledge of the app's runtime state (JS bridge, dispatch queues, timers, network) to synchronize automatically</button>
+<button class="quiz-choice" data-value="C">C) It is neither open-source nor fully proprietary</button>
+<button class="quiz-choice" data-value="D">D) It only runs on physical devices, never on simulators</button>
+</div>
+<p class="quiz-explanation">Grey-box means the test framework has inside knowledge of the app under test. Appium is black-box — it sees only the OS accessibility tree. Detox ships a native library that is linked into the app, so it can detect when the app is idle and wait deterministically.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> What does <code>element(by.id("send-button"))</code> actually return?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A reference to the native view — fails immediately if no match</button>
+<button class="quiz-choice" data-value="B">B) A promise resolving to the native view's coordinates</button>
+<button class="quiz-choice" data-value="C">C) A lazy matcher proxy — no lookup happens until an action or expectation is called on it, and the lookup re-runs every time</button>
+<button class="quiz-choice" data-value="D">D) An array of all matching elements</button>
+</div>
+<p class="quiz-explanation">Just like Playwright's <code>Locator</code>, <code>element()</code> is lazy. It stores the matcher and re-resolves against the current UI hierarchy on each action. This is why you can declare element proxies eagerly in page objects without worrying about screen transitions.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q3.</strong> Which statement is TRUE about <code>toBeVisible()</code> vs <code>toExist()</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>toBeVisible()</code> requires the element to be on screen with &gt;75% of its area visible, while <code>toExist()</code> only requires the element to be in the view hierarchy (possibly off-screen)</button>
+<button class="quiz-choice" data-value="B">B) They are synonyms</button>
+<button class="quiz-choice" data-value="C">C) <code>toBeVisible()</code> is iOS-only</button>
+<button class="quiz-choice" data-value="D">D) <code>toExist()</code> asserts the element's parent exists, not the element itself</button>
+</div>
+<p class="quiz-explanation"><code>toBeVisible()</code> is the stricter, user-facing check — "the user can actually see this". <code>toExist()</code> is a hierarchy check — useful for virtualized lists where rows exist but may be scrolled off. Use <code>toBeVisible</code> by default.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q4.</strong> What is the correct way to "scroll this list until the target row is visible"?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Write a <code>for</code> loop that scrolls 200px and checks <code>isVisible</code></button>
+<button class="quiz-choice" data-value="B">B) Use <code>device.scrollUntilVisible()</code></button>
+<button class="quiz-choice" data-value="C">C) Add an arbitrary <code>await new Promise(r =&gt; setTimeout(r, 3000))</code> before the assertion</button>
+<button class="quiz-choice" data-value="D">D) Use <code>waitFor(target).toBeVisible().whileElement(listId).scroll(200, "down")</code></button>
+</div>
+<p class="quiz-explanation">The <code>whileElement(...).scroll(...)</code> combinator is Detox's idiomatic polling-scroll. It re-checks the condition between each scroll step and gives up at <code>withTimeout</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> What is the difference between <code>typeText("hello")</code> and <code>replaceText("hello")</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>typeText</code> is iOS-only, <code>replaceText</code> is Android-only</button>
+<button class="quiz-choice" data-value="B">B) <code>typeText</code> simulates per-character keystrokes (slower, fires per-char handlers), <code>replaceText</code> sets the value atomically in one shot (faster, skips per-char handlers)</button>
+<button class="quiz-choice" data-value="C">C) They are identical — one is just an alias</button>
+<button class="quiz-choice" data-value="D">D) <code>replaceText</code> clears the field first, <code>typeText</code> appends</button>
+</div>
+<p class="quiz-explanation">Use <code>replaceText</code> for fast form filling when the app does not care about keystroke-by-keystroke events. Use <code>typeText</code> when you need autocomplete, validation, or analytics hooks that fire per character to run.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> Which of the following is a platform-specific Detox gotcha you will hit?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) iOS requires <code>reverseTcpPort</code> to reach <code>localhost</code> from the simulator</button>
+<button class="quiz-choice" data-value="B">B) Android does not support <code>by.id</code>; you must use <code>by.label</code></button>
+<button class="quiz-choice" data-value="C">C) On Android, scrolling from the default vertical start position (0.5) may be interpreted as a long-press on a list row, so Ledger Live's helpers use <code>startPositionY = 0.8</code></button>
+<button class="quiz-choice" data-value="D">D) <code>device.takeScreenshot()</code> is unsupported on Android</button>
+</div>
+<p class="quiz-explanation">This is an infamous upstream issue (wix/Detox#3918). On Android, gestures starting on a pressable row can be eaten as long-presses. Ledger Live's <code>elementHelpers.ts</code> sets <code>startPositionY = 0.8</code> to start scrolls from near the bottom of the container.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Detox Advanced: Config, Synchronization & Bridge
+
+<div class="chapter-intro">
+Chapter 5.5 taught you the grammar. This chapter teaches you the machinery: how Detox is configured, how it stays in sync with the app, how Jest drives it, and — critically — how Ledger Live's custom WebSocket bridge injects Redux state, feature flags, and mock device events into the running mobile app. By the end you will be able to read every line of <code>detox.config.js</code>, <code>jest.config.js</code>, and the bridge server/client, and you will know when to reach for <code>device.disableSynchronization()</code> (spoiler: almost never).
+</div>
+
+### 5.6.1 `detox.config.js` — The Top-Level Map
+
+Every Detox project has one configuration file at its root. It has six top-level sections:
+
+- `testRunner` — which runner to use (Jest here) and its options
+- `apps` — the *things* to install (builds, binaries)
+- `devices` — the *things* to run on (simulators, emulators)
+- `configurations` — pairings of an app with a device (`ios.sim.debug`, etc.)
+- `behavior` — lifecycle defaults (reinstall? clean up? expose globals?)
+- `artifacts`, `session`, `logger` — I/O defaults
+
+Here is the Ledger Live file, annotated section by section.
+
+**File: `e2e/mobile/detox.config.js`** — the config itself lives in the `e2e/mobile/` peer workspace, but the paths it emits (binaries, `ENVFILE`) still point back into `apps/ledger-live-mobile/ios` and `apps/ledger-live-mobile/android` because the *app* still belongs to the app workspace.
+
+```js
+// lines 1-12 — architecture constants + cross-workspace paths
+const path = require("path");
+const iosArch = "arm64";
+// NOTE: Pass CI=1 if you want to build locally when you don't have a mac M1.
+const androidArch = process.env.CI ? "x86_64" : "arm64-v8a";
+const SCHEME = "ledgerlivemobile";
+
+const rootDir = path.resolve(__dirname, "../..");                        // repo root from e2e/mobile/
+const iosDir = path.join(rootDir, "apps/ledger-live-mobile/ios");
+const iosBuildDir = path.join(iosDir, "build");
+const androidDir = path.join(rootDir, "apps/ledger-live-mobile/android");
+const ENV_FILE_MOCK            = path.join("apps", "ledger-live-mobile", ".env.mock");
+const ENV_FILE_MOCK_PRERELEASE = path.join("apps", "ledger-live-mobile", ".env.mock.prerelease");
+```
+
+**Why this matters:** CI runners are x86_64, Apple Silicon dev machines are arm64. Gradle builds an ABI-specific APK, and picking the wrong one causes `INSTALL_FAILED_NO_MATCHING_ABIS`. The `CI=1` escape hatch lets you force x86 on a laptop. The `rootDir` / `iosDir` / `androidDir` constants anchor all binary paths back to the app workspace — the config file lives in `e2e/mobile/` but the `.xcworkspace`, the Gradle project, and the `.env.mock` files stay with the app.
+
+```js
+// testRunner
+testRunner: {
+  $0: "jest",                              // the test runner executable
+  args: {
+    config: "jest.config.js",              // resolved relative to e2e/mobile/
+  },
+  jest: {
+    setupTimeout: 500000,                  // 500s before giving up on a worker's setup
+    teardownTimeout: 120000,
+  },
+  noRetryArgs: ["json", "outputFile"],
+  retries: 0,                              // no Detox-level retries (we rely on CI-level retries)
+  forwardEnv: true,                        // forward DETOX_CONFIGURATION (and the rest of env) to Jest workers
+},
+```
+
+**Why `setupTimeout: 500000`?** Each Jest worker does `device.launchApp()` in `beforeAll` — on Android that can mean booting a cold emulator, installing the APK, and starting Metro. Half a second is fine on CI; half a millennium (500s) is the safety net.
+
+```js
+// logger + behavior
+logger: {
+  level: process.env.DEBUG_DETOX ? "trace" : "info",
+},
+behavior: {
+  init: {
+    reinstallApp: true,                    // blow away prior install + data each worker
+    exposeGlobals: false,                  // do NOT inject by/element/expect as globals
+  },
+  launchApp: "auto",                       // auto-launch before first test of each worker
+  cleanup: {
+    shutdownDevice: false,                 // leave device up; CI shards own their own lifecycle
+  },
+  extends: "detox-allure2-adapter/preset-detox",  // Allure adapter preset
+},
+```
+
+- `reinstallApp: true` — a **fresh install** per worker boot. Eliminates state bleed between CI runs.
+- `exposeGlobals: false` — Detox can inject `by`, `element`, `expect`, `waitFor` as globals. Ledger Live disables that and imports them explicitly — better TypeScript ergonomics and stricter linting.
+- `launchApp: "auto"` — before the first test in each file, call `device.launchApp()`. The suite's `setup.ts` in `beforeAll` then relaunches with extra args + the bridge port.
+- `cleanup.shutdownDevice: false` — never kill the simulator/emulator on teardown. Device lifecycle is owned by the CI shard (or your local session), which amortises boot time across reruns.
+- `extends: "detox-allure2-adapter/preset-detox"` — composes in the Allure 2 adapter's behavior preset. This is **new** vs the older guide description and is what wires screenshots/attachments into the Allure pipeline.
+
+```js
+// apps — builds, each ENVFILE still points into apps/ledger-live-mobile/
+apps: {
+  "ios.debug": {
+    type: "ios.app",
+    build: `export ENVFILE=${ENV_FILE_MOCK} && xcodebuild ARCHS=${iosArch} ONLY_ACTIVE_ARCH=YES \
+            -workspace ios/ledgerlivemobile.xcworkspace -scheme ledgerlivemobile \
+            -configuration Debug -sdk iphonesimulator -derivedDataPath ios/build`,
+    binaryPath: getIosBinary("Debug"),     // => apps/ledger-live-mobile/ios/build/Build/Products/Debug-iphonesimulator/ledgerlivemobile.app
+  },
+  "ios.staging":    { /* Staging    configuration, ENVFILE = .env.mock */ },
+  "ios.release":    { /* Release    configuration, ENVFILE = .env.mock */ },
+  "ios.prerelease": { /* Release    configuration, ENVFILE = .env.mock.prerelease */ },
+  "android.debug": {
+    type: "android.apk",
+    build: `cd android && ENVFILE=${ENV_FILE_MOCK} SENTRY_DISABLE_AUTO_UPLOAD=true \
+            ./gradlew app:assembleDebug app:assembleAndroidTest \
+            -DtestBuildType=debug -PreactNativeArchitectures=${androidArch} && cd ..`,
+    binaryPath: getAndroidBinary("debug"),          // app-<arch>-debug.apk under apps/ledger-live-mobile/android/
+    testBinaryPath: getAndroidTestBinary("debug"),  // app-debug-androidTest.apk
+  },
+  "android.release":    { /* ./gradlew app:assembleDetox …          ENVFILE = .env.mock */ },
+  "android.prerelease": { /* ./gradlew app:assembleDetoxPreRelease  ENVFILE = .env.mock.prerelease */ },
+},
+```
+
+**Key fields:**
+
+- `type` — `"ios.app"` or `"android.apk"`. Determines the install pipeline.
+- `build` — shell command that Detox will run when you pass `detox build`. Here it is `xcodebuild` on iOS and Gradle on Android. `ENVFILE` points at `apps/ledger-live-mobile/.env.mock` or `apps/ledger-live-mobile/.env.mock.prerelease` — the names are unchanged after the workspace migration.
+- `binaryPath` — where the artefact lands after build, resolved via the `getIosBinary` / `getAndroidBinary` helpers against `apps/ledger-live-mobile/ios|android`.
+- `testBinaryPath` (Android only) — the separate instrumentation APK (Espresso test harness).
+
+There are four iOS variants and three Android variants because each `.env` profile (`.env.mock`, `.env.mock.prerelease`) produces a different bundle, and each Xcode configuration (`Debug`/`Staging`/`Release`) enables different compiler flags. The Android release variants use the `detox` and `detoxPreRelease` build types, matching their Gradle `assembleDetox*` tasks.
+
+```js
+// lines 73-116 — devices
+devices: {
+  simulator: { type: "ios.simulator", device: { name: "iOS Simulator" } },
+  simulator2: { type: "ios.simulator", device: { name: "iOS Simulator 2" } },
+  simulator3: { type: "ios.simulator", device: { name: "iOS Simulator 3" } },
+  emulator: {
+    type: "android.emulator",
+    device: { avdName: "Android_Emulator" },
+    gpuMode: "swiftshader_indirect",
+    headless: !!process.env.CI,
+  },
+  emulator2: { /* same but avdName: "Android_Emulator_2" */ },
+  emulator3: { /* same but avdName: "Android_Emulator_3" */ },
+},
+```
+
+**Why three simulators and three emulators?** The mobile suite can run with `JEST_MAX_WORKERS=3`. Each worker needs its own device — you cannot share a simulator between parallel Jest workers (two tests writing to the same RN state at the same moment would be chaos). The `jest.environment.ts` (see 35.6) looks at `JEST_WORKER_ID` and swaps the device to `simulator${id}` / `emulator${id}`.
+
+- `gpuMode: "swiftshader_indirect"` — software GPU. On headless CI there is no real GPU; SwiftShader gives predictable rendering.
+- `headless: !!process.env.CI` — no window in CI.
+
+```js
+// lines 117-148 — configurations (the things you actually pass to `detox test`)
+configurations: {
+  "ios.sim.debug":        { device: "simulator", app: "ios.debug" },
+  "ios.sim.staging":      { device: "simulator", app: "ios.staging" },
+  "ios.sim.release":      { device: "simulator", app: "ios.release" },
+  "ios.sim.prerelease":   { device: "simulator", app: "ios.prerelease" },
+  "android.emu.debug":    { device: "emulator",  app: "android.debug" },
+  "android.emu.release":  { device: "emulator",  app: "android.release" },
+  "android.emu.prerelease": { device: "emulator", app: "android.prerelease" },
+},
+```
+
+These are the names you pass on the command line: `detox test -c ios.sim.release`. Each one is just a (device, app) pair. The `jest.environment.ts` post-processes the chosen device to swap it for `simulator2`, `simulator3`, etc., when running with multiple workers.
+
+> **What's missing here?** `artifacts` and `session` are both absent, so Detox uses defaults. `artifacts` would control where screenshots/videos/logs go (the Allure adapter in `jest.config.js` handles screenshots instead). `session` would pin WebSocket ports between Detox and the app — we don't pin them because our own bridge uses a dynamic free port (see `commonHelpers.ts`).
+
+> **Reference:** https://wix.github.io/Detox/docs/config/overview
+
+### 5.6.2 The `detox test` CLI
+
+Once configured, you run:
+
+```bash
+# Build the iOS debug variant
+detox build -c ios.sim.debug
+
+# Run tests on the iOS debug variant
+detox test -c ios.sim.debug
+
+# Run one spec only
+detox test -c ios.sim.debug e2e/specs/deeplinks.spec.ts
+
+# Keep the simulator booted and the app installed (faster iteration locally)
+detox test -c ios.sim.debug --reuse --cleanup=false
+
+# Run with 3 Jest workers (needs simulator2/simulator3 available)
+JEST_MAX_WORKERS=3 detox test -c ios.sim.debug
+
+# Write artefacts to a custom folder
+detox test -c ios.sim.debug --artifacts-location ./my-artifacts
+```
+
+**Important flags:**
+
+| Flag | Purpose |
+|------|---------|
+| `-c, --configuration <name>` | Which configuration from `detox.config.js` to use |
+| `--reuse` | Don't reinstall the app; reuse the simulator's existing install. Huge iteration-time win |
+| `--cleanup` | Kill the device after tests. Invert with `--cleanup=false` (default depends on `behavior.cleanup`) |
+| `--artifacts-location <path>` | Where screenshots, videos, logs go |
+| `--record-videos all`, `--record-logs all` | Force artefact capture regardless of pass/fail |
+| `--loglevel <trace\|debug\|info\|warn\|error>` | Detox logger verbosity. Equivalent to `DEBUG_DETOX=1` for the `trace` level in our config |
+| `--device-launch-args "..."` | Extra launch args appended to the app |
+| `--workers <n>` | Shorthand for `JEST_MAX_WORKERS=n` in Ledger Live's setup |
+| `--headless` | Override the config's headless flag (Android) |
+
+> **Local iteration tip:** once you have the app installed once, drop `--cleanup` and pass `--reuse`:
+> ```bash
+> detox test -c ios.sim.debug --reuse --cleanup=false e2e/specs/send/send.spec.ts
+> ```
+> This skips the ~30s reinstall and ~10s simulator boot.
+
+> **Reference:** https://wix.github.io/Detox/docs/guide/running-tests
+
+### 5.6.3 How Detox Synchronizes — Idle Detection
+
+The single most important thing to understand about Detox is **what it watches to decide "the app is idle, I can act now"**.
+
+Before any action or expectation, Detox waits for all of the following to reach an idle state:
+
+1. **The JavaScript thread** — the RN JS bundle must be done with all currently queued tasks (the RN JS runtime exposes hooks for this).
+2. **The native dispatch queues** — iOS main queue + registered serial queues; Android main looper. No pending tasks.
+3. **The native animation frame pump** — `CADisplayLink` on iOS, `Choreographer` on Android. No animations in flight.
+4. **Active timers** — `setTimeout`, `setInterval`, `NSTimer`, Android `Handler.postDelayed`. Detox waits for short timers to fire; long ones are ignored (configurable).
+5. **In-flight network requests** — any HTTP request not on the URL blacklist must complete.
+6. **The React Native bridge** — all bridge-queued calls between JS and native must drain.
+
+When all six queues drain, the app is *idle* and Detox performs the action. If any queue never drains within the test timeout, the action fails with:
+
+> Test Failed: App is busy. Trying to synchronize...
+
+This is informative, not a bug. The error message usually includes which queue is busy:
+
+> App synchronization debug: {dispatch_queue: com.example.long_running_queue has 1 job(s); ui: 2 animations in progress}
+
+**The URL blacklist — the single most important escape hatch.** If your app makes a long-polling or streaming request (e.g., analytics beacon, push notifications, feature flag streaming), Detox will wait forever for it to finish. The fix is to mark those URLs as "don't synchronize on me":
+
+```ts
+// Ledger Live — e2e/helpers/commonHelpers.ts (inside launchApp)
+detoxURLBlacklistRegex:
+  '\\(".*sdk.*.braze.*",".*.googleapis.com/.*",".*clients3.google.com.*",' +
+  '".*tron.coin.ledger.com/wallet/getBrokerage.*"\\)',
+```
+
+That ugly string is the list of regexes Detox will NOT wait for. The format is a Detox-specific escaped tuple: `\("regex1","regex2",...\)`. Four regexes here:
+
+- `.*sdk.*.braze.*` — Braze analytics SDK endpoints
+- `.*.googleapis.com/.*` — Google APIs (push notification token registration, fonts)
+- `.*clients3.google.com.*` — Google Play captive-portal detection (Android)
+- `.*tron.coin.ledger.com/wallet/getBrokerage.*` — a specific long-polling endpoint
+
+You can also set this at runtime:
+
+```ts
+await device.setURLBlacklist([".*analytics.*", ".*telemetry.*"]);
+```
+
+> **Reference:** https://wix.github.io/Detox/docs/articles/how-detox-works
+
+### 5.6.4 Synchronization Troubles — When to Give Up
+
+Sometimes a screen has an infinite animation, or a custom native module that Detox can't see, and the app is simply never idle. Symptoms:
+
+- `App is busy. Trying to synchronize...` errors that persist even after blacklisting
+- Tests that hang at the same screen every time
+- `detox.log` showing the same queue stuck for >30s
+
+**The nuclear option** — turn off synchronization entirely:
+
+```ts
+await device.disableSynchronization();
+// ... interact with the screen manually using waitFor() ...
+await device.enableSynchronization();
+```
+
+While disabled, Detox will not wait for anything before an action. You must manually `waitFor(...).toBeVisible().withTimeout(...)` every element. This is strictly worse than letting Detox synchronize — it brings back all the flakiness Detox was designed to eliminate — so do it narrowly, around exactly the offending screen, and re-enable immediately.
+
+**Diagnostic recipe:**
+
+```ts
+await device.enableSynchronization();       // ensure on
+try {
+  await waitFor(element(by.id("infinite-spinner-screen")))
+    .toBeVisible().withTimeout(5000);
+} catch (e) {
+  // capture state for debugging
+  await device.takeScreenshot("busy-sync");
+  console.log(await device.generateViewHierarchyXml());
+  throw e;
+}
+```
+
+If the view hierarchy shows an animated Lottie loader that never stops: add its URL to the blacklist (if it fetches remote JSON), wrap the interaction in `disableSynchronization`, or fix the animation in the app to terminate.
+
+> **Reference:** https://wix.github.io/Detox/docs/troubleshooting/synchronization
+
+### 5.6.5 Jest as the Runner — `jest.config.js`
+
+Detox does not run tests itself; it delegates to a runner. Ledger Live uses **Jest**, because (a) the React Native ecosystem already ships with it, (b) it handles TypeScript via SWC, and (c) the `jest-allure2-reporter` plugin gives us rich Allure reports for free.
+
+**File: `e2e/mobile/jest.config.js`** — the important bits (> **Verify:** the exact body against the canonical file; `rootDir` and `setupFilesAfterEnv` paths are now workspace-local under `e2e/mobile/`, not `<app>/e2e/`):
+
+```js
+// lines 35-80 — the config itself
+module.exports = async () => ({
+  rootDir: "..",                                                           // (1)
+  maxWorkers: process.env.JEST_MAX_WORKERS
+    ? parseInt(process.env.JEST_MAX_WORKERS, 10)
+    : 1,                                                                   // (2)
+  transform: {
+    "^.+\\.m?jsx?$": "babel-jest",
+    "^.+\\.(ts|tsx)?$": ["@swc/jest", {                                    // (3)
+      jsc: {
+        target: "es2022",
+        parser: {
+          syntax: "typescript",
+          tsx: true,
+          decorators: true,                                                // (4)
+          dynamicImport: true,
+        },
+        transform: { react: { runtime: "automatic" } },
+      },
+      sourceMaps: "inline",
+      module: { type: "commonjs" },
+    }],
+  },
+  setupFilesAfterEnv: ["<rootDir>/e2e/setup.ts"],                          // (5)
+  testTimeout: 150000,                                                     // (6)
+  testMatch: ["<rootDir>/e2e/specs/**/*.spec.ts"],                         // (7)
+  reporters: [
+    "detox/runners/jest/reporter",                                         // (8)
+    ["jest-allure2-reporter", jestAllure2ReporterOptions],
+  ],
+  globalSetup: "<rootDir>/e2e/jest.globalSetup.ts",                        // (9)
+  testEnvironment: "<rootDir>/e2e/jest.environment.ts",                    // (10)
+  testEnvironmentOptions: {
+    eventListeners: [
+      "jest-metadata/environment-listener",
+      "jest-allure2-reporter/environment-listener",
+      ["detox-allure2-adapter", detoxAllure2AdapterOptions],
+    ],
+  },
+  transformIgnorePatterns: [
+    `node_modules/.pnpm/(?!(${transformIncludePatterns.join("|")}))`,       // (11)
+  ],
+  verbose: true,
+  resetModules: true,                                                      // (12)
+});
+```
+
+Line by line:
+
+1. **`rootDir`** — in the migrated workspace the config is already at the root of `e2e/mobile/`, so `<rootDir>` resolves to `e2e/mobile/`. Any legacy reference like `"<rootDir>/e2e/..."` is retained only for the residual specs still living under `apps/ledger-live-mobile/e2e/`.
+2. **`maxWorkers`** — **default is `1`**. Parallel E2E is off by default because each worker needs its own simulator/emulator, and booting three emulators locally is painful. Set `JEST_MAX_WORKERS=3` on CI where three emulators are pre-booted.
+3. **`@swc/jest`** — not `ts-jest` (too slow). SWC compiles TypeScript to JS 20× faster. `target: es2022` keeps async/await native.
+4. **`decorators: true`** — enables `@Step` (see 35.8). Without this flag, TypeScript decorators are a syntax error.
+5. **`setupFilesAfterEnv: ["<rootDir>/e2e/setup.ts"]`** — runs `setup.ts` *after* Jest's globals (`describe`, `it`, `expect`) are injected. This is where Ledger Live wires up its globals: `global.app`, `global.Step`, the page-object helpers (see 35.6).
+6. **`testTimeout: 150000`** — 150 seconds per test. Mobile is slow: launching the app, importing accounts over the bridge, mocking device events, rendering onboarding screens — it adds up.
+7. **`testMatch`** — any `*.spec.ts` under `e2e/specs/`.
+8. **`reporters`** — Detox's Jest reporter logs action traces; `jest-allure2-reporter` generates the Allure XML/JSON that populates the reporting dashboard.
+9. **`globalSetup`** — runs *once* per process, before all workers. Here it just delegates to Detox's own setup (boot the device, install the app if needed). See 35.6.
+10. **`testEnvironment`** — Ledger Live ships a **custom test environment** that extends Detox's. This is what lets us support multiple workers without hard-coding three copies of the config (see 35.6).
+11. **`transformIgnorePatterns`** — by default Jest does NOT transform `node_modules`. This regex carves an exception for packages published as ESM (`ky`, `@mysten+ledgerjs-hw-app-sui`) so Jest can compile them.
+12. **`resetModules: true`** — between tests, clear the module registry. This prevents Redux store singletons from leaking state across tests.
+
+> **Reference:** https://jestjs.io/docs/configuration
+
+### 5.6.6 `jest.globalSetup.ts` and `jest.environment.ts`
+
+Jest distinguishes two lifecycle hooks:
+
+- **`globalSetup`** — a single async function, runs **once** before the whole test run begins, in the master process.
+- **`testEnvironment`** — a class instantiated **per worker**, `setup()` runs before each test file on that worker, `teardown()` after.
+
+**`jest.globalSetup.ts`** is tiny:
+
+```ts
+// e2e/jest.globalSetup.ts
+import { globalSetup } from "detox/runners/jest";
+
+export default async () => {
+  await globalSetup();
+};
+```
+
+Detox's built-in `globalSetup` handles the heavy lifting: reading `detox.config.js`, deciding which device to reuse, deciding whether to install the app, etc. We just call it.
+
+**`jest.environment.ts`** is where the interesting Ledger Live customization happens:
+
+```ts
+// e2e/jest.environment.ts
+import { config as detoxConfig } from "detox/internals";
+// @ts-expect-error detox doesn't provide type declarations for this module
+import DetoxEnvironment from "detox/runners/jest/testEnvironment";
+
+import { logMemoryUsage } from "./helpers/commonHelpers";
+
+export default class TestEnvironment extends DetoxEnvironment {
+  declare global: typeof globalThis;
+
+  async setup() {
+    const workerId = Number(process.env.JEST_WORKER_ID ?? 1);            // (1)
+    if (workerId > 1) await this.setupDeviceForSecondaryWorker(workerId); // (2)
+    await super.setup();                                                  // (3)
+  }
+
+  private async setupDeviceForSecondaryWorker(workerId: number) {
+    const configName = process.env.DETOX_CONFIGURATION;
+    if (!configName) throw new Error("Missing DETOX_CONFIGURATION...");
+
+    const detoxConfigModule = await import("../detox.config.js");
+    const detoxConfigFile =
+      "default" in detoxConfigModule ? detoxConfigModule.default : detoxConfigModule;
+    const targetConfig = detoxConfigFile.configurations[configName];
+    if (!targetConfig || !targetConfig.device) {
+      throw new Error(`Detox configuration "${configName}" not found...`);
+    }
+
+    const deviceName = `${targetConfig.device}${workerId}`;               // (4) "simulator" -> "simulator2"
+    const targetDevice = detoxConfigFile.devices[deviceName];
+    if (!targetDevice) {
+      throw new Error(`Device configuration not found for ${deviceName}...`);
+    }
+
+    Object.assign(detoxConfig, { device: targetDevice });                 // (5) monkey-patch Detox's runtime config
+  }
+
+  async handleTestEvent(event: any, state: any) {
+    await super.handleTestEvent(event, state);
+
+    if (["hook_failure", "test_fn_failure"].includes(event.name)) {
+      this.global.IS_FAILED = true;                                       // (6)
+    }
+    if (event.name === "run_start") {
+      await logMemoryUsage();                                             // (7)
+    }
+  }
+}
+```
+
+What it does:
+
+1. **`JEST_WORKER_ID`** — Jest sets this env var on each worker subprocess. Worker 1 uses the default device from config; workers 2+ need to swap.
+2. For workers 2+, we load the config file, look up the configuration (e.g. `ios.sim.debug`), find its device (`simulator`), and ...
+3. ... swap the runtime device to `simulator2` / `simulator3` (line 4) by monkey-patching `detox/internals.config.device` (line 5). Then call `super.setup()` so Detox boots the correct device.
+4. **The naming convention is load-bearing:** `simulator + workerId` → `simulator2`, `simulator3`. This is why `detox.config.js` has exactly `simulator`, `simulator2`, `simulator3`. You can extend to 4+ workers by adding devices and AVDs.
+5. **`IS_FAILED`** — on any hook failure or test failure, set a global boolean. `setup.ts` reads it in `afterAll` and attaches app logs to Allure only when the test failed (writing logs on every test would drown the report).
+6. **`logMemoryUsage()`** — at the start of each test run, `top` is sampled for the current PID and memory is attached to Allure. Debugging memory leaks in a long-running E2E CI run is much easier with this timeline.
+
+> **Why extend vs wrap?** Detox's `testEnvironment` already plugs into Jest's lifecycle, reads `detox.config.js`, and manages the Detox client/connection. Extending via `super.setup()` preserves all that behavior; we only inject the worker-ID device swap and the two observability hooks. Wrapping or re-implementing would fight Detox's internal state machine.
+
+> **Reference:** https://jestjs.io/docs/configuration#testenvironment-string
+
+### 5.6.7 The WebSocket Bridge — Why Detox Alone Isn't Enough
+
+Detox drives the UI. It does not know about Redux, feature flags, or Ledger's hardware device events. For most RN apps, that is fine — you seed state by tapping through the UI. For Ledger Live it isn't, because:
+
+- Onboarding the app from scratch every test would take 2 minutes (and require BLE pairing).
+- Feature flags need to be overridden per test without a real Firebase fetch.
+- Device events (USB plug, APDU responses) must be **mocked**, not driven by a real Ledger.
+- Redux state (accounts, settings) must be pre-populated with test fixtures.
+
+So Ledger Live layers a **custom WebSocket bridge** on top of Detox:
+
+- **Server** — runs in the test process (Jest worker). Started in `commonHelpers.ts#launchApp` on a free port (default 8099). Sends commands.
+- **Client** — linked into the RN app under `src/e2e/`. Connects to the server on boot. Receives commands, dispatches into Redux / emits native events / calls the navigation controller.
+
+```
+┌──────────────────────┐            ┌───────────────────────┐
+│ Jest worker (Node)   │  WebSocket │ RN App on device      │
+│                      │ <────────> │                       │
+│ bridge/server.ts     │   ws://... │ bridge/client.ts      │
+│  - postMessage()     │            │  - dispatch(importX)  │
+│  - pendingAcks       │            │  - navigate()         │
+│  - ws.Server         │            │  - setOverride(flag)  │
+└──────────────────────┘            └───────────────────────┘
+         │                                    │
+         │          Test code calls:          │
+         │     await importAccounts([...])    │
+         │     await mockDeviceEvent(...)     │
+         │     await setFeatureFlags({...})   │
+         ▼                                    ▼
+```
+
+#### 35.7.1 Server side
+
+**File: `e2e/mobile/bridge/server.ts`** (excerpt — the canonical server is ~307 lines and differs from the legacy copy still in `apps/ledger-live-mobile/e2e/bridge/`):
+
+```ts
+// lines 61-83 — init: open a WebSocket server
+export function init(port = 8099, onConnection?: () => void) {
+  webSocket.wss = new WebSocket.Server({ port });
+  webSocket.messages = {};
+  log(`Start listening on localhost:${port}`);
+
+  webSocket.wss.on("connection", (ws: WebSocket) => {
+    log(`Client connected`);
+    onConnection && onConnection();
+    webSocket.ws?.close();           // close any prior client (reconnect case)
+    webSocket.ws = ws;
+    ws.on("message", onMessage);
+    ws.on("close", () => { webSocket.ws = undefined; });
+    // Re-send any messages that were queued while disconnected
+    if (Object.keys(webSocket.messages).length !== 0) {
+      Object.values(webSocket.messages).forEach(m => postMessage(m));
+    }
+  });
+}
+```
+
+One bridge server per test process. The `global.webSocket` object (declared in `setup.ts`) holds the singleton so every helper in `bridge/server.ts` can reach it.
+
+**The ACK pattern — every message waits for a reply:**
+
+```ts
+// lines 237-251 — postMessageAndWaitForAck
+function postMessageAndWaitForAck(message: MessageData, timeout = RESPONSE_TIMEOUT): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      pendingAcks.delete(message.id);
+      reject(new Error(`Timeout while waiting for ACK for ${message.type} (${message.id})`));
+    }, timeout);
+
+    pendingAcks.set(message.id, { resolve, timeoutId });
+    postMessage(message);
+  });
+}
+
+// lines 253-280 — onMessage handles the ACK reply
+function onMessage(messageStr: string) {
+  const msg: ServerData = JSON.parse(messageStr);
+  switch (msg.type) {
+    case "ACK": {
+      delete webSocket.messages[msg.id];
+      const pendingAck = pendingAcks.get(msg.id);
+      if (pendingAck) {
+        clearTimeout(pendingAck.timeoutId);
+        pendingAcks.delete(msg.id);
+        pendingAck.resolve();
+      }
+      break;
+    }
+    // ...
+  }
+}
+```
+
+**Why ACKs matter:** without them, `await setFeatureFlag(...)` would resolve as soon as the message left the server's socket — *before* the RN client had actually run the Redux dispatch. The next test line would race against the dispatch. With ACKs, the client only sends `{ type: "ACK", id }` *after* running the handler (see `bridge/client.ts` line 199), so the server's promise only resolves after the state change is live.
+
+**The message catalogue** (`e2e/mobile/bridge/types.ts` — verify exact names against this file; the legacy `apps/ledger-live-mobile/e2e/bridge/types.ts` is being retired):
+
+| Message | Direction | Purpose |
+|---------|-----------|---------|
+| `open` | server → client | Open a BLE connection to a mock device |
+| `acceptTerms` | server → client | Mark T&Cs as accepted in Redux |
+| `importSettings` | server → client | Seed settings state |
+| `importAccounts` | server → client | Seed accounts state from a fixture |
+| `importBle` | server → client | Seed known BLE devices |
+| `addUSB` | server → client | Emit a fake USB device-connect native event |
+| `addKnownSpeculos` | server → client | Add a Speculos-emulated device to the known list and set DEVICE_PROXY_URL |
+| `removeKnownSpeculos` | server → client | Remove a Speculos device, clear DEVICE_PROXY_URL |
+| `overrideFeatureFlag` | server → client | Override a single feature flag (merge into existing overrides) |
+| `overrideFeatureFlags` | server → client | Replace all feature flag overrides at once |
+| `setGlobals` | server → client | Inject globals into the RN runtime (rarely used) |
+| `navigate` | server → client | Call the React Navigation navigator programmatically |
+| `mockDeviceEvent` | server → client | Push one or more device events into the mock subject (APDU responses, connect events, etc.) |
+| `getLogs` / `appLogs` | ↔ | Request log dump; client replies with `appLogs` payload |
+| `getFlags` / `appFlags` | ↔ | Request resolved feature flags; client replies |
+| `getEnvs` / `appEnvs` | ↔ | Request live-env config; client replies |
+| `swapSetup` / `swapSetupDone` | ↔ | Set up Swap mock env (sync handshake) |
+| `ACK` | client → server | Acknowledge any server message after handling |
+
+#### 35.7.2 Client side
+
+**File: `e2e/mobile/bridge/client.ts`** (excerpt):
+
+> **Verify:** message types and the exact switch/case against the canonical `e2e/mobile/bridge/types.ts` before changing a handler — the server diverges slightly from the legacy.
+
+```ts
+// lines 34-74 — init: connect to the server from inside the app
+export function init() {
+  const wsPort = LaunchArguments.value()["wsPort"] || "8099";                   // (1)
+  const mock = LaunchArguments.value()["mock"];
+  const disable_broadcast = LaunchArguments.value()["disable_broadcast"];
+
+  if (mock == "0") {
+    setEnv("MOCK", ""); setEnv("MOCK_COUNTERVALUES", ""); Config.MOCK = "";
+  }
+  setEnv("DISABLE_TRANSACTION_BROADCAST", disable_broadcast != "0");
+
+  if (ws) ws.close();
+
+  const ipAddress = Platform.OS === "ios" ? "localhost" : "10.0.2.2";           // (2)
+  const path = `${ipAddress}:${wsPort}`;
+  ws = new WebSocket(`ws://${path}`);
+
+  ws.onopen = () => { retryCount = 0; };
+  ws.onerror = error => {
+    if (retryCount < maxRetries) {
+      retryCount++;
+      const retryTimeout = retryDelay * Math.pow(2, retryCount);                // (3) exponential backoff
+      setTimeout(init, retryTimeout);
+    }
+  };
+  ws.onmessage = onMessage;
+}
+```
+
+1. **`LaunchArguments.value()["wsPort"]`** — reads the `--wsPort=NNNN` launch argument that `device.launchApp({ launchArgs: { wsPort } })` set from the host side. This is how the RN app learns which port to connect to.
+2. **The iOS/Android IP split** — **the single most important line in this file**. On iOS simulator, `localhost` inside the simulated device resolves to the host Mac's loopback, because the simulator runs as a macOS process sharing the same network stack. On Android emulator, the guest has its own kernel and network; `10.0.2.2` is the magic IP that the QEMU NIC maps to the host's loopback. Without this split, the bridge can't connect on Android.
+3. **Exponential backoff** — the app might boot before the server is ready (race with `commonHelpers.launchApp`, which starts the server *before* calling `device.launchApp`, but still). Five retries, doubling delay each time.
+
+**The message handler:**
+
+```ts
+// lines 76-203 (excerpt) — onMessage dispatches the right side effect
+switch (msg.type) {
+  case "acceptTerms":
+    acceptGeneralTerms(store);
+    break;
+  case "importAccounts":
+    store.dispatch(await importAccountsRaw({ active: msg.payload }));
+    break;
+  case "mockDeviceEvent":
+    msg.payload.forEach(e => mockDeviceEventSubject.next(e));  // push into RxJS subject
+    break;
+  case "importSettings":
+    store.dispatch(importSettings(msg.payload));
+    break;
+  case "overrideFeatureFlag": {
+    const { id, value } = msg.payload as { id: FeatureId; value: Feature | undefined };
+    store.dispatch(setOverride({ key: id, value }));
+    break;
+  }
+  case "navigate":
+    navigate(msg.payload, {});
+    break;
+  case "addUSB":
+    DeviceEventEmitter.emit("onDeviceConnect", msg.payload);   // native event
+    break;
+  case "addKnownSpeculos": {
+    const { address, model } = JSON.parse(msg.payload);
+    await disconnectAllSpeculosSessions();
+    // ... update known devices + set DEVICE_PROXY_URL env ...
+    setEnv("DEVICE_PROXY_URL", address);
+    break;
+  }
+  // ... many more ...
+}
+postMessage({ type: "ACK", id: msg.id });     // ALWAYS ACK last
+```
+
+Three side-effect shapes:
+
+- **Redux dispatch** — `importAccounts`, `importSettings`, `overrideFeatureFlag`, etc. Modifies app state directly.
+- **RxJS subject emission** — `mockDeviceEvent`. The real-app device action pipeline subscribes to `mockDeviceEventSubject`, so pushing events into it is indistinguishable from a real device sending APDU responses.
+- **Native event emission** — `addUSB` uses `DeviceEventEmitter.emit("onDeviceConnect", ...)`, the exact same native event a real USB-connect would fire.
+
+Every handler ends by posting an `ACK` back to the server with the original message id.
+
+#### 35.7.3 `device.reverseTcpPort` — the Android-only glue
+
+In `setup.ts`:
+
+```ts
+beforeAll(async () => {
+  const port = await launchApp();
+  await device.reverseTcpPort(8081);      // Metro bundler
+  await device.reverseTcpPort(port);      // bridge server
+  await device.reverseTcpPort(52619);     // dummy app for webview tests
+  // ...
+});
+```
+
+`device.reverseTcpPort(p)` tells the emulator: "when the guest connects to `localhost:p`, route that connection to the host's `localhost:p`". It is an `adb reverse tcp:p tcp:p` under the hood.
+
+**Why only Android?**
+
+- iOS simulator shares the host's network, so `localhost` already works. `reverseTcpPort` is a no-op on iOS (it's either missing in the iOS driver or silently skipped — we call it regardless and it's harmless).
+- Android emulator has an isolated network; without `adb reverse`, `localhost` inside the emulator points at the emulator itself.
+- On Android we also call `10.0.2.2` from the client as a second path (see client line 52). With `reverseTcpPort` established, both `10.0.2.2:port` and `localhost:port` work; Ledger Live standardized on `10.0.2.2`.
+
+**Three forwarded ports in Ledger Live:**
+
+| Port | Used for |
+|------|----------|
+| `8081` | Metro bundler (development-only, for `--devmenu` style reloads) |
+| `port` (dynamic) | The bridge WebSocket server — port chosen by `findFreePort()` |
+| `52619` | A local "dummy app" used by WebView tests |
+
+### 5.6.8 `@Step` — Allure Step Decorators on POM Methods
+
+Ledger Live uses the [Page Object Model](#pom) pattern. Each page object has methods like `tapSendButton()`, `waitForPortfolioToLoad()`. For Allure reporting, we want each method to show up as a named step with its own duration and sub-assertions.
+
+The `jest-allure2-reporter/api` package exposes a `Step` decorator factory:
+
+```ts
+import { Step } from "jest-allure2-reporter/api";
+
+class SendPage {
+  @Step("Open the Send flow")
+  async openSendFlow() {
+    await tapById("portfolio-send-button");
+    await waitForElementById("send-flow-screen");
+  }
+
+  @Step("Enter amount $0")
+  async enterAmount(amount: string) {
+    await replaceTextById("amount-input", amount);
+  }
+}
+```
+
+What happens at runtime:
+
+- The decorator wraps the method in `allure.step(name, async () => originalMethod.apply(this, args))`.
+- The step name supports positional parameter interpolation — `$0` = first arg, `$1` = second, etc.
+- In the Allure report, the test tree shows the step hierarchy with timings and nested assertions.
+
+**Why this needs `experimentalDecorators: true`.** Open `e2e/tsconfig.test.json`:
 
 ```json
 {
-  "name": "@ledgerhq/live-cli",
-  "version": "24.39.0",
-  "description": "ledger-live CLI version",
-  "bin": {
-    "ledger-live": "./bin/index.js"
-  },
-  "scripts": {
-    "prebuild": "zx ./scripts/gen.mjs",
-    "build": "zx ./scripts/build.mjs",
-    "test": "zx ./scripts/test.mjs"
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowJs": true,
+    "experimentalDecorators": true
   }
 }
 ```
 
-Three things to notice. First, **the bin name is `ledger-live`, not `live-cli` or `lcli`**. Every error envelope, every log line, every shell example in this guide will refer to `ledger-live`. Second, **the entry point is `./bin/index.js`** — a built JavaScript file produced by `zx scripts/build.mjs`. The TypeScript source lives in `apps/cli/src/`, but the spawn engine targets the built JS. If you edit the source and forget to run `pnpm --filter @ledgerhq/live-cli build`, your tests will run the stale binary and you will spend an hour debugging code that is not the code you think you are running. Third, **the `prebuild` step (`zx ./scripts/gen.mjs`) generates the commands index** — the file that wires every `apps/cli/src/commands/blockchain/*.ts` into the Commander dispatcher. If you add a brand-new CLI command, the generator picks it up automatically; you do not edit the index by hand.
+TypeScript's "legacy" decorator syntax (`@decorator`) is still behind an experimental flag. The newer stage-3 decorators have a different signature and are not what `jest-allure2-reporter` ships. Mixing the two would be a compile error. Ledger Live extends the base app `tsconfig.json` but layers this flag for the `e2e/` subtree only — tests see decorators, app code does not.
 
-Inside `apps/cli/src/commands/blockchain/` there are sixteen `.ts` files, each one a Commander subcommand. The two that QA cares about are:
+The corresponding SWC flag is in `jest.config.js`:
 
-- **`send.ts`** — signs and (optionally) broadcasts a transaction. Supports `--mode approve | revokeApproval`, plus `--token`, `--spender`, `--approveAmount`, `--wait-confirmation`. This is the file driven by `runCliTokenApproval` (Layer 2) and indirectly by `approveTokenCommand` and `revokeTokenCommand` (Layer 3).
-- **`tokenAllowance.ts`** — reads the current ERC-20 allowance from the token contract. Supports `--format json` for machine-readable output. Driven by `runCliGetTokenAllowance` and indirectly by `isTokenAllowanceSufficientCommand`.
-
-The other fourteen commands (`bot.ts`, `botPortfolio.ts`, `derivation.ts`, `generateTestScanAccounts.ts`, `signMessage.ts`, etc.) are out of QAA scope. They exist for live-common bots, fixture generation, or one-off engineering work — not for QA regression suites. You will see them in the directory listing; ignore them.
-
-The key code path inside `send.ts` — the broadcast gate — is where the `DISABLE_TRANSACTION_BROADCAST` environment variable (covered in detail in Chapter 5.6) flips the binary between "sign-only" and "sign-and-broadcast" mode:
-
-```ts
-// apps/cli/src/commands/blockchain/send.ts (excerpt)
-return bridge
-  .signOperation({
-    account,
-    transaction: t,
-    deviceId: opts.device || "",
-  })
-  .pipe(
-    map(toSignOperationEventRaw),
-    // @ts-expect-error more voodoo stuff
-    ...(opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")
-      ? []
-      : [
-          concatMap((e: any) => {
-            if (e.type === "signed") {
-              l(`✔️ has been signed! ${JSON.stringify(e.signedOperation)}`);
-              return from(
-                bridge
-                  .broadcast({
-                    account,
-                    signedOperation: e.signedOperation,
-                  })
-                  .then(async op => { /* ... */ }),
-              );
-            }
-            return of(e);
-          }),
-        ]),
-  );
+```js
+parser: {
+  syntax: "typescript",
+  tsx: true,
+  decorators: true,           // <- must match tsconfig
+  dynamicImport: true,
+},
 ```
 
-This is the only place in the entire stack where `bridge.broadcast(...)` is called for the approve/revoke path. Either flag — the `--disable-broadcast` CLI argument or the `DISABLE_TRANSACTION_BROADCAST` env var — being truthy short-circuits the broadcast operator to an empty array, and the rxjs pipe just passes the signed-operation event through without sending it on-chain. Layer 3 toggles this gate via the env var; you (Layer 5) almost never see it directly. Chapter 5.6 covers the discipline around this flag in detail.
+Both flags must be on for the transform to emit decorator metadata.
 
-### 5.4.3 Layer 2 — `runCli.ts`, the Spawn Engine
+> **In `setup.ts`**, `Step` is also exposed as a **global** so page objects can use it without importing — see `Object.defineProperty(globalThis, "Step", { value: Step, ... })`. This keeps page-object files terse.
 
-Layer 2 is one file: `libs/ledger-live-common/src/e2e/runCli.ts`. It contains two engine functions (`runCliCommand` and `runCliCommandWithRetry`), one constant (`LEDGER_LIVE_CLI_BIN`), and a small set of public helpers that produce specific CLI command strings (`runCliLiveData`, `runCliGetAddress`, `runCliTokenApproval`, `runCliGetTokenAllowance`).
+### 5.6.9 `$TmsLink("B2CQA-XXX")` — Jira/Xray Linkage
 
-#### The spawn engine, verbatim
-
-```ts
-// libs/ledger-live-common/src/e2e/runCli.ts
-import path from "path";
-import { spawn } from "child_process";
-import { sanitizeError, sleep } from "./index";
-
-export const LEDGER_LIVE_CLI_BIN = path.resolve(__dirname, "../../../../apps/cli/bin/index.js");
-```
-
-`LEDGER_LIVE_CLI_BIN` is computed at module load. `__dirname` is wherever the built copy of `runCli.js` lives inside `node_modules/@ledgerhq/live-common/lib/e2e/` (or the source directory, depending on how the workspace is consumed); the four `..` segments walk back up to the monorepo root, then forward into `apps/cli/bin/index.js`. The result is an absolute path that the spawn call below feeds to `node`. If your tests start failing with `Cannot find module '/.../apps/cli/bin/index.js'`, this is the constant to investigate — it usually means the CLI was not built.
-
-The flag parser used in error messages:
+Every spec and every `it` block in the Ledger Live mobile suite has one or more TMS (Test Management System) links. These are the Xray test case IDs in Jira:
 
 ```ts
-function parseCliFlag(command: string, flag: string): string | undefined {
-  const parts = command.split("+");
-  const idx = parts.findIndex(p => p === `--${flag}`);
-  return idx !== -1 && idx + 1 < parts.length ? parts[idx + 1] : undefined;
-}
-```
+// e2e/specs/deeplinks.spec.ts
+import { knownDevices } from "../models/devices";
 
-This is purely cosmetic: when a CLI command fails, the error envelope wants to surface "which currency" and "which account index" without the caller having to plumb that through. `parseCliFlag` re-parses the same `+`-joined command string the engine just spawned.
-
-The retryable-error classifier:
-
-```ts
-function isRetryableError(message: string): boolean {
-  const retryablePatterns = [
-    /503/i,
-    /502/i,
-    /504/i,
-    /GeneralDmkError/i,
-    /ECONNREFUSED/i,
-    /ETIMEDOUT/i,
-    /ECONNRESET/i,
-    /socket hang up/i,
-    /timeout/i,
-  ];
-  return retryablePatterns.some(pattern => pattern.test(message));
-}
-```
-
-This is the policy that decides "transient network issue, try again" vs. "deterministic logic failure, surface immediately." The classifier is intentionally conservative: only HTTP gateway codes (502/503/504), generic DMK errors, low-level socket failures, and the literal string "timeout" trigger a retry. A `BigNumber error` or a `Speculos device not found` does not retry — those are bugs in your test setup, and silently retrying would just delay the failure.
-
-Now the main engine function:
-
-```ts
-export function runCliCommand(command: string): Promise<string> {
-  console.warn(`[CLI] Executing: ledger-live ${command.replace(/\+/g, " ")}`);
-
-  return new Promise((resolve, reject) => {
-    const args = command.split("+");
-    const child = spawn("node", [LEDGER_LIVE_CLI_BIN, ...args], {
-      stdio: "pipe",
-      env: process.env,
-    });
-
-    let output = "";
-    let errorOutput = "";
-
-    child.stdout.on("data", data => {
-      output += data.toString();
-    });
-
-    child.stderr.on("data", data => {
-      errorOutput += data.toString();
-    });
-
-    child.on("exit", code => {
-      if (code === 0) {
-        resolve(output);
-      } else {
-        const currency = parseCliFlag(command, "currency");
-        const index = parseCliFlag(command, "index");
-        const indexText = index && index !== "undefined" ? index : "N/A";
-
-        const errorDetails = [
-          `❌ Failed to execute CLI command`,
-          `🔍 Command: ${command}`,
-          `💱 Currency: ${currency}`,
-          `🔢 Index: ${indexText}`,
-          `🔢 Exit Code: ${code}`,
-          errorOutput ? `🧾 CLI Error : ${errorOutput.trim()}` : "",
-        ].join("\n");
-
-        reject(new Error(errorDetails));
-      }
-    });
-
-    child.on("error", error => {
-      reject(new Error(`Error executing CLI command: ${sanitizeError(error)}`));
-    });
-  });
-}
-```
-
-A few things to notice:
-
-- **The log line is the most useful debugging artefact in the entire stack.** `[CLI] Executing: ledger-live send --currency ethereum --mode revokeApproval --token ethereum/erc20/usd_coin --spender 0xRouter --index 0 --wait-confirmation` is a string you can paste into your shell (after a manual Speculos boot) and reproduce the exact command the test was running. When a test fails inscrutably in CI, this line is the first place to look in the Allure log.
-- **Args travel as one string with `+` separators, then split before spawn.** `command.split("+")` reverses the join. The reason for the `+` convention is shell-escape avoidance: the helpers in `cliCommandsUtils.ts` build the command with `cliOpts.push("--currency+ethereum")` and `cliOpts.join("+")`, never having to worry about quoting spaces, ampersands, or shell-special characters. The trade-off is that you cannot pass an argument that legitimately contains a `+` character. None of the CLI commands need to.
-- **`stdio: "pipe"`** captures stdout and stderr into the parent process's buffers. You do not see the CLI's output in your terminal in real time during a test run; you see it after the fact in `output` (returned on success) or in the error envelope (on failure).
-- **`env: process.env`** is critical. The spawned child inherits the parent's environment — including `SPECULOS_API_PORT` (set by `launchSpeculos`) and `DISABLE_TRANSACTION_BROADCAST` (toggled by `setDisableTransactionBroadcastEnv`). This is how Layer 5 communicates with Layer 1: not through arguments, but through environment variables that travel down through the spawn.
-- **The error envelope is a multi-line, emoji-flagged Markdown-ish block.** It is designed to be copy-pasted into a Jira ticket or Slack message verbatim. The currency, the index, the exit code, and the trimmed stderr are all there in one rectangle. When you triage a flake, you do not need to reconstruct context — Layer 2 has done it for you.
-
-The retry wrapper:
-
-```ts
-export async function runCliCommandWithRetry(
-  command: string,
-  retries: number = 3,
-  delayMs: number = 3000,
-): Promise<string> {
-  let lastError: Error | null = null;
-  const currency = parseCliFlag(command, "currency");
-
-  for (let attempt = 1; attempt <= retries; attempt++) {
-    try {
-      return await runCliCommand(command);
-    } catch (err: unknown) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      const willRetry = attempt < retries && isRetryableError(lastError.message);
-
-      if (!willRetry) {
-        throw sanitizeError(lastError);
-      }
-
-      console.warn(
-        `⚠️ CLI attempt ${attempt}/${retries}${currency ? ` for ${currency}` : ""} failed with retryable error – retrying in ${delayMs}ms…`,
-        lastError.message,
-      );
-
-      await sleep(delayMs);
-    }
-  }
-
-  throw sanitizeError(lastError!);
-}
-```
-
-Three retries, three-second delay between attempts, only retryable errors bounce back into the loop. Every typed wrapper in Layer 3 calls `runCliCommandWithRetry`, never `runCliCommand` directly — so by default every CLI invocation in the test suite gets up to three tries against transient network or Speculos issues. Non-retryable errors (a malformed argument, a missing account, a `BigNumber` parse error) fail fast on the first attempt.
-
-#### The public engine helpers
-
-| Helper | CLI command produced | Caller |
-|---|---|---|
-| `runCliLiveData(opts)` | `liveData --currency X --index N [--scheme M] --add --appjson <path>` | `liveDataCommand` (Layer 3) |
-| `runCliGetAddress(opts)` | `getAddress --currency X --path m/... --derivationMode M [--verify]` | `getAccountAddress` (Layer 3) |
-| `runCliTokenApproval(opts)` | `send --currency X --mode approve\|revokeApproval --token Y --spender Z --index N [--approveAmount N] [--wait-confirmation]` | `approveTokenCommand`, `revokeTokenCommand` (Layer 3) |
-| `runCliGetTokenAllowance(opts)` | `tokenAllowance --currency X --token Y --spender Z --index N [--format json] --ownerAddress 0x...` | `isTokenAllowanceSufficientCommand` (Layer 3) |
-
-One verbatim, so you can see the pattern:
-
-```ts
-export function runCliTokenApproval(opts: TokenApprovalOpts): Promise<string> {
-  const cliOpts = ["send"];
-  cliOpts.push(`--currency+${opts.currency}`);
-  cliOpts.push(`--mode+${opts.mode}`);
-  cliOpts.push(`--token+${opts.token}`);
-  cliOpts.push(`--spender+${opts.spender}`);
-  cliOpts.push(`--index+${opts.index}`);
-  if (opts.approveAmount) cliOpts.push(`--approveAmount+${opts.approveAmount}`);
-  if (opts.waitConfirmation) cliOpts.push("--wait-confirmation");
-  return runCliCommandWithRetry(cliOpts.join("+"));
-}
-```
-
-The `TokenApprovalOpts` type is defined at the top of the file:
-
-```ts
-export type TokenApprovalOpts = {
-  currency: string;
-  index: number;
-  spender: string;
-  approveAmount?: string;
-  token: string;
-  waitConfirmation?: boolean;
-  mode: "revokeApproval" | "approve";
-};
-```
-
-`mode: "revokeApproval" | "approve"` is the discriminated union that selects between the two flows. This is the type-level guarantee that you cannot pass `mode: "transferTo"` or `mode: ""` and have it silently produce a malformed command — TypeScript stops you at the call site.
-
-### 5.4.4 Layer 3 — `cliCommandsUtils.ts`, Typed Wrappers
-
-Layer 3 lives in `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`. This is the file QA engineers extend most often. It exports:
-
-| Helper | Inputs | Returns | Used by |
-|---|---|---|---|
-| `getAccountAddress(account)` | `Account \| TokenAccount` | `Promise<string>` (also writes to `account.address`) | Every spec needing the device-derived address |
-| `liveDataCommand(account, options?)` | account + options | curried `(userdataPath?) => Promise<void>` | Desktop fixture `cliCommands: [...]` |
-| `liveDataWithAddressCommand(account, options?)` | same | curried, also caches address | When a spec needs both seed + address |
-| `liveDataWithParentAddressCommand(parent, child)` | parent + child token | curried | Token account address resolution |
-| `liveDataWithRecipientAddressCommand(tx, options?)` | a `Transaction` | curried | Send-flow specs |
-| `parseTokenAllowanceCliOutput(output)` | CLI stdout | `{ allowanceStr, unitMagnitude }` | Internal parser |
-| `isTokenAllowanceSufficientCommand(account, spender, minAmount)` | TokenAccount, spender, min | allowance string if ≥ min, else `0` | `ensureTokenApproval` (Layer 5) |
-| `approveTokenCommand(account, spender, approveAmount)` | TokenAccount, spender, amount | CLI stdout | Sets allowance, broadcast on |
-| **`revokeTokenCommand(account, spender)` (NEW)** | TokenAccount, spender | CLI stdout | Clears allowance to 0, broadcast on |
-| `setDisableTransactionBroadcastEnv(value)` | `string \| undefined` | previous env value | Broadcast env management |
-
-Let us look at four of these verbatim to see the patterns.
-
-#### `getAccountAddress` — read once, cache on the account
-
-```ts
-export const getAccountAddress = async (account: Account | TokenAccount): Promise<string> => {
-  if (account.currency.id === Currency.HBAR.id) {
-    invariant(account.address, "hedera: account address must be pre-set");
-    return account.address;
-  }
-
-  const { address } = await runCliGetAddress({
-    currency: account.currency.speculosApp.name,
-    path: account.accountPath,
-    derivationMode: account.derivationMode,
+$TmsLink("B2CQA-1837");                         // (1) test-file-level link
+describe("DeepLinks Tests", () => {
+  beforeAll(async () => {
+    await app.init({ userdata: "...", /* ... */ });
   });
 
-  account.address = address;
-  return address;
-};
-```
-
-Two patterns to notice. First, **the Hedera special case is hard-coded**. HBAR accounts derive their address differently — the test suite pre-sets `account.address` from a fixture, and `getAccountAddress` honours that. If you ever need to add a similar special case, this is the canonical place. Second, **the call mutates the input.** `account.address = address` writes the resolved address back onto the account object so subsequent code can read `account.address` without re-running the CLI. It is the classic "memoise on the parameter" trick.
-
-#### `liveDataCommand` — the curried-function pattern
-
-```ts
-export const liveDataCommand =
-  (account: Account | TokenAccount, options?: LiveDataCommandOptions) =>
-  async (userdataPath?: string) => {
-    await runCliLiveData({
-      currency: options?.currency ?? account.currency.speculosApp.name,
-      index: account.index,
-      ...(options?.useScheme && account.derivationMode ? { scheme: account.derivationMode } : {}),
-      add: true,
-      appjson: userdataPath,
-    });
-  };
-```
-
-This is the curried-function pattern that powers the desktop fixture engine. Notice the shape: `liveDataCommand` takes an `account` and returns *another function* that takes a `userdataPath`. When a spec writes:
-
-```ts
-test.use({
-  cliCommands: [liveDataCommand(account)],
+  it("should open My Ledger page", async () => {
+    await app.manager.openViaDeeplink();
+    await app.manager.expectManagerPage();
+  });
+  // ...
 });
 ```
 
-…it is passing the partially-applied function — bound to `account` but waiting for the userdata path — into the fixture. The Playwright fixture engine, at the right point in the lifecycle, calls each entry in `cliCommands` with the test's userdata path. The currying lets the spec author specify the *what* (which account) at test definition time, while the fixture engine supplies the *where* (which userdata file) at runtime. Without currying, the spec author would have to thread the userdata path through every fixture by hand.
+1. **`$TmsLink("B2CQA-1837")`** — a global helper (set up in `setup.ts`) that attaches a TMS link to all subsequent tests in the file via Allure's `allure.link()` API. The Jira ticket prefix `B2CQA-` identifies the B2C QA project; the number is the Xray test case ID.
 
-The mobile workspace consumes the same helper but bypasses the curry: `e2e/mobile/jest.environment.ts` line 138 does `Object.assign(this.global, cliCommandsUtils)` so every helper becomes a global, and mobile specs call `await liveDataCommand(account)(userdataPath)` directly — manually applying both arguments.
+The `jest-allure2-reporter` config in `jest.config.js` (lines 1-23) turns that raw ID into a clickable URL:
 
-#### `isTokenAllowanceSufficientCommand` — the pre-check
-
-```ts
-export const isTokenAllowanceSufficientCommand = async (
-  account: TokenAccount,
-  spenderAddress: string,
-  minAmount: string,
-) => {
-  const ownerAddress = account.parentAccount?.address ?? account.address;
-  if (!ownerAddress) throw new Error("Token allowance check requires the main account address");
-
-  const output = await runCliGetTokenAllowance({
-    currency: account.currency.speculosApp.name,
-    token: account.currency.id,
-    spenderAddress,
-    index: account.index,
-    format: "json",
-    ownerAddress,
-  });
-
-  const { allowanceStr, unitMagnitude } = parseTokenAllowanceCliOutput(output);
-
-  const smallestUnit = { name: "smallest", code: "", magnitude: unitMagnitude } as const;
-  const minInSmallestUnit = parseCurrencyUnit(smallestUnit, minAmount);
-  const minStr = minInSmallestUnit.toFixed(0);
-
-  const allowanceBi = BigInt(allowanceStr);
-  const minBi = BigInt(minStr);
-  if (allowanceBi >= minBi) return allowanceStr;
-  return 0;
-};
+```js
+testCase: {
+  links: {
+    issue: "https://ledgerhq.atlassian.net/browse/{{name}}",
+    tms:   "https://ledgerhq.atlassian.net/browse/{{name}}",
+  },
+  // ...
+},
 ```
 
-This is the read-side wrapper for `tokenAllowance`. It does three things `runCliGetTokenAllowance` cannot do alone:
+`{{name}}` is the template placeholder that the reporter replaces with the value passed to `$TmsLink`. So `$TmsLink("B2CQA-1837")` produces a clickable link to `https://ledgerhq.atlassian.net/browse/B2CQA-1837` in the Allure report.
 
-1. **Resolves the owner address.** A `TokenAccount` does not carry its own owner address — the underlying ETH account does. The line `account.parentAccount?.address ?? account.address` reaches up to the parent for ERC-20 token accounts, falling back to the account's own address if no parent is present.
-2. **Parses the JSON output.** `parseTokenAllowanceCliOutput` extracts `{ allowanceStr, unitMagnitude }` from the CLI's JSON stdout. The CLI returns the raw allowance in the token's smallest units; the unit magnitude lets the caller know how many decimals to apply.
-3. **Compares as BigInts.** The min amount comes in as a human-readable string (e.g. `"100"` USDC). It gets multiplied through `parseCurrencyUnit` into the same smallest-unit representation as the allowance, then both go through `BigInt(...)` for an exact comparison. JavaScript `Number` arithmetic would lose precision on values larger than 2^53.
+**Why does this matter for QA workflows?**
 
-The return contract is a tiny piece of API design: the function returns `allowanceStr` (a non-empty string) when the allowance is sufficient, and the literal `0` when it is not. Truthiness is the test: `if (currentAllowance) return;` in the POM (Layer 5) skips the device dance when allowance is already enough. Returning the string instead of `true` lets the caller log the actual allowance value if it wants to.
+- The Xray test case in Jira has the manual test steps written by QA.
+- When the automated test runs, Xray receives the pass/fail via the Allure-Jira bridge.
+- Traceability is complete: a failing test in the suite links directly back to the Xray case, which links to the product requirement.
 
-#### `approveTokenCommand` and the new `revokeTokenCommand`
+> **In practice:** every new spec starts with `$TmsLink("B2CQA-NNNN")`, and every Xray case has a matching automation. If you add a test without a TMS link, Xray has no idea the automation exists — the case stays "manual" forever.
 
-These are the two wrappers that drive the device. First the existing one:
+<div class="resource-box">
+<h4>Resources</h4>
+<ul>
+<li><a href="https://wix.github.io/Detox/docs/config/overview">Detox: Configuration Overview</a> — every field in <code>detox.config.js</code></li>
+<li><a href="https://wix.github.io/Detox/docs/guide/running-tests">Detox: Running Tests</a> — the <code>detox test</code> CLI</li>
+<li><a href="https://wix.github.io/Detox/docs/articles/how-detox-works">Detox: How Detox Works</a> — idle detection deep dive</li>
+<li><a href="https://wix.github.io/Detox/docs/troubleshooting/synchronization">Detox: Troubleshooting Synchronization</a> — <code>disableSynchronization</code> and the URL blacklist</li>
+<li><a href="https://jestjs.io/docs/configuration">Jest: Configuration</a> — every Jest config option</li>
+<li><a href="https://jestjs.io/docs/configuration#testenvironment-string">Jest: testEnvironment</a> — how to write your own</li>
+<li><a href="https://github.com/wix/Detox/blob/master/docs/APIRef.Configuration.md#behavior-configuration">Detox: Behavior Configuration</a> — <code>reinstallApp</code>, <code>cleanup</code>, <code>launchApp</code></li>
+<li><a href="https://www.typescriptlang.org/docs/handbook/decorators.html">TypeScript: Decorators</a> — legacy vs stage-3 decorator syntax</li>
+<li><a href="https://github.com/wix/Detox/issues/3918">wix/Detox#3918</a> — the Android scroll long-press gotcha</li>
+</ul>
+</div>
 
-```ts
-export const approveTokenCommand = async (
-  account: TokenAccount,
-  spender: string,
-  approveAmount: string,
-) => {
-  const original = setDisableTransactionBroadcastEnv("0");
+<div class="chapter-outro">
+<strong>Key takeaway:</strong> Detox's configuration lives in three files working together — <code>detox.config.js</code> defines builds and devices, <code>jest.config.js</code> drives the runner, and <code>jest.environment.ts</code> customizes per-worker lifecycle. Detox synchronizes automatically with the JS bridge, dispatch queues, timers, and network — with the URL blacklist as your escape hatch and <code>disableSynchronization()</code> as the nuclear option. On top of Detox, Ledger Live runs a WebSocket bridge that injects Redux state, feature flags, and mock device events into the running app, with every message waiting for an ACK to guarantee state has applied before the test proceeds. <code>reverseTcpPort</code>, the iOS/Android IP split, <code>@Step</code>, and <code>$TmsLink</code> are the seams where cross-platform and reporting concerns live — master them and you can read any spec in the suite.
+</div>
 
-  const result = runCliTokenApproval({
-    currency: account.currency.speculosApp.name,
-    index: account.index,
-    spender,
-    token: account.currency.id,
-    mode: "approve",
-    approveAmount,
-    waitConfirmation: true,
-  });
+### 5.6.10 Quiz
 
-  try {
-    await approveToken();
-  } finally {
-    setDisableTransactionBroadcastEnv(original);
-  }
-  return await result;
-};
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Detox Advanced</h3>
+<p class="quiz-subtitle">7 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> In <code>detox.config.js</code>, what is the purpose of the <code>configurations</code> section?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) It defines build commands for iOS and Android</button>
+<button class="quiz-choice" data-value="B">B) It lists the test files Detox should run</button>
+<button class="quiz-choice" data-value="C">C) It pairs an <code>app</code> (a build) with a <code>device</code> (a simulator/emulator) into a named target that you pass on the CLI with <code>-c</code></button>
+<button class="quiz-choice" data-value="D">D) It stores environment variables for the app</button>
+</div>
+<p class="quiz-explanation"><code>apps</code> defines what to install, <code>devices</code> defines what to run on, and <code>configurations</code> pairs them. You run <code>detox test -c ios.sim.debug</code>, which resolves to the <code>simulator</code> device plus the <code>ios.debug</code> app.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q2.</strong> Why does Ledger Live's <code>jest.config.js</code> default <code>maxWorkers</code> to <code>1</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Each worker needs its own simulator/emulator, and the config only guarantees one device per platform by default; parallel workers are opt-in via <code>JEST_MAX_WORKERS</code> on CI where additional devices are pre-booted</button>
+<button class="quiz-choice" data-value="B">B) Jest does not support parallel execution</button>
+<button class="quiz-choice" data-value="C">C) Detox is single-threaded by nature</button>
+<button class="quiz-choice" data-value="D">D) Parallel E2E tests are forbidden by the test policy</button>
+</div>
+<p class="quiz-explanation">Mobile E2E parallelism requires one device per worker. The config exposes <code>simulator</code>, <code>simulator2</code>, <code>simulator3</code> and matching emulators; the custom <code>jest.environment.ts</code> swaps the device based on <code>JEST_WORKER_ID</code>. But booting three emulators locally is expensive, so the default is 1.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q3.</strong> What does Detox wait on before performing each action (idle detection)?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Only network requests</button>
+<button class="quiz-choice" data-value="B">B) Only the React Native JS thread</button>
+<button class="quiz-choice" data-value="C">C) Only UI animations</button>
+<button class="quiz-choice" data-value="D">D) All of: JS thread, native dispatch queues, animation frame pump, active timers, in-flight non-blacklisted network requests, and the RN bridge</button>
+</div>
+<p class="quiz-explanation">This is why Detox is called grey-box. It synchronizes against the app's whole runtime — not just the DOM-equivalent. When any of these queues is busy, the action waits.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q4.</strong> What is the <code>detoxURLBlacklistRegex</code> and why does Ledger Live set it?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) A list of URLs the app is forbidden from calling</button>
+<button class="quiz-choice" data-value="B">B) A list of URL regexes that Detox will NOT treat as in-flight network requests for synchronization — used to exclude long-polling or always-on endpoints (analytics, Google APIs) that would otherwise keep Detox waiting forever</button>
+<button class="quiz-choice" data-value="C">C) A list of URLs that Jest will intercept and mock</button>
+<button class="quiz-choice" data-value="D">D) A CSP (Content Security Policy) for the RN WebView</button>
+</div>
+<p class="quiz-explanation">Detox's network synchronization waits for all in-flight requests to complete before acting. Analytics beacons and Google connectivity checks never complete in the test's lifetime, so they must be excluded or every test would hang.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q5.</strong> In the WebSocket bridge, why does every server-to-client message wait for an ACK from the client?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) WebSockets don't guarantee delivery without ACKs</button>
+<button class="quiz-choice" data-value="B">B) To encrypt the message in transit</button>
+<button class="quiz-choice" data-value="C">C) Without an ACK, <code>await setFeatureFlag(...)</code> would resolve as soon as the message was sent — before the client actually ran the Redux dispatch. The ACK is sent only after the client handler completes, so the next test line only runs once the state change is live</button>
+<button class="quiz-choice" data-value="D">D) To measure network latency</button>
+</div>
+<p class="quiz-explanation">The ACK is a handler-completion signal. Without it, tests would race against the async state updates they just requested. See <code>bridge/client.ts</code>: every case in the switch statement ends with <code>postMessage({ type: "ACK", id: msg.id })</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q6.</strong> Why does <code>bridge/client.ts</code> use <code>localhost</code> on iOS but <code>10.0.2.2</code> on Android?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) iOS simulator shares the host macOS network stack so <code>localhost</code> resolves to the host; Android emulator has an isolated guest network and <code>10.0.2.2</code> is the QEMU-defined alias for the host's loopback</button>
+<button class="quiz-choice" data-value="B">B) <code>10.0.2.2</code> is Android's public DNS server</button>
+<button class="quiz-choice" data-value="C">C) iOS blocks <code>10.0.2.2</code> at the firewall</button>
+<button class="quiz-choice" data-value="D">D) Historical reasons; both should resolve identically today</button>
+</div>
+<p class="quiz-explanation"><code>10.0.2.2</code> is a well-known Android emulator alias documented by Google. The bridge must use the correct IP for each platform; <code>reverseTcpPort</code> additionally enables <code>localhost</code> on Android, but the client is coded defensively to use the canonical alias.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q7.</strong> What does the <code>@Step("Enter amount $0")</code> decorator do?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Pauses the test at that line, like a debugger breakpoint</button>
+<button class="quiz-choice" data-value="B">B) Wraps the decorated method in an <code>allure.step(name, fn)</code> call so the method appears as a named step in the Allure report, with <code>$0</code>/<code>$1</code> substituted by the method's arguments. Requires <code>experimentalDecorators: true</code> in tsconfig and <code>decorators: true</code> in SWC</button>
+<button class="quiz-choice" data-value="C">C) Marks the step as a blocking checkpoint in CI</button>
+<button class="quiz-choice" data-value="D">D) Registers the step with Jira/Xray as a new test case</button>
+</div>
+<p class="quiz-explanation"><code>@Step</code> is a reporting decorator from <code>jest-allure2-reporter/api</code>. It's a zero-runtime-overhead way to make page-object methods show up as hierarchical steps in Allure. The positional placeholders interpolate the method's arguments into the step name.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+## Mobile Codebase Deep Dive: Every File Explained
+
+<div class="chapter-intro">
+This is your reference chapter for the mobile side. It catalogues every file in the canonical E2E workspace at <code>e2e/mobile/</code>, shows the important ones verbatim, and explains how each piece connects to the rest of the suite. Keep this chapter open when you land in an unfamiliar mobile test file — it will tell you what the file does, why it exists, and where to look next. It is the mobile counterpart of Part 4 Chapter 4.6.
+</div>
+
+### 5.7.1 The Canonical Workspace — `e2e/mobile/`
+
+Until early 2026 the mobile E2E suite lived under `apps/ledger-live-mobile/e2e/`, nested inside the React Native app's own directory. Since then the suite has been promoted to a **peer workspace** at the monorepo root:
+
+```
+<repo-root>/
+├── apps/
+│   └── ledger-live-mobile/          # the RN app itself
+│       ├── src/
+│       ├── ios/
+│       ├── android/
+│       ├── .env.mock                # ENVFILE consumed by Detox builds
+│       └── .env.mock.prerelease
+├── e2e/
+│   ├── desktop/                     # peer Playwright workspace
+│   └── mobile/                      # THIS chapter's subject — Detox workspace
+└── libs/
+    └── ledger-live-common/          # shared E2E enums/models live here
+        └── src/e2e/
 ```
 
-Now the new one from the senior's commit, verbatim:
+`e2e/mobile/` is its own pnpm / Nx package: it has its own `package.json` (name `ledger-live-mobile-e2e-tests`), its own `project.json` (Nx targets), its own `detox.config.js`, its own Jest stack, and its own `node_modules`. That peer-workspace decision mirrors what already happened on desktop (`e2e/desktop/` separated from `apps/ledger-live-desktop/`). The win is the same in both cases: a clean dependency boundary, faster type-checking, and an Nx graph where the test workspace is a first-class participant.
 
-```ts
-export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
-  const original = setDisableTransactionBroadcastEnv("0");
+Two consequences you will feel immediately:
 
-  const result = runCliTokenApproval({
-    currency: account.currency.speculosApp.name,
-    index: account.index,
-    spender,
-    token: account.currency.id,
-    mode: "revokeApproval",
-    waitConfirmation: true,
-  });
+1. **Every path in this chapter is relative to `e2e/mobile/`**, not to the app. Old paths like `apps/ledger-live-mobile/e2e/page/index.ts` are stale; the file now lives at `e2e/mobile/page/index.ts`.
+2. **The build artifacts still live with the app.** The iOS `.app` bundle is produced under `apps/ledger-live-mobile/ios/build/...` and the Android APKs under `apps/ledger-live-mobile/android/app/build/...`. `detox.config.js` crosses the workspace boundary with `path.resolve(__dirname, "../..")` to reach them. The ENVFILE names — `apps/ledger-live-mobile/.env.mock` and `apps/ledger-live-mobile/.env.mock.prerelease` — are also unchanged, because Detox hands those paths straight to `xcodebuild` and `gradlew`, which run in the app directory.
 
-  try {
-    await approveToken();
-  } finally {
-    setDisableTransactionBroadcastEnv(original);
-  }
-  return await result;
-};
+A small caveat: the legacy `apps/ledger-live-mobile/e2e/` directory still exists and still contains 17 specs that have not yet been ported. You may see both trees when you grep the repo. For everything covered in this guide — and for every new spec — the canonical location is `e2e/mobile/`. Treat the old tree as a migration artefact; do not write new tests there.
+
+### 5.7.2 Directory Tree
+
+Here is the full layout of `e2e/mobile/`:
+
+```
+e2e/mobile/
+├── babel.config.js                # Babel plugins (decorators + namespace exports)
+├── detox.config.js                # Detox: test runner, apps, devices, configurations
+├── detox.config.d.ts              # Ambient type for the JS config
+├── jest.config.js                 # Jest: transform, path-alias map, reporters, env
+├── jest.environment.ts            # Custom Jest env (extends DetoxEnvironment)
+├── jest.globalSetup.ts            # One-shot setup (Detox bootstrap + Speculos cleanup)
+├── jest.globalTeardown.ts         # One-shot teardown (env.properties + userdata cleanup)
+├── tsconfig.json                  # TS config for the workspace (decorators + path aliases)
+├── setup.ts                       # Per-file setup wired via setupFilesAfterEnv
+├── package.json                   # name: ledger-live-mobile-e2e-tests
+├── project.json                   # Nx targets (e2e:ci, e2e:ci:with-cli)
+├── xray.formater.sh               # Post-processes Allure results for Xray export
+├── README.md
+├── CHANGELOG.md
+│
+├── bridge/                        # WebSocket bridge (test-process side)
+│   └── server.ts                  # 307 lines — open/close, loadConfig, feature flags, ACKs
+│
+├── helpers/                       # Low-level runtime helpers
+│   ├── commonHelpers.ts           # launchApp, openDeeplink, setupEnvironment, normalizeText, ...
+│   ├── elementHelpers.ts          # NativeElementHelpers + WebElementHelpers (Detox primitives)
+│   ├── errorHelpers.ts            # detectErrorModal, checkForErrorElement
+│   ├── pageScroller.ts            # PageScroller class (used by NativeElementHelpers.scrollToId)
+│   └── allure/
+│       └── allure-helper.ts       # setAllureDescription (wallet40 / shard badging)
+│
+├── models/                        # Test-side domain helpers
+│   ├── currencies.ts              # getCurrencyManagerApp
+│   ├── send.ts                    # verifyAppValidationSendInfo
+│   └── stake.ts                   # verifyAppValidationStakeInfo, verifyStakeOperationDetailsInfo
+│
+├── page/                          # Page Object Model layer (32 POMs)
+│   ├── index.ts                   # Application class — lazy-init hub
+│   ├── common.page.ts             # CommonPage (base class for many POMs)
+│   ├── error.page.ts              # ErrorPage (generic-error-modal testID holder)
+│   ├── passwordEntry.page.ts      # Simplest POM — password lock screen
+│   ├── speculos.page.ts           # Speculos device interaction wrapper
+│   ├── accounts/                  # account.page, accounts.page, addAccount.drawer, assetAccounts.page
+│   ├── discover/                  # discover.page
+│   ├── drawer/                    # modular.drawer (asset/network/account picker)
+│   ├── liveApps/                  # swapLiveApp.ts (WebView-driven swap UI)
+│   ├── manager/                   # manager.page (My Ledger screen)
+│   ├── market/                    # market.page
+│   ├── onboarding/                # onboardingSteps.page
+│   ├── settings/                  # settings, settingsGeneral, settingsHelp, ledgerSync
+│   ├── stax/                      # customLockscreen.page
+│   ├── trade/                     # swap, send, receive, stake, buySell, earn*, operationDetails, deviceValidation, celoManageAssets
+│   └── wallet/                    # portfolio, portfolioEmptyState, walletTabNavigator, mainNavigation, transferMenu.drawer
+│
+├── specs/                         # 197 .spec.ts files — organised by feature bucket
+│   ├── deeplinks.spec.ts
+│   ├── languageChange.spec.ts
+│   ├── market.spec.ts
+│   ├── onboardingReadOnly.spec.ts
+│   ├── userOpensApplication.spec.ts
+│   ├── account/        addAccount/        buySell/
+│   ├── delegate/       deleteAccount/     deposit/
+│   ├── earn/           ledgerSync/        portfolio/
+│   ├── send/           settings/          subAccount/
+│   ├── swap/           verifyAddress/     wallet40/
+│   └── swap/otherTestCases/  (and swap/otherTestCases/tooLowAmountForQuoteSwaps/)
+│
+├── userdata/                      # Redux state snapshots loaded via the bridge
+│   ├── skip-onboarding.json                       # Onboarding complete, no accounts (~1 KB)
+│   ├── 1AccountBTC1AccountETHReadOnlyFalse.json   # 1 BTC + 1 ETH account (~1 MB)
+│   ├── EthAccountXrpAccountReadOnlyFalse.json     # ETH + XRP accounts (~160 KB)
+│   ├── speculos-tests-app.json                    # Pre-wired Speculos accounts (~200 KB)
+│   ├── speculos-x-other-account.json              # Variant with a second account (~100 KB)
+│   └── swap-history.json                          # Rich swap history, used by QAA-604 (~2.3 MB)
+│
+├── scripts/
+│   ├── typecheck.js               # node scripts/typecheck.js — filtered tsc run
+│   └── build-ai-artifact.sh       # Post-run bundler for AI-assisted analysis
+│
+├── types/
+│   ├── global.d.ts                # Ambient globals (app, tapById, Currency, ...)
+│   └── jest-allure2-reporter.d.ts # Module augmentation for $TmsLink / $Tag
+│
+├── utils/
+│   ├── cliUtils.ts                # CLI class: wraps live-common CLI commands
+│   ├── constants.ts               # NANO_APP_CATALOG_PATH, WALLET_40_FEATURE_FLAGS
+│   ├── fileUtils.ts               # FileUtils.waitForFileToExist
+│   ├── initUtil.ts                # InitializationManager (called by Application.init)
+│   ├── loggingUtils.ts            # Console capture + Allure attachment helpers
+│   ├── retry.ts                   # retryUntilTimeout
+│   ├── speculosUtils.ts           # launchSpeculos, deleteSpeculos, registerSpeculos, ...
+│   └── swapUtils.ts               # performSwapUntilQuoteSelectionStep
+│
+├── artifacts/                     # Test run output (created at runtime, gitignored)
+│   ├── allure-report/             # Generated HTML Allure report
+│   ├── environment.properties     # Feature-flag + env dump from globalTeardown
+│   ├── screenshots/               # PNGs attached to Allure on failure
+│   └── nano-app-catalog.json      # Pinned Nano app versions
+│
+└── node_modules/                  # The workspace's own installed deps
 ```
 
-Side-by-side these two helpers tell the whole story. They differ in exactly two places: the `mode` (`"approve"` vs `"revokeApproval"`) and the absence of `approveAmount` in the revoke (because revoke is `approve(spender, 0)` — there is no amount to set). Everything else — the env flip, the parallel `approveToken()` device tap, the try/finally restore — is identical.
+The five load-bearing folders are `bridge/`, `helpers/`, `page/`, `specs/`, and `utils/`. Everything else (models, userdata, types, scripts) either feeds them or supports tooling.
 
-The control flow is worth stepping through carefully because it is the one piece of multi-track logic you must understand to debug these helpers:
+### 5.7.3 `package.json` and `project.json` — the Workspace Identity
 
-1. **`setDisableTransactionBroadcastEnv("0")` flips the env to broadcast-on.** It returns the previous value, captured in `original`. If broadcast was already on, `original` is `"0"`; if it was off (`"1"`), `original` is `"1"`; if it was unset, `original` is `undefined`. The helper restores that exact original at the end. Chapter 5.6 covers why broadcast must be on for this command and off for most others.
-2. **`runCliTokenApproval(...)` is called *without* `await`.** It returns a `Promise<string>` that is held in the `result` variable. The CLI subprocess is now spawned and running in parallel — sitting in `bridge.signOperation(...)`, waiting for the device to confirm the transaction.
-3. **`await approveToken()` is the device tap.** While the CLI subprocess is blocked waiting for the device, this helper *is* the device. It drives Speculos's REST API to walk through the review screens and press the buttons. Layer 4 covers the screen primitives in detail. The crucial point here is the parallelism: the CLI and the device tap are two cooperating coroutines, neither one finishing without the other.
-4. **The `try/finally` guarantees env restoration.** If `approveToken()` throws (a screen never appears, a button press fails, Speculos times out), the `finally` block still runs and `setDisableTransactionBroadcastEnv(original)` puts the env back. Without this discipline, a single failed test would mutate `process.env` for the rest of the run, silently flipping broadcast for every subsequent CLI call. Chapter 5.6 has the full discipline section.
-5. **`return await result;`** awaits the CLI subprocess's resolution. By this point the device tap has sent the buttons that confirm the signature; the CLI has built the signed transaction, called `bridge.broadcast(...)`, waited for the on-chain confirmation (because `waitConfirmation: true`), and resolved with its stdout. The stdout is a multi-line block ending with the broadcast operation hash, which the POM passes into Allure for traceability.
+`package.json` names the workspace and defines the commands that humans and CI invoke. These are the scripts verbatim:
 
-The `setDisableTransactionBroadcastEnv` helper itself is a few lines at the bottom of the file:
-
-```ts
-const ENV_KEY = "DISABLE_TRANSACTION_BROADCAST";
-
-export function setDisableTransactionBroadcastEnv(value: string | undefined): string | undefined {
-  const previous = process.env[ENV_KEY];
-  if (value === undefined) {
-    delete process.env[ENV_KEY];
-  } else {
-    process.env[ENV_KEY] = value;
+```json
+{
+  "name": "ledger-live-mobile-e2e-tests",
+  "version": "0.20.0",
+  "private": true,
+  "scripts": {
+    "lint": "oxlint .",
+    "lint:fix": "oxfmt . && oxlint . --fix",
+    "typecheck": "node ./scripts/typecheck.js",
+    "test:detox": "pnpm detox test",
+    "test:ios": "pnpm test:detox --configuration ios.sim.release",
+    "test:android": "pnpm test:detox --configuration android.emu.release",
+    "build:ios": "nx run live-mobile:e2e:build -- --configuration ios.sim.release",
+    "build:android": "nx run live-mobile:e2e:build -- --configuration android.emu.release",
+    "test:ios:debug": "pnpm test:detox --configuration ios.sim.debug",
+    "test:android:debug": "pnpm test:detox --configuration android.emu.debug",
+    "build:ios:debug": "pnpm --filter live-mobile run e2e:build --configuration ios.sim.debug",
+    "build:android:debug": "pnpm --filter live-mobile run e2e:build --configuration android.emu.debug",
+    "allure:generate": "allure generate ./artifacts --clean -o ./artifacts/allure-report",
+    "allure:open": "allure open ./artifacts/allure-report",
+    "allure": "pnpm run allure:generate && pnpm run allure:open"
   }
-  return previous;
 }
 ```
 
-Three rules: read the previous value, set the new value (or `delete` it if `undefined` was passed), return the previous. The "return the previous" contract is the foundation of the try/finally restore pattern — without it, you would have to read the env *before* calling the helper and pass it in, which is a footgun.
+A few things worth noting:
 
-> See Chapter 5.6 for the broadcast discipline in depth: when broadcast is on, when it is off, why the default is off, and the full set of read sites and set sites.
+- **Build vs. test.** Build scripts (`build:ios`, `build:android`, `build:ios:debug`, `build:android:debug`) always delegate to the **app** project (`live-mobile`) via Nx or pnpm filter, because the native bundle has to be produced where the native project lives. Test scripts run Detox from this workspace because Detox's config file is here.
+- **Nx wrapping.** `build:ios` uses `nx run live-mobile:e2e:build -- --configuration ios.sim.release`; the double-dash passes the rest straight to the Detox build command. Nx adds caching, dependency graph awareness, and affected-detection; it does not replace Detox.
+- **`test:ios` defaults to release.** The default test target uses the `ios.sim.release` Detox configuration. That is important: release builds are closer to what ships, and Detox explicitly disables dev-menu shortcuts in them. Use `test:ios:debug` when you need Metro hot-reload.
+- **Allure is workspace-local.** `pnpm allure` (from within `e2e/mobile/`) expects `./artifacts` to contain the raw `allure-results` output written by `jest-allure2-reporter`. Do not run it from the monorepo root.
 
-### 5.4.5 Layer 4 — `families/evm.ts`, Device-Tap Automation
+On the Nx side, `project.json` is short but carries the CI-relevant targets:
 
-Layer 4 lives in `libs/ledger-live-common/src/e2e/families/evm.ts`. This is where Speculos is *driven*: the layer above (Layer 3) has spawned a CLI subprocess that is now blocked waiting for the device to confirm a transaction; this layer is the user, walking through the review screens and pressing the buttons.
-
-#### The screen primitives
-
-Imported at the top of `evm.ts`:
-
-```ts
-import {
-  containsSubstringInEvent,
-  fetchCurrentScreenTexts,
-  waitForReviewTransaction,
-  pressUntilTextFound,
-  waitFor,
-} from "../speculos";
-import { getSpeculosModel, isTouchDevice } from "../speculosAppVersion";
-import {
-  longPressAndRelease,
-  pressAndRelease,
-  swipeRight,
-} from "../deviceInteraction/TouchDeviceSimulator";
-import { DeviceLabels } from "../enum/DeviceLabels";
-import { withDeviceController } from "../deviceInteraction/DeviceController";
-```
-
-The primitives:
-
-- **`waitFor(label)`** — block until the given screen-text label appears on the Speculos display. Polls the Speculos REST API. Times out after the suite-level timeout if the label never appears.
-- **`waitForReviewTransaction()`** — sugar for `waitFor("Review transaction")` (or the touch-device equivalent). Used at the start of the device tap to confirm the CLI has reached the signing prompt.
-- **`pressUntilTextFound(label)`** — repeatedly press the right button (button device) or scroll right (touch device) until the given label appears. Returns the array of screen-text events seen along the way; this array is what `validateTransactionData` later checks for amount, recipient, and ENS-name correctness.
-- **`pressAndRelease(direction, x, y)`** — simulate a single button or touch press at the given coordinates.
-- **`longPressAndRelease(label, seconds)`** — hold to sign on touch devices. Used when the final screen demands a multi-second hold.
-- **`fetchCurrentScreenTexts(port)`** — pull the current screen text from Speculos's REST API. Used for read-only screen inspection.
-- **`withDeviceController(fn)`** — DI wrapper that provides a `getButtonsController()` to the inner function. The buttons controller exposes `.both()`, `.left()`, `.right()` for explicit button presses on Nano S/X/S+.
-- **`DeviceLabels.*`** — a shared registry of screen-text constants (`REVIEW_TRANSACTION_TO`, `SIGN_TRANSACTION`, `HOLD_TO_SIGN`, `ACCEPT`). Touch and button devices use the same logical label keys but the actual on-device strings may differ; the enum centralises that mapping.
-
-#### `approveToken` — the public entry point
-
-```ts
-export async function approveToken() {
-  if (isTouchDevice()) {
-    return approveTokenTouchDevices();
-  }
-  return approveTokenButtonDevice();
-}
-```
-
-Three lines. The branch is on `isTouchDevice()`, which reads the current Speculos device model (from the env-configured firmware) and returns `true` for Stax and Flex, `false` for Nano S, X, and S+. The two implementations share the same logical flow but use different physical interactions.
-
-#### `approveTokenTouchDevices` — Stax and Flex
-
-```ts
-export async function approveTokenTouchDevices() {
-  await waitForReviewTransaction();
-  await pressUntilTextFound(DeviceLabels.HOLD_TO_SIGN);
-  await longPressAndRelease(DeviceLabels.HOLD_TO_SIGN, 3);
-}
-```
-
-Three steps: wait for the review screen, scroll until the "Hold to sign" prompt appears, then perform a 3-second hold to confirm. The hold duration is hard-coded to 3 seconds — if Stax firmware ever changes that requirement, this is the constant to update.
-
-#### `approveTokenButtonDevice` — Nano S/X/S+
-
-```ts
-export const approveTokenButtonDevice = withDeviceController(
-  ({ getButtonsController }) =>
-    async () => {
-      await waitFor(DeviceLabels.REVIEW_TRANSACTION_TO);
-      await pressUntilTextFound(DeviceLabels.SIGN_TRANSACTION);
-      await getButtonsController().both();
+```json
+{
+  "name": "ledger-live-mobile-e2e-tests",
+  "targets": {
+    "e2e:ci": {
+      "executor": "nx:run-script",
+      "dependsOn": ["ledger-live-mobile:prepare-e2e-deps"],
+      "options": { "script": "e2e:ci" },
+      "outputs": [
+        "{workspaceRoot}/apps/ledger-live-mobile/artifacts/**",
+        "{projectRoot}/artifacts/**"
+      ],
+      "inputs": ["default", "mobileEnv", "sharedEnv"],
+      "cache": true,
+      "parallelism": true
     },
+    "e2e:ci:with-cli": {
+      "executor": "nx:run-script",
+      "dependsOn": ["ledger-live-mobile:prepare-e2e-deps", "@ledgerhq/live-cli:build"],
+      "options": { "script": "e2e:ci" },
+      "outputs": [
+        "{workspaceRoot}/apps/ledger-live-mobile/artifacts/**",
+        "{projectRoot}/artifacts/**"
+      ],
+      "inputs": ["default", "mobileEnv", "sharedEnv"],
+      "cache": true,
+      "parallelism": true
+    }
+  }
+}
+```
+
+The two CI targets differ by one dependency: `e2e:ci:with-cli` also builds `@ledgerhq/live-cli`, which is required when `cliCommands` or `cliCommandsOnApp` are used to pre-seed Speculos accounts. Both targets:
+
+- Depend on `ledger-live-mobile:prepare-e2e-deps`, which makes sure the app is built, the ENV files are present, and Speculos prerequisites are in place before Detox starts.
+- Write outputs to both the **app** artifacts directory (where `xcodebuild`/`gradlew` drop the binaries and where Detox writes device-side video/screenshots) and the **workspace** artifacts directory (where Jest/Allure write results).
+- Are **cacheable** and **parallelism-enabled**, which lets CI shard across multiple agents.
+
+Key dev-dependencies worth knowing about (trimmed list from `package.json`):
+
+- `detox` 20.48.0 — the runner (see 4.7.4).
+- `detox-allure2-adapter` 1.0.0-alpha.42 — hooks Detox events into Allure.
+- `jest-allure2-reporter` 2.2.8 — provides the `@Step` decorator, `$TmsLink`, `$Tag`, and the Allure writer.
+- `@swc/jest` — the TypeScript transformer used by Jest. Much faster than `ts-jest`.
+- `@jest/reporters`, `jest-environment-node`, `jest-metadata`, `jest-docblock` — the Jest ecosystem glue.
+- `@ledgerhq/live-common`, `@ledgerhq/live-env`, `@ledgerhq/live-dmk-speculos` — the monorepo libraries the tests consume via `workspace:*` protocol.
+- `oxlint` / `oxfmt` — Rust-based lint/format toolchain (much faster than ESLint).
+- `ts-node`, `tsconfig-paths` — used only by `jest.globalSetup.ts` and `jest.globalTeardown.ts` to register path aliases before Jest starts.
+
+### 5.7.4 `detox.config.js` — The Runner Configuration
+
+`detox.config.js` is 167 lines and it is the single source of truth for how Detox finds the app binary, which simulator/emulator to spawn, which Jest config to hand the test runner, and how artifacts flow to Allure. Here is the full file:
+
+```javascript
+const path = require("path");
+const iosArch = "arm64";
+// NOTE: Pass CI=1 if you want to build locally when you don't have a mac M1. This works better if you do export CI=1 for the whole session.
+const androidArch = process.env.CI ? "x86_64" : "arm64-v8a";
+const SCHEME = "ledgerlivemobile";
+
+const rootDir = path.resolve(__dirname, "../..");
+const iosDir = path.join(rootDir, "apps/ledger-live-mobile/ios");
+const iosBuildDir = path.join(iosDir, "build");
+const androidDir = path.join(rootDir, "apps/ledger-live-mobile/android");
+const ENV_FILE_MOCK = path.join("apps", "ledger-live-mobile", ".env.mock");
+const ENV_FILE_MOCK_PRERELEASE = path.join("apps", "ledger-live-mobile", ".env.mock.prerelease");
+
+const getIosBinary = config =>
+  path.join(iosBuildDir, `Build/Products/${config}-iphonesimulator/${SCHEME}.app`);
+const getAndroidBinary = type =>
+  path.join(androidDir, `app/build/outputs/apk/${type}/app-${androidArch}-${type}.apk`);
+const getAndroidTestBinary = type =>
+  path.join(androidDir, `app/build/outputs/apk/androidTest/${type}/app-${type}-androidTest.apk`);
+
+/** @type {Detox.DetoxConfig} */
+module.exports = {
+  testRunner: {
+    $0: "jest",
+    args: {
+      config: "jest.config.js",
+    },
+    jest: {
+      setupTimeout: 500000,
+      teardownTimeout: 120000,
+    },
+    noRetryArgs: ["json", "outputFile"],
+    retries: 0,
+    forwardEnv: true,
+  },
+  logger: {
+    level: process.env.DEBUG_DETOX ? "trace" : "info",
+  },
+  behavior: {
+    init: {
+      reinstallApp: true,
+      exposeGlobals: false,
+    },
+    launchApp: "auto",
+    cleanup: {
+      shutdownDevice: false,
+    },
+    extends: "detox-allure2-adapter/preset-detox",
+  },
+  apps: {
+    "ios.debug":  { /* Debug build */ },
+    "ios.staging":   { /* Staging build */ },
+    "ios.release":   { /* Release build (CI default) */ },
+    "ios.prerelease":{ /* Release with .env.mock.prerelease */ },
+    "android.debug": { /* assembleDebug */ },
+    "android.release": { /* assembleDetox (special detox variant) */ },
+    "android.prerelease": { /* assembleDetoxPreRelease */ },
+  },
+  devices: {
+    simulator:  { type: "ios.simulator", device: { name: "iOS Simulator" } },
+    simulator2: { type: "ios.simulator", device: { name: "iOS Simulator 2" } },
+    simulator3: { type: "ios.simulator", device: { name: "iOS Simulator 3" } },
+    emulator:   { type: "android.emulator", device: { avdName: "Android_Emulator" },
+                  gpuMode: "swiftshader_indirect", headless: !!process.env.CI },
+    emulator2:  { type: "android.emulator", device: { avdName: "Android_Emulator_2" },
+                  gpuMode: "swiftshader_indirect", headless: !!process.env.CI },
+    emulator3:  { type: "android.emulator", device: { avdName: "Android_Emulator_3" },
+                  gpuMode: "swiftshader_indirect", headless: !!process.env.CI },
+  },
+  configurations: {
+    "ios.sim.debug":     { device: "simulator", app: "ios.debug" },
+    "ios.sim.staging":   { device: "simulator", app: "ios.staging" },
+    "ios.sim.release":   { device: "simulator", app: "ios.release" },
+    "ios.sim.prerelease":{ device: "simulator", app: "ios.prerelease" },
+    "android.emu.debug":     { device: "emulator", app: "android.debug" },
+    "android.emu.release":   { device: "emulator", app: "android.release" },
+    "android.emu.prerelease":{ device: "emulator", app: "android.prerelease" },
+  },
+};
+```
+
+Reading it from top to bottom:
+
+- **Cross-workspace paths.** `rootDir = path.resolve(__dirname, "../..")` jumps two levels up — from `e2e/mobile/` to the monorepo root — so every `iosDir` / `androidDir` / `ENV_FILE_*` path resolves to files under `apps/ledger-live-mobile/`. Detox does not care that the config lives in a different workspace from the native project; it only cares that the final binary paths exist at the time the test starts.
+- **`iosArch` and `androidArch`.** iOS is pinned to `arm64` (Apple-silicon simulators). Android defaults to `arm64-v8a` locally (faster on M1+ Macs) but flips to `x86_64` in CI, where the emulators run on x86_64 Linux hosts.
+- **`SCHEME`.** The Xcode scheme name (`ledgerlivemobile`) is what `xcodebuild -scheme` receives. It is also the name of the `.app` bundle produced in `iosBuildDir`.
+- **`testRunner.$0: "jest"`.** Detox forwards to Jest. Every argument under `args` becomes a CLI flag (`--config jest.config.js`). `setupTimeout: 500000` (8m20s) and `teardownTimeout: 120000` (2m) are generous because Speculos launches and Detox cleanups can each burn a minute in CI. `retries: 0` — we do not retry at the Detox layer; Jest handles retries if configured. `forwardEnv: true` ensures `DETOX_CONFIGURATION` is passed to Jest workers, which `jest.environment.ts` reads to pick the right device for a secondary worker.
+- **`behavior.init.reinstallApp: true`.** Every session reinstalls the app — guaranteeing a clean slate. `exposeGlobals: false` means Detox does **not** install `device`, `element`, `by`, `waitFor`, etc. on `globalThis`; the test code imports them from `detox`. This is important: the globals you see in specs (`tapById`, `waitForElementById`, `app`) come from our own `setup.ts` / `jest.environment.ts`, not from Detox.
+- **`behavior.extends: "detox-allure2-adapter/preset-detox"`.** The adapter preset hooks Detox's artifact pipeline (video, screenshots, device logs, view hierarchy) into Allure's attachment API.
+- **`apps`.** Seven app configurations. Each carries a `build` command (the literal shell command Detox runs on `detox build`) and a `binaryPath`. Notable details: iOS `Debug`/`Staging`/`Release` all use `.env.mock`; `prerelease` uses `.env.mock.prerelease`. Android has three separate Gradle variants — `assembleDebug`, `assembleDetox`, `assembleDetoxPreRelease` — because the Android build pipeline customises bundling (Hermes vs JSC, ProGuard, signing).
+- **`devices`.** Three iOS simulators (`simulator`, `simulator2`, `simulator3`) and three Android emulators. The numbered suffixes exist so parallel Jest workers (`maxWorkers: 3` in `jest.config.js`) can each own their own simulator/emulator. `jest.environment.ts` reads `JEST_WORKER_ID` and rewrites `detoxConfig.device` to the right entry for workers 2 and 3 (see 4.7.5).
+- **`configurations`.** The cartesian product of devices × apps — what the CLI receives as `--configuration <name>`. The ones you will see most often are `ios.sim.debug`, `ios.sim.release`, `android.emu.debug`, `android.emu.release`.
+
+### 5.7.5 The Jest Stack
+
+Detox delegates to Jest. The Jest stack in this workspace is four files: `jest.config.js`, `jest.environment.ts`, `jest.globalSetup.ts`, and `jest.globalTeardown.ts` — plus one Babel file and one setup file.
+
+#### `jest.config.js`
+
+```javascript
+const { compilerOptions } = require("./tsconfig.json");
+const {
+  getDeviceFirmwareVersion,
+  getSpeculosModel,
+} = require("@ledgerhq/live-common/e2e/speculosAppVersion");
+
+function pathsToModuleNameMapper(paths, { prefix = "<rootDir>/" } = {}) {
+  const jestPaths = {};
+  if (!paths) return jestPaths;
+
+  Object.keys(paths).forEach(pathKey => {
+    if (pathKey === "*") return;
+    const pathEntry = paths[pathKey];
+    const pathValues = Array.isArray(pathEntry) ? pathEntry : [pathEntry];
+    pathValues.forEach(pathValue => {
+      const jestKey = pathKey.replace(/\*$/, "(.*)");
+      const jestValue = pathValue.replace(/\*/g, "$1");
+      jestPaths[jestKey] = `${prefix}${jestValue}`;
+    });
+  });
+
+  return jestPaths;
+}
+
+const jestAllure2ReporterOptions = {
+  extends: "detox-allure2-adapter/preset-detox",
+  resultsDir: "artifacts",
+  testCase: {
+    links: {
+      issue: "https://ledgerhq.atlassian.net/browse/{{name}}",
+      tms: "https://ledgerhq.atlassian.net/browse/{{name}}",
+    },
+    labels: { host: process.env.RUNNER_NAME },
+    status: ({ value }) => (value === "broken" ? "failed" : value),
+  },
+  overwrite: false,
+  environment: async ({ $ }) => ({
+    SPECULOS_DEVICE: process.env.SPECULOS_DEVICE,
+    SPECULOS_FIRMWARE_VERSION: await getDeviceFirmwareVersion(getSpeculosModel()),
+    MOBILE_DEVICE: process.env.DEVICE_INFO || "Unknown device",
+    path: process.cwd(),
+    "version.node": process.version,
+    "version.jest": await $.manifest("jest", ["version"]),
+    "package.name": await $.manifest(m => m.name),
+    "package.version": await $.manifest(["version"]),
+  }),
+};
+
+const detoxAllure2AdapterOptions = {
+  deviceLogs: true,
+  deviceScreenshots: false,
+  deviceVideos: false,
+  deviceViewHierarchy: false,
+  onError: "warn",
+};
+
+const ESM_PACKAGES = ["ky", "@polkadot"].join("|");
+
+const config = {
+  rootDir: ".",
+  modulePaths: [compilerOptions.baseUrl ?? "."],
+  maxWorkers: process.env.CI ? 3 : 1,
+  transform: {
+    "^.+\\.(js|jsx)?$": "babel-jest",
+    "^.+\\.(ts|tsx)?$": [
+      "@swc/jest",
+      {
+        jsc: {
+          target: "es2022",
+          parser: { syntax: "typescript", tsx: true, decorators: true, dynamicImport: true },
+          transform: { react: { runtime: "automatic" } },
+        },
+        sourceMaps: "inline",
+        module: { type: "commonjs" },
+      },
+    ],
+  },
+  moduleNameMapper: {
+    "^@ledgerhq/live-common/e2e/(.*)$": "<rootDir>/../../libs/ledger-live-common/src/e2e/$1",
+    ...pathsToModuleNameMapper(compilerOptions.paths, { prefix: "<rootDir>/" }),
+  },
+  transformIgnorePatterns: [`/node_modules/(?!(${ESM_PACKAGES})/)`],
+  setupFilesAfterEach: undefined,
+  setupFilesAfterEach: undefined,
+  setupFilesAfterEnv: ["<rootDir>/setup.ts"],
+  testMatch: ["<rootDir>/specs/**/*.spec.ts"],
+  testTimeout: 300_000,
+  reporters: [
+    "detox/runners/jest/reporter",
+    ["jest-allure2-reporter", jestAllure2ReporterOptions],
+  ],
+  globalSetup: "<rootDir>/jest.globalSetup.ts",
+  globalTeardown: "<rootDir>/jest.globalTeardown.ts",
+  testEnvironment: "<rootDir>/jest.environment.ts",
+  testEnvironmentOptions: {
+    customConditions: ["node"],
+    eventListeners: [
+      "jest-metadata/environment-listener",
+      "jest-allure2-reporter/environment-listener",
+      ["detox-allure2-adapter", detoxAllure2AdapterOptions],
+    ],
+  },
+  verbose: true,
+  resetModules: true,
+};
+
+module.exports = config;
+```
+
+The key decisions encoded here:
+
+- **`maxWorkers: 3` in CI, `1` locally.** CI can afford three simulators/emulators; your laptop usually cannot. When workers > 1, the three device entries (`simulator`/`simulator2`/`simulator3`) matter.
+- **SWC as the TS transformer.** `@swc/jest` is wired with `decorators: true` — non-negotiable, because every POM method uses `@Step(...)`.
+- **Path aliases.** The helper `pathsToModuleNameMapper` translates `tsconfig.json`'s `paths` entries into Jest's `moduleNameMapper`. One extra rule is added by hand: `@ledgerhq/live-common/e2e/*` is remapped to `../../libs/ledger-live-common/src/e2e/*` so that enums and models used across desktop and mobile are loaded from the shared source (not the compiled `lib/`).
+- **`testMatch: ["<rootDir>/specs/**/*.spec.ts"]`.** Only files ending in `.spec.ts` under `specs/` run. Driver modules like `swap.ts`, `swap.other.ts`, `send.ts` do not match this glob — they are imported by specs but never executed directly.
+- **`testTimeout: 300_000`.** 5 minutes per test. Swap flows that require Speculos signing and confirmation can take that long in CI.
+- **`reporters`.** Two: Detox's own Jest reporter (required for Detox/Jest integration) and `jest-allure2-reporter` with options tuned for Ledger's Jira instance — links to `ledgerhq.atlassian.net` follow the `$TmsLink("B2CQA-xxx")` decorator in specs.
+- **`testEnvironmentOptions.eventListeners`.** Three listeners chain into the env lifecycle: `jest-metadata` (enables metadata APIs), `jest-allure2-reporter` (the writer side), and `detox-allure2-adapter` (device log/video/screenshot/view-hierarchy capture).
+- **`resetModules: true`.** Between specs, Jest's module registry is wiped. This makes sure spec-level `setEnv(...)` calls do not leak into the next spec.
+
+#### `jest.environment.ts`
+
+This is the custom Jest environment — the per-worker globals factory. Some key excerpts (the file is 223 lines):
+
+```typescript
+import DetoxEnvironment from "detox/runners/jest/testEnvironment";
+
+export default class TestEnvironment extends DetoxEnvironment {
+  declare global: typeof globalThis;
+
+  async setup() {
+    const workerId = Number(process.env.JEST_WORKER_ID ?? "1");
+    if (workerId > 1) this.setupDeviceForSecondaryWorker(workerId);
+    await super.setup();
+
+    setupEnvironment();
+
+    const speculosDevicesMap = new Map<string, number>();
+    const webSocketObj = {
+      wss: undefined,
+      ws: undefined,
+      messages: {},
+      e2eBridgeServer: new Subject<ServerData>(),
+    };
+    const pendingCallbacksMap = new Map<string, { callback: (data: string) => void }>();
+    const appInstance = new Application();
+
+    this.global.app = appInstance;
+    this.global.IS_FAILED = false;
+    this.global.speculosDevices = speculosDevicesMap;
+    this.global.webSocket = webSocketObj;
+    this.global.pendingCallbacks = pendingCallbacksMap;
+
+    // identical assignments to globalThis follow, plus:
+    Object.assign(this.global, enums);
+    Object.assign(this.global, nativeHelpers);
+    Object.assign(this.global, webHelpers);
+    Object.assign(this.global, cliCommandsUtils);
+    // ... and to globalThis as well
+  }
+  // ...
+}
+```
+
+What it does:
+
+1. **Selects the right device for the worker.** Worker 1 uses the default device in `detox.config.js`. Workers 2 and 3 call `setupDeviceForSecondaryWorker(workerId)`, which rewrites `detoxConfig.device` to `simulator2`/`emulator2` or `simulator3`/`emulator3` before `super.setup()` boots Detox. This is how parallel Jest workers avoid fighting over the same simulator UDID.
+2. **Constructs `app = new Application()` once per worker.** The `Application` class (see 4.7.10) lazy-initialises its 32 POMs; constructing it is cheap.
+3. **Installs every global the test suite expects.** Enums (`Account`, `Currency`, `Delegate`, `Transaction`, `Fee`, `AppInfos`, `Swap`, `TokenAccount`, `CLI`), every `NativeElementHelpers.*` method renamed to its top-level alias (`tapById`, `waitForElementById`, etc.), every `WebElementHelpers.*` method, and the `cliCommandsUtils` from live-common. The `types/global.d.ts` file declares the matching ambient types so TypeScript knows about them.
+4. **Installs failure hooks.** `handleTestEvent` (not shown above) reacts to Jest's `hook_failure` and `test_fn_failure` events: it flips `IS_FAILED`, takes a Speculos screenshot, an app screenshot, captures the native view hierarchy XML, pulls the bridge log, and attaches everything to Allure. This is why failing tests have rich Allure reports even though no test code mentions Allure.
+5. **Tears down carefully.** On teardown, it closes the bridge server/client, disconnects DMK Speculos transports, and triggers GC.
+
+#### `jest.globalSetup.ts`
+
+Runs **once** before any Jest workers start:
+
+```typescript
+export default async function setup(): Promise<void> {
+  const envFileName = process.env.ENV_FILE || ".env.mock";
+  const envFile = path.join(__dirname, "../../apps/ledger-live-mobile", envFileName);
+  try {
+    await fs.access(envFile, fs.constants.R_OK);
+  } catch (error) {
+    throw new Error(`Mock env file not found or not readable: ${envFile}`);
+  }
+
+  setupSpeculosCleanupHandlers();
+  await cleanupPreviousNanoAppJsonFile();
+
+  await globalSetup();   // detox/runners/jest
+
+  const testSessionIndex = detoxSession.testSessionIndex ?? 0;
+  const maxRetries = detoxConfig.testRunner?.retries ?? 0;
+  const isLastRetry = maxRetries > 0 && testSessionIndex >= maxRetries;
+
+  if (isLastRetry) {
+    process.env.DETOX_ENABLE_VIDEO = "true";
+    process.env.DETOX_VIDEO_OPTIONS = JSON.stringify({
+      android: { recording: { bitRate: 1_000_000, maxSize: 720, codec: "h264" },
+                 audio: false, window: false },
+      ios: { codec: "hevc" },
+    });
+  }
+}
+```
+
+Three jobs:
+
+1. **Validate the ENV file exists.** Before any binary is launched, check that `apps/ledger-live-mobile/.env.mock` (or the one named in `ENV_FILE`) is readable. This fails fast with a clear message.
+2. **Install SIGINT/SIGTERM/SIGHUP/SIGQUIT handlers.** If you Ctrl-C the test run, these handlers clean up any Speculos containers tracked in `SPECULOS_TRACKING_FILE`. Without this, laptop disks accumulate orphan Docker containers.
+3. **Enable video on the last retry only.** If `detox.config.js` had `retries: N`, the final attempt gets video recording enabled (via env vars that `detox-allure2-adapter` reads). Recording every attempt would balloon artifact size.
+
+At the very top of the file — and of `jest.globalTeardown.ts` — you will see:
+
+```typescript
+import { register } from "tsconfig-paths";
+const tsConfig = require("./tsconfig.json");
+register({ baseUrl: __dirname, paths: tsConfig.compilerOptions.paths });
+```
+
+This is the TS-path bootstrap. Global setup/teardown are run by Jest **before** its transform layer applies to them in the same way it does to specs, so they need `tsconfig-paths` to resolve `@ledgerhq/live-common/e2e/...` imports.
+
+#### `jest.globalTeardown.ts`
+
+Runs **once** after all workers finish:
+
+```typescript
+export default async () => {
+  if (process.env.CI && process.env.SHARD_INDEX === "1") {
+    try {
+      await initDetox();
+      await launchApp();
+      await loadConfig("1AccountBTC1AccountETHReadOnlyFalse", true);
+      await NativeElementHelpers.waitForElementById("topbar-settings", 120_000);
+
+      const flagsData = formatFlagsData(JSON.parse(await getFlags()));
+      const envsData = formatEnvData(JSON.parse(await getEnvs()));
+      await fs.appendFile(ARTIFACT_ENV_PATH, flagsData + envsData);
+    } catch (err) {
+      log.error("Error during CI global teardown:", sanitizeError(err));
+    } finally {
+      try {
+        closeBridge();
+        await withTimeout(cleanupDetox(), 30_000, "cleanupDetox");
+      } catch { /* ... */ }
+    }
+  } else if (process.env.CI) {
+    try { await fs.unlink(ARTIFACT_ENV_PATH); } catch { /* ... */ }
+  }
+
+  await withTimeout(globalTeardown(), 60_000, "globalTeardown");
+  await Promise.all([cleanupUserdata(), forceGarbageCollection()]);
+};
+```
+
+What it does:
+
+- **Only shard 1 writes `environment.properties`.** In CI the suite is sharded. Writing the feature-flags and env dump from each shard would clobber the file; only shard 1 does it. The other shards delete any pre-existing file so stale data does not end up in the report.
+- **Runs the app one more time to collect state.** It launches the app, loads `1AccountBTC1AccountETHReadOnlyFalse.json`, waits for the portfolio, and calls `getFlags()` / `getEnvs()` over the bridge. These produce the Allure environment table you see in the report header.
+- **Cleans up `userdata/temp-userdata-*.json` files.** `Application.init()` creates a temp copy of the userdata JSON before handing it to Speculos; in rare crash scenarios those files are not unlinked. The glob cleanup ensures the workspace does not accumulate cruft.
+- **Wraps everything in timeouts.** `proper-lockfile` has been known to deadlock in CI; `withTimeout` ensures the Jest process always exits, even if a cleanup hangs.
+
+#### `babel.config.js`
+
+Three lines of plugins:
+
+```javascript
+module.exports = {
+  plugins: [
+    "@babel/plugin-transform-named-capturing-groups-regex",
+    "@babel/plugin-transform-export-namespace-from",
+    ["@babel/plugin-proposal-class-properties", { loose: true }],
+  ],
+};
+```
+
+This config is used by `babel-jest` for `.js`/`.jsx` files only (TypeScript goes through SWC). The three plugins are required because some transitive dependencies emit code that uses those syntaxes before reaching Jest.
+
+#### `setup.ts`
+
+Wired via `setupFilesAfterEnv` in `jest.config.js` — so Jest runs it **once per spec file**, after the environment has been set up:
+
+```typescript
+import { device } from "detox";
+import { launchApp, setupEnvironment } from "./helpers/commonHelpers";
+import { close as closeBridge } from "./bridge/server";
+import { getEnv, setEnv } from "@ledgerhq/live-env";
+import { setAllureDescription } from "./helpers/allure/allure-helper";
+
+const broadcastOriginalValue = getEnv("DISABLE_TRANSACTION_BROADCAST");
+setupEnvironment();
+
+beforeAll(
+  async () => {
+    const port = await launchApp();
+    await device.reverseTcpPort(8081);
+    await device.reverseTcpPort(port);
+    await device.reverseTcpPort(52619); // To allow the android emulator to access the dummy app
+    setAllureDescription();
+  },
+  process.env.CI ? 150000 : 120000,
+);
+
+afterAll(async () => {
+  setEnv("DISABLE_TRANSACTION_BROADCAST", broadcastOriginalValue);
+  closeBridge();
+  await app.common.removeSpeculos();
+});
+```
+
+What it means in practice:
+
+- Every spec file gets an implicit `beforeAll` that launches the app, opens TCP ports 8081 (Metro), the bridge port (random free port), and 52619 (dummy-app test server). A spec file's own `beforeAll(() => app.init(...))` runs **after** this one.
+- Every spec file also gets an `afterAll` that restores the broadcast env flag, closes the bridge, and asks `app.common.removeSpeculos()` to tear down any Speculos container registered during the run.
+- `setAllureDescription()` adds the "Legacy Wallet" vs "Wallet 4.0" badge and the shard index to the Allure test description.
+
+### 5.7.6 `tsconfig.json` — TypeScript for Tests
+
+```json
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "experimentalDecorators": true,
+    "checkJs": false,
+    "jsx": "react-native",
+    "lib": ["es2017", "DOM"],
+    "types": ["node", "jest"],
+    "skipLibCheck": true,
+    "noEmit": true,
+    "typeRoots": ["./types", "./node_modules/@types"],
+    "paths": {
+      "*": ["./*"],
+      "LLM/*": ["../../apps/ledger-live-mobile/src/mvvm/*"],
+      "~/*": ["../../apps/ledger-live-mobile/src/*"],
+      "@shared/feature-flags": ["../../shared/feature-flags/src"],
+      "@ledgerhq/live-common/e2e/*": ["../../libs/ledger-live-common/src/e2e/*"],
+      "@ledgerhq/live-common/lib/e2e/*": ["../../libs/ledger-live-common/src/e2e/*"],
+      "@ledgerhq/live-common/hw/index": ["../../libs/ledger-live-common/src/hw/index"],
+      "@ledgerhq/live-common/hw/deviceAccess": ["../../libs/ledger-live-common/src/hw/deviceAccess"]
+    }
+  },
+  "include": ["types", "**/*.ts", "**/*.tsx"],
+  "exclude": ["node_modules", "babel.config.js", "jest.config.js", "**/*.js"]
+}
+```
+
+What matters for a test author:
+
+- **`experimentalDecorators: true`.** Enables `@Step("...")` on POM methods and `@TmsLink`/`@Tag` ideas used by Allure.
+- **`"~/*"` alias.** Lets tests import app source (`~/screens/portfolio/PortfolioScreen`) when they need to reference constants shared with the production code. Rarely needed, but a safety valve.
+- **`"@ledgerhq/live-common/e2e/*"` alias.** Resolves directly to the `src/` of the shared library, so the tests use the TypeScript source instead of the compiled output. This is why you can set a breakpoint in `@ledgerhq/live-common/e2e/models/Swap.ts` from a mobile test — they are the same file.
+- **`"LLM/*"` alias.** Expands to `apps/ledger-live-mobile/src/mvvm/*`. It is scaffolding for the MVVM migration happening in the app; you will rarely use it, but seeing it in a file tells you that file is bridging to new architecture code.
+
+### 5.7.7 The Bridge Layer — `bridge/server.ts`
+
+The bridge is how the test process (Node) talks to the React Native app (JS/native) at runtime. On the app side, a WebSocket client receives messages and dispatches Redux actions. On the test side, a WebSocket **server** sends messages and optionally awaits a typed reply.
+
+Unlike the legacy tree, the canonical workspace contains only the server (`bridge/server.ts`, 307 lines). The types and the client live under the app itself: `apps/ledger-live-mobile/e2e/bridge/types.ts` exports `MessageData` and `ServerData`, which `server.ts` imports directly:
+
+```typescript
+import { NavigatorName } from "../../../apps/ledger-live-mobile/src/const";
+import {
+  MessageData,
+  OverrideFeatureFlagPayload,
+  ServerData,
+} from "../../../apps/ledger-live-mobile/e2e/bridge/types";
+```
+
+This is the one place in the workspace where a test-side file reaches across into the app's `src/` and `e2e/` directories. Conceptually, the types describe a contract: the test emits `MessageData` variants, the app emits `ServerData` variants.
+
+Here is the message-catalog derived from what `server.ts` actually sends and receives:
+
+| Direction | Type | Purpose |
+|---|---|---|
+| Test → app | `importSettings` | Replace the Redux settings slice |
+| Test → app | `importAccounts` | Replace the accounts slice |
+| Test → app | `overrideFeatureFlag` | Override a single feature flag at runtime |
+| Test → app | `acceptTerms` | Mark terms as accepted |
+| Test → app | `navigate` | Imperative navigation to a navigator name |
+| Test → app | `addKnownSpeculos` | Register a Speculos device with the app's transport layer |
+| Test → app | `removeKnownSpeculos` | Deregister a Speculos device |
+| Test → app | `swapSetup` | Initialise the Swap Live App (optional `SWAP_API_BASE`) |
+| Test → app | `waitSwapReady` | Block until the swap app is ready |
+| Test → app | `waitEarnReady` | Block until the earn app is ready |
+| Test → app | `getLogs` / `getFlags` / `getEnvs` | Dump runtime data for Allure env file / debugging |
+| App → test | `ACK` | Acknowledges a previously sent message by id |
+| App → test | `walletAPIResponse` | Streams back a response to a Wallet API request |
+| App → test | `appLogs` / `appFlags` / `appEnvs` | Reply payloads for the corresponding `get*` requests |
+| App → test | `swapSetupDone` | Swap Live App is initialised |
+| App → test | `swapLiveAppReady` / `earnLiveAppReady` | Live apps signal readiness |
+| App → test | `appFile` | Persists a file to `../artifacts/` on the test host |
+
+Key public functions exported by `server.ts` (you call these from POMs, not from specs directly):
+
+```typescript
+export async function findFreePort(): Promise<number>
+export function init(port = 8099, onConnection?: () => void)
+export function close()
+export async function loadConfig(fileName: string, agreed: true = true): Promise<void>
+export async function setFeatureFlags(flags: PartialFeatures)
+export async function setFeatureFlag(flag: OverrideFeatureFlagPayload)
+export async function swapSetup()
+export async function waitSwapReady()
+export async function waitEarnReady()
+export async function getLogs()
+export async function getFlags()
+export async function getEnvs()
+export async function addKnownSpeculos(address: string)
+export async function removeKnownSpeculos(address: string)
+```
+
+A few implementation details worth knowing:
+
+- **Unique ids.** Every outgoing message carries a `uuid()` id so the app can ACK it. `webSocket.messages[id] = message` stores pending messages; when the app ACKs, the entry is deleted.
+- **Reconnect buffering.** If the app crashes and reconnects, `server.on("connection")` resends anything still in `webSocket.messages` — tests survive a mid-run reconnection.
+- **Pending-callback map.** For request/response patterns (like `getFlags`), the server registers a callback in `global.pendingCallbacks` keyed by type; the matching `onMessage` branch fires the callback when the reply arrives. A 10 s timeout (`RESPONSE_TIMEOUT`) covers most cases; swap/earn readiness extends it to 30 s.
+- **`loadConfig(fileName)`.** Reads `userdata/<fileName>.json`, merges the settings with `{ shareAnalytics: false, hasSeenAnalyticsOptInPrompt: true }`, sends `importSettings`, navigates to the base navigator, sends `importAccounts`, then applies any `featureFlags.overrides` declared in the userdata. This one function implements everything that `app.init({ userdata })` ultimately does on the app side.
+
+### 5.7.8 The Helpers Layer
+
+`helpers/` is where low-level Detox wrappers and per-run plumbing live. Four files plus one subfolder:
+
+#### `helpers/elementHelpers.ts` — 18 KB, the primitive catalogue
+
+Defines two large objects exported as named modules:
+
+- **`NativeElementHelpers`** — wraps Detox's native matchers (`by.id`, `by.text`, `element(...).tap()`, `waitFor(...).toBeVisible()`) into friendlier primitives. The methods you see promoted to `globalThis` by `jest.environment.ts` all come from here. A non-exhaustive list: `tapById`, `tapByElement`, `tapByText`, `tapByIdAndExpectToDisappear`, `typeTextById`, `typeTextByElement`, `clearTextByElement`, `waitForElementById`, `waitForElementByText`, `waitForElementNotVisible`, `getElementById`, `getElementByText`, `getElementByIdAndText`, `getElementByIdWithDescendantTexts`, `getElementsById`, `getIdByRegexp`, `getIdOfElement`, `getTextOfElement`, `getAttributesOfElement`, `countElementsById`, `isIdPresent`, `isIdVisible`, `scrollToId`, `scrollToText`, `expect` (aliased to `detoxExpect` on globals).
+- **`WebElementHelpers`** — the WebView counterpart. Used when interacting with Live Apps (Swap Live App, Ramp, etc.). Methods include `getWebElementByTestId`, `tapWebElementByTestId`, `typeTextByWebTestId`, `waitWebElement`, `waitWebElementByTestId`, `getCurrentWebviewUrl`, `waitForCurrentWebviewUrlToContain`, `scrollToWebElement`, and more.
+
+One method worth looking at in detail is `waitForElement` (or `waitForElementById`), which accepts an optional `errorElementId`. When provided, it polls both the expected element **and** the error element in parallel; if the error element appears first, it throws immediately with a clear message. This is the backbone of the fail-fast behaviour used across swap POMs.
+
+#### `helpers/commonHelpers.ts`
+
+Cross-cutting runtime helpers. The most important exports:
+
+- `launchApp()` — allocates a free port, closes any existing bridge, inits a new bridge on that port, and calls `device.launchApp({ launchArgs: { wsPort: port, ... } })`. The app sees the port in its launch args and connects its WS client to it.
+- `openDeeplink(path)` — deeplink the app: `ledgerlive://<path>`.
+- `setupEnvironment()` — sets `DISABLE_APP_VERSION_REQUIREMENTS`, `MOCK`, `DETOX`, `E2E_NANO_APP_VERSION_PATH`, and reads `DISABLE_TRANSACTION_BROADCAST` from env.
+- `isAndroid()` / `isIos()` / `isSpeculosRemote()` / `isRemoteIos()` — platform guards used throughout POMs.
+- `describeIfNotNanoS(...)` — skip blocks on Nano S (firmware too old for some flows).
+- `takeAppScreenshot(name)` — screenshots the device and attaches to Allure.
+- `captureNativeViewHierarchy(label)` — dumps the native view tree XML to Allure.
+- `normalizeText(text)` — replaces multiple whitespace with a single space and normalises non-breaking spaces (` `). Used by swap assertions that compare RN-rendered text.
+- `logMemoryUsage()` — appends process memory usage to Allure.
+- `isWallet40` — top-level boolean (`process.env.E2E_ENABLE_WALLET40 !== "0"`) used to fork behaviour for Wallet 4.0-specific POM code.
+
+#### `helpers/errorHelpers.ts`
+
+Tiny but important. Defines `ERROR_MODAL_SELECTORS = ["generic-error-modal"]`, then `detectErrorModal(timeout)` and `checkForErrorModals(timeout, customMessage)`. Used by POMs (and automatically by `waitForElement`) to fail fast on generic error dialogs.
+
+#### `helpers/pageScroller.ts`
+
+A small class that encapsulates "keep scrolling until this element appears, switch direction at the edge, give up after N attempts". Used internally by `NativeElementHelpers.scrollToId` and `.scrollToText`. Constants: 10 attempts per direction, 7 stall cycles before switching, 500 ms delay between Android scrolls.
+
+#### `helpers/allure/allure-helper.ts`
+
+A single function `setAllureDescription()` that reads the current test file path and composes the Allure description with `📄 Test file: <name>` and `🏷️ Test run on: <mode>` (where mode is Wallet 4.0 or Legacy Wallet), plus the shard index. Called once per spec from `setup.ts`.
+
+### 5.7.9 The Models Layer
+
+Mobile's `models/` is deliberately thin (three files). The heavy models — `Swap`, `Transaction`, `Delegate`, `Account`, `Currency`, `AppInfos`, `Fee`, `Provider` — live in `@ledgerhq/live-common/e2e/` and are shared with desktop. The three files here are **cross-POM composers**:
+
+- `models/currencies.ts` — a single helper: `getCurrencyManagerApp(currencyId)` returns the lowercase first word of the Manager app name for a given currency. Used by `manager.page` to find the right install card.
+- `models/send.ts` — `verifyAppValidationSendInfo(transaction, amount)`. Orchestrates `app.deviceValidation.expect*` calls for currencies that show amount/recipient/sender/ENS on the device screen. The function knows which assertions to make per currency (ETH amounts shown, ATOM sender shown, POL recipient shown, etc.).
+- `models/stake.ts` — `verifyAppValidationStakeInfo(delegation, amount, fees?)` and `verifyStakeOperationDetailsInfo(...)`. Same shape as `send.ts` but for delegation flows.
+
+These are not POMs (no `@Step`, no page state), and not models either in the data-class sense — they are assertion compositors. Use them from a spec's `it()` body when you want "verify the device screen matches a transaction" without rewriting the per-currency logic every time.
+
+### 5.7.10 The Page Layer — The Centrepiece
+
+The page layer is the largest and most-touched part of the workspace. It is organised into a single hub (`page/index.ts`) and eleven thematic subdirectories.
+
+#### `page/index.ts` — the `Application` class
+
+This is the file every spec reaches into via `app.*`. It is 234 lines, imports 32 POMs, and exposes each one behind a lazy-initialised getter. Here it is in full:
+
+```typescript
+import { Step } from "jest-allure2-reporter/api";
+import AssetAccountsPage from "./accounts/assetAccounts.page";
+import AccountPage from "./accounts/account.page";
+import AccountsPage from "./accounts/accounts.page";
+import AddAccountDrawer from "./accounts/addAccount.drawer";
+import CommonPage from "./common.page";
+import CustomLockscreenPage from "./stax/customLockscreen.page";
+import DeviceValidationPage from "./trade/deviceValidation.page";
+import DiscoverPage from "./discover/discover.page";
+import LedgerSyncPage from "./settings/ledgerSync.page";
+import ManagerPage from "./manager/manager.page";
+import MarketPage from "./market/market.page";
+import OnboardingStepsPage from "./onboarding/onboardingSteps.page";
+import OperationDetailsPage from "./trade/operationDetails.page";
+import PasswordEntryPage from "./passwordEntry.page";
+import PortfolioEmptyStatePage from "./wallet/portfolioEmptyState.page";
+import PortfolioPage from "./wallet/portfolio.page";
+import ReceivePage from "./trade/receive.page";
+import SendPage from "./trade/send.page";
+import SettingsGeneralPage from "./settings/settingsGeneral.page";
+import SettingsHelpPage from "./settings/settingsHelp.page";
+import SettingsPage from "./settings/settings.page";
+import SpeculosPage from "./speculos.page";
+import StakePage from "./trade/stake.page";
+import SwapPage from "./trade/swap.page";
+import SwapLiveAppPage from "./liveApps/swapLiveApp";
+import WalletTabNavigatorPage from "./wallet/walletTabNavigator.page";
+import MainNavigationPage from "./wallet/mainNavigation.page";
+import CeloManageAssetsPage from "./trade/celoManageAssets.page";
+import TransferMenuDrawer from "./wallet/transferMenu.drawer";
+import BuySellPage from "./trade/buySell.page";
+import EarnDashboardPage from "./trade/earnDasboard.page";
+import EarnV2DashboardPage from "./trade/earnV2Dashboard.page";
+import ModularDrawer from "./drawer/modular.drawer";
+
+import path from "path";
+import fs from "fs";
+import { InitializationManager, InitOptions } from "../utils/initUtil";
+import { randomUUID } from "crypto";
+
+export type ApplicationOptions = InitOptions;
+
+export const getUserdataPath = (userdata: string) => {
+  return path.resolve("userdata", `${userdata}.json`);
+};
+
+const lazyInit = <T>(PageClass: new () => T) => {
+  let instance: T | null = null;
+  return () => {
+    if (!instance) instance = new PageClass();
+    return instance;
+  };
+};
+
+export class Application {
+  private assetAccountsPageInstance = lazyInit(AssetAccountsPage);
+  private accountPageInstance = lazyInit(AccountPage);
+  private accountsPageInstance = lazyInit(AccountsPage);
+  private addAccountDrawerInstance = lazyInit(AddAccountDrawer);
+  private commonPageInstance = lazyInit(CommonPage);
+  private customLockscreenPageInstance = lazyInit(CustomLockscreenPage);
+  private deviceValidationPageInstance = lazyInit(DeviceValidationPage);
+  private discoverPageInstance = lazyInit(DiscoverPage);
+  private ledgerSyncPageInstance = lazyInit(LedgerSyncPage);
+  private managerPageInstance = lazyInit(ManagerPage);
+  private marketPageInstance = lazyInit(MarketPage);
+  private onboardingPageInstance = lazyInit(OnboardingStepsPage);
+  private operationDetailsPageInstance = lazyInit(OperationDetailsPage);
+  private passwordEntryPageInstance = lazyInit(PasswordEntryPage);
+  private portfolioEmptyStatePageInstance = lazyInit(PortfolioEmptyStatePage);
+  private portfolioPageInstance = lazyInit(PortfolioPage);
+  private receivePageInstance = lazyInit(ReceivePage);
+  private sendPageInstance = lazyInit(SendPage);
+  private settingsPageInstance = lazyInit(SettingsPage);
+  private settingsGeneralPageInstance = lazyInit(SettingsGeneralPage);
+  private speculosPageInstance = lazyInit(SpeculosPage);
+  private stakePageInstance = lazyInit(StakePage);
+  private swapLiveAppInstance = lazyInit(SwapLiveAppPage);
+  private swapPageInstance = lazyInit(SwapPage);
+  private walletTabNavigatorPageInstance = lazyInit(WalletTabNavigatorPage);
+  private mainNavigationPageInstance = lazyInit(MainNavigationPage);
+  private celoManageAssetsPageInstance = lazyInit(CeloManageAssetsPage);
+  private TransferMenuDrawerInstance = lazyInit(TransferMenuDrawer);
+  private buySellPageInstance = lazyInit(BuySellPage);
+  private settingsHelpPageInstance = lazyInit(SettingsHelpPage);
+  private earnDashboardPageInstance = lazyInit(EarnDashboardPage);
+  private readonly earnV2DashboardPageInstance = lazyInit(EarnV2DashboardPage);
+  private modularDrawerPageInstance = lazyInit(ModularDrawer);
+
+  @Step("Account initialization")
+  public async init(options: ApplicationOptions) {
+    this.modularDrawer.resetFlags();
+    const userdataSpeculos = `temp-userdata-${randomUUID()}`;
+    const userdataPath = getUserdataPath(userdataSpeculos);
+    fs.copyFileSync(getUserdataPath(options.userdata || "skip-onboarding"), userdataPath);
+    try {
+      await InitializationManager.initialize(options, userdataPath, userdataSpeculos);
+    } finally {
+      fs.unlinkSync(userdataPath);
+    }
+  }
+
+  public get assetAccountsPage()    { return this.assetAccountsPageInstance(); }
+  public get account()              { return this.accountPageInstance(); }
+  public get accounts()             { return this.accountsPageInstance(); }
+  public get addAccount()           { return this.addAccountDrawerInstance(); }
+  public get common()               { return this.commonPageInstance(); }
+  public get customLockscreen()     { return this.customLockscreenPageInstance(); }
+  public get deviceValidation()     { return this.deviceValidationPageInstance(); }
+  public get discover()             { return this.discoverPageInstance(); }
+  public get ledgerSync()           { return this.ledgerSyncPageInstance(); }
+  public get manager()              { return this.managerPageInstance(); }
+  public get market()               { return this.marketPageInstance(); }
+  public get onboarding()           { return this.onboardingPageInstance(); }
+  public get operationDetails()     { return this.operationDetailsPageInstance(); }
+  public get passwordEntry()        { return this.passwordEntryPageInstance(); }
+  public get portfolio()            { return this.portfolioPageInstance(); }
+  public get portfolioEmptyState()  { return this.portfolioEmptyStatePageInstance(); }
+  public get receive()              { return this.receivePageInstance(); }
+  public get send()                 { return this.sendPageInstance(); }
+  public get settings()             { return this.settingsPageInstance(); }
+  public get settingsGeneral()      { return this.settingsGeneralPageInstance(); }
+  public get speculos()             { return this.speculosPageInstance(); }
+  public get stake()                { return this.stakePageInstance(); }
+  public get swap()                 { return this.swapPageInstance(); }
+  public get swapLiveApp()          { return this.swapLiveAppInstance(); }
+  public get walletTabNavigator()   { return this.walletTabNavigatorPageInstance(); }
+  public get mainNavigation()       { return this.mainNavigationPageInstance(); }
+  public get celoManageAssets()     { return this.celoManageAssetsPageInstance(); }
+  public get transferMenuDrawer()   { return this.TransferMenuDrawerInstance(); }
+  public get buySell()              { return this.buySellPageInstance(); }
+  public get settingsHelp()         { return this.settingsHelpPageInstance(); }
+  public get earnDashboard()        { return this.earnDashboardPageInstance(); }
+  public get earnV2Dashboard()      { return this.earnV2DashboardPageInstance(); }
+  public get modularDrawer()        { return this.modularDrawerPageInstance(); }
+}
+```
+
+Three patterns to internalise:
+
+1. **`lazyInit<T>()`.** Each POM is wrapped in a thunk that creates the instance on first read and returns the cached instance on subsequent reads. This keeps `new Application()` cheap (nothing is constructed up front) and ensures every test call to `app.portfolio.xxx` hits the same `PortfolioPage` object — useful when a POM holds cached state like flags.
+2. **`init(options)` decorated with `@Step("Account initialization")`.** Every spec starts with `await app.init({ userdata, speculosApp, cliCommands, featureFlags })`. The method creates a **temporary copy** of the requested userdata JSON (`temp-userdata-<uuid>.json`) so that Speculos CLI commands that mutate the userdata file do not corrupt the canonical snapshot. It then delegates to `InitializationManager.initialize(...)` (see 4.7.14) and unlinks the temp file in `finally`. The `@Step` decorator wraps the whole call in an Allure step — you will see it as the first step in every test's Allure report.
+3. **Naming is consistent.** Every getter returns an instance of the `*Page` or `*Drawer` class whose default export matches the file name. When you need to find a POM's source, the mapping is mechanical: `app.swap` → `page/trade/swap.page.ts`, `app.modularDrawer` → `page/drawer/modular.drawer.ts`, `app.swapLiveApp` → `page/liveApps/swapLiveApp.ts` (note: no `.page` suffix).
+
+#### The subdirectory taxonomy
+
+Eleven subdirectories, each with a purpose:
+
+- **`accounts/`** — Everything to do with the account list and individual accounts: `accounts.page` (list screen), `account.page` (single account details), `addAccount.drawer` (the bottom sheet that opens when adding a new account), `assetAccounts.page` (the screen that shows accounts filtered by asset).
+- **`common.page.ts`** — Shared UI elements at the workspace root, not in a subfolder. `CommonPage` is the base class that `SwapPage`, `AccountsPage`, and several others extend. It centralises search bar, close/back buttons, account item regex, `selectAccount(account)`, `selectKnownDevice(index)`, and `removeSpeculos()`.
+- **`discover/`** — The Discover tab (`discover.page`). Holds a static list of Live Apps (`MoonPay`, `Ramp`, `Kiln`, `Lido`, `1inch`, `Zerion`, `Transak`).
+- **`drawer/`** — Currently one file: `modular.drawer.ts`. This is the reusable asset/network/account picker that shows up across send, receive, swap, earn, and buySell since Wallet 4.0. The POM exposes `performSearchByTicker`, `selectCurrencyByTicker`, `selectNetworkIfAsked`, `selectFirstAccount`, `tapAddNewOrExistingAccountButtonMAD`, and reads the `llmModularDrawer` flag to decide which flow applies.
+- **`liveApps/`** — WebView-driven Live Apps. Currently: `swapLiveApp.ts` (the Swap Live App that renders inside Ledger Live). Uses `WebElementHelpers` instead of `NativeElementHelpers` for all interactions.
+- **`manager/`** — My Ledger / Manager screen (`manager.page`), two lines deep: deeplink, expect.
+- **`market/`** — Market tab (`market.page`): search asset, star, filter starred, open asset, quick actions.
+- **`onboarding/`** — `onboardingSteps.page`. Handles the full first-run flow: language, Get Started, accept analytics, explore without device, recovery phrase / setup Ledger / access wallet forks.
+- **`passwordEntry.page.ts`** — The password lock screen (at the root of `page/`, not in a folder). Minimal: enter password, login, expect lock / no lock.
+- **`settings/`** — `settings.page` (card list), `settingsGeneral.page` (password, theme, language), `settingsHelp.page` (links), `ledgerSync.page` (cloud sync flow).
+- **`speculos.page.ts`** — Wrapper around live-common's Speculos helpers: `signSendTransaction(tx)`, `signDelegationTransaction(delegation)`, `verifyAmountsAndAcceptSwap(swap, amount)`, `goToSettings()`, `activateContractData()`, `activateExpertMode()`. Also holds `setExchangeDependencies(accounts)` — required before any swap to tell the Speculos backend which nano apps must be available.
+- **`stax/`** — Stax-specific screens. Currently one file: `customLockscreen.page`.
+- **`trade/`** — The densest folder. All the transactional flows and their side-effects: `swap.page` (10 KB — swap confirmation UI, history, operation details, export CSV), `send.page`, `receive.page`, `stake.page`, `buySell.page`, `earnDasboard.page` and `earnV2Dashboard.page` (two generations of the earn UI), `operationDetails.page`, `deviceValidation.page` (the "Verify on device" full-screen wait), `celoManageAssets.page`.
+- **`wallet/`** — Portfolio and top-level navigation: `portfolio.page` (17 KB — huge, covers the portfolio screen in both Legacy and Wallet 4.0 layouts), `portfolioEmptyState.page`, `walletTabNavigator.page` (Portfolio/Market tab switching), `mainNavigation.page` (Wallet 4.0 main nav), `transferMenu.drawer` (the transfer bottom sheet).
+
+#### Sample POM — `page/trade/swap.page.ts` (annotated excerpt)
+
+```typescript
+export default class SwapPage extends CommonPage {
+  baseLink = "swap";
+  confirmSwapOnDeviceDrawerId = "confirm-swap-on-device";
+  swapSuccessTitleId = "swap-success-title";
+  swapOperationDetailsScrollViewId = "swap-operation-details-scroll-view";
+  // ... more testIDs
+
+  operationDetails = {
+    fromAccount: "swap-operation-details-fromAccount",
+    toAccount: "swap-operation-details-toAccount",
+    fromAmount: "swap-operation-details-fromAmount",
+    toAmount: "swap-operation-details-toAmount",
+    provider: "swap-operation-details-provider",
+    providerLink: "swap-operation-details-provider-link",
+    swapId: "swap-operation-details-swapId",
+    date: "swap-operation-details-date",
+    viewInExplorerButton: "operation-detail-view-in-explorer-button",
+  };
+
+  @Step("Open swap via deeplink")
+  async openViaDeeplink() {
+    await openDeeplink(this.baseLink);
+    await waitForElementById(app.common.walletApiWebview);
+  }
+
+  @Step("Expect swap page")
+  async expectSwapPage() {
+    if (await IsIdVisible(this.swapFormTabId, 5000)) {
+      await detoxExpect(this.swapFormTab()).toBeVisible();
+    } else {
+      // Wallet 4.0 swap screen does not expose `swap-form-tab`
+      await detoxExpect(getElementById(app.common.walletApiWebview)).toBeVisible();
+    }
+  }
+
+  @Step("Check swap operation row details")
+  async checkSwapOperation(swapId: string, swap: SwapType) {
+    await detoxExpect(this.operationRows()).toBeVisible();
+    await detoxExpect(this.getSpecificOperation(swapId)).toBeVisible();
+    jestExpect(await getTextOfElement(this.specificOperationAccountFromId(swapId))).toEqual(
+      swap.accountToDebit.accountName,
+    );
+    // ...
+  }
+
+  @Step("Click on export operations")
+  async clickExportOperations() {
+    await tapById(this.exportOperationsButton);
+    const filePath = path.resolve(__dirname, "../../artifacts/ledgerwallet-swap-history.csv");
+    const fileExists = await FileUtils.waitForFileToExist(filePath, 5000);
+    jestExpect(fileExists).toBeTruthy();
+  }
+}
+```
+
+Notice four things:
+
+1. **`extends CommonPage`.** Several trade POMs extend `CommonPage` to inherit the search bar, account item regex, close/back buttons, `selectAccount`, `selectKnownDevice`, etc.
+2. **testIDs are fields, not magic strings.** Every testID used by the POM is declared at the top. If the app renames one, only the POM changes — specs stay untouched.
+3. **Every user-facing method is decorated with `@Step(...)`.** These become nested Allure steps. When a test fails, the Allure timeline tells you exactly which step broke.
+4. **Wallet 4.0 conditionals are inline.** `expectSwapPage()` checks `IsIdVisible(this.swapFormTabId, 5000)` — if the legacy testID is visible, verify it; otherwise fall back to the WebView check. This is the dominant pattern for handling the in-flight Wallet 4.0 migration across POMs.
+
+#### Sample POM — `page/common.page.ts`
+
+The shared base class. A few representative methods:
+
+```typescript
+export default class CommonPage {
+  assetScreenFlatlistId = "asset-screen-flatlist";
+  searchBarId = "common-search-field";
+  accountCardPrefix = "account-card-";
+  accountItemId = "account-item-";
+  accountItemNameRegExp = new RegExp(`${this.accountItemId}.*-name`);
+  deviceItem = (deviceId: string): string => `device-item-${deviceId}`;
+  deviceItemRegex = /device-item-.*/;
+  walletApiWebview = "wallet-api-webview";
+  errorPage = new ErrorPage();
+
+  accountId = (account: Account) =>
+    `test-id-account-${getParentAccountName(account)}${account.tokenType !== undefined ? ` (${account.currency.ticker})` : ""}`;
+
+  @Step("Select currency to debit")
+  async selectAccount(account: Account) {
+    const accountId = this.accountId(account);
+    await waitForElementById(accountId);
+    await tapByIdAndExpectToDisappear(accountId);
+  }
+
+  @Step("Select a known device")
+  async selectKnownDevice(index = 0) {
+    const speculosAddress = process.env.DEVICE_PROXY_URL;
+    const elementId = speculosAddress
+      ? this.deviceItem(`speculos|${speculosAddress}`)
+      : this.deviceItemRegex;
+    await waitForElementById(elementId);
+    await tapById(elementId, speculosAddress ? undefined : index);
+  }
+
+  @Step("Remove Speculos")
+  async removeSpeculos(deviceId?: string) {
+    await removeSpeculosAndDeregisterKnownSpeculos(deviceId);
+  }
+}
+```
+
+The `accountId(account: Account)` function translates a shared `Account` enum value into the testID the mobile app renders. This is the reason tests can write `await app.common.selectAccount(Account.BTC_1)` — the enum carries everything the POM needs to build a matcher. The same `Account` enum is consumed by desktop; the two suites thus agree on the fixture's semantic identity while each translates it to its own locator grammar.
+
+### 5.7.11 The Specs Layer — 197 files across 15+ buckets
+
+`specs/` holds the actual Jest test files. There are 197 `.spec.ts` files in the canonical workspace today. They are organised into top-level buckets under `specs/`:
+
+```
+specs/
+├── account/                 # account rename
+├── addAccount/              # 17 per-currency specs + addAccount.ts driver
+├── buySell/                 # Buy/Sell flows
+├── delegate/                # Staking delegation per currency
+├── deleteAccount/           # Account deletion flows
+├── deposit/                 # Deposit entry flows
+├── earn/                    # Earn dashboard
+├── ledgerSync/              # Cross-device sync
+├── portfolio/               # Portfolio screen checks
+├── send/                    # 17 per-currency send specs + send.ts driver + sendInvalid/, sendValidAddress/
+├── settings/                # Settings flows
+├── subAccount/              # Token/sub-account flows
+├── swap/                    # 9 currency-pair specs + swap.ts driver + swap.setup.ts + otherTestCases/
+│   └── otherTestCases/      # Edge cases + swap.other.ts driver + tooLowAmountForQuoteSwaps/
+├── verifyAddress/           # Receive address verification per currency
+├── wallet40/                # Wallet 4.0-only specs
+├── deeplinks.spec.ts
+├── languageChange.spec.ts
+├── market.spec.ts
+├── onboardingReadOnly.spec.ts
+└── userOpensApplication.spec.ts
+```
+
+#### The thin-spec + shared-driver pattern
+
+Almost every bucket follows the same convention: a driver module (`swap.ts`, `swap.other.ts`, `send.ts`, `addAccount.ts`, etc.) declares a family of `export function runXxxTest(...)` helpers; the individual `.spec.ts` files are **thin config bundles** that import the driver and call it with concrete data.
+
+A representative pair:
+
+`specs/swap/swapBTC_NATIVE_SEGWIT_LTC.spec.ts` (full file):
+
+```typescript
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { runSwapTest } from "./swap";
+
+const swap = new Swap(Account.BTC_NATIVE_SEGWIT_1, Account.LTC_1, "0.0006", undefined, Fee.MEDIUM);
+runSwapTest(
+  swap,
+  ["B2CQA-3078"],
+  [
+    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+    "@bitcoin", "@family-bitcoin",
+    "@litecoin", "@family-litecoin",
+  ],
 );
 ```
 
-The structure mirrors the touch-device variant but uses button presses. `withDeviceController` is the DI wrapper that provides `getButtonsController()`. The flow is:
+`specs/swap/swap.ts` — the driver (abridged):
 
-1. **`waitFor(DeviceLabels.REVIEW_TRANSACTION_TO)`** — block until the device renders "Review transaction To" (the recipient screen).
-2. **`pressUntilTextFound(DeviceLabels.SIGN_TRANSACTION)`** — press the right button repeatedly to advance through the review screens (recipient, amount, fees, contract data, etc.) until "Sign transaction" appears.
-3. **`getButtonsController().both()`** — press both buttons simultaneously to confirm.
+```typescript
+export function runSwapTest(swap: SwapType, tmsLinks: string[], tags: string[]) {
+  describe("Swap - Accepted (without tx broadcast)", () => {
+    beforeAll(async () => {
+      await beforeAllFunction(swap);   // app.init + swap setup
+    });
 
-Note that `approveTokenTouchDevices` is exported as a regular `async function` while `approveTokenButtonDevice` is a `withDeviceController(...)`-wrapped value. The shape is different because the touch variant does not need the buttons controller; touch interactions go through `longPressAndRelease` which uses Speculos's touch endpoint, not the button endpoint. The DI wrapper is the cleanest way to opt in to the buttons controller only on the button-device branch.
-
-#### Parallelism — the moving parts
-
-The diagram everyone needs to internalise is this:
-
-```
-TIME ──────────────────────────────────────────────────────────────────►
-
-CLI subprocess (Layer 1):    spawn → signOperation → [block on device] → broadcast → confirm
-                                                          ▲                ▲
-                                                          │                │
-                                                          │  (APDU)        │  (broadcast result)
-                                                          │                │
-Device tap (Layer 4):                            waitFor → press → press → both()
-                                                 (drives Speculos REST API in parallel)
-```
-
-The CLI subprocess and the device tap are two coroutines running in the same Node process. The CLI's subprocess (Layer 1) is the one calling `bridge.signOperation(...)`, which under the hood opens an APDU transport to Speculos and waits for the device to respond with a signed payload. The device tap (Layer 4) is the one calling Speculos's REST API to render screens and press buttons. They communicate through Speculos itself — the device — not through any direct JavaScript wiring.
-
-Critically, both must complete for the whole thing to succeed. If the device tap finishes early (because the screen labels are wrong and `pressUntilTextFound` returns prematurely), the CLI still hangs waiting for an APDU response. If the CLI fails early (an invalid argument, a missing token), the device tap will hang waiting for a screen that never renders. The `waitConfirmation: true` flag on `runCliTokenApproval` plus the suite-level timeouts on `waitFor` are the fail-safes that prevent the test from hanging forever.
-
-### 5.4.6 Layer 5 — POM Methods
-
-Layer 5 is where you live. The two POM methods that orchestrate everything below are `ensureTokenApproval` and the new `revokeTokenApproval`, both in `e2e/desktop/tests/page/swap.page.ts`. Verbatim from the file as it stands on the senior's branch:
-
-```ts
-@step("Ensure token approval")
-async ensureTokenApproval(
-  fromAccount: Account | TokenAccount,
-  provider: Provider,
-  minAmount: string,
-) {
-  if (!provider.contractAddress || !fromAccount.parentAccount) return;
-
-  const currentAllowance = await isTokenAllowanceSufficientCommand(
-    fromAccount,
-    provider.contractAddress,
-    minAmount,
-  );
-  console.log("CLI result: Current Allowance: ", currentAllowance);
-  if (currentAllowance) return;
-
-  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-  try {
-    const result = await approveTokenCommand(
-      fromAccount,
-      provider.contractAddress,
-      new BigNumber(minAmount).times(12).div(10).toFixed(),
-    );
-    await allure.description(`Token approval result for ${provider.uiName}:\n\n ${result}`);
-  } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
-  }
-}
-
-@step("Ensure token approval")
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-  if (!provider.contractAddress || !fromAccount.parentAccount) return;
-
-  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-  try {
-    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
-  } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
-  }
+    tmsLinks.forEach(tmsLink => $TmsLink(tmsLink));
+    tags.forEach(tag => $Tag(tag));
+    it(`Swap ${swap.accountToDebit.currency.name} to ${swap.accountToCredit.currency.name}`, async () => {
+      const minAmount = await app.swapLiveApp.getMinimumAmount(...);
+      const swapAmount = /* adjusted for XRP precision */;
+      await performSwapUntilQuoteSelectionStep(...);
+      const provider = await app.swapLiveApp.selectExchange();
+      await app.swapLiveApp.checkExchangeButtonHasProviderName(provider.uiName);
+      await app.common.disableSynchronizationForiOS();
+      await app.swapLiveApp.tapExecuteSwap();
+      await app.swap.verifyAmountsAndAcceptSwap(swap, swapAmount);
+      await app.swap.waitForSuccessAndContinue();
+    });
+  });
 }
 ```
 
-A few observations.
+Two observations:
 
-The `@step("Ensure token approval")` decorator on `revokeTokenApproval` is a copy-paste bug that the senior left behind for code review — the final PR should change it to `@step("Revoke token approval")`. The `step` decorator publishes the method name into the Allure timeline so reviewers can see "this test entered the revoke step at 14:23:01" in the report. Two methods reporting the same step name will collide visually in the timeline.
+1. **The spec is data.** `swapBTC_NATIVE_SEGWIT_LTC.spec.ts` never calls `app.*` directly. It declares a `Swap` instance, a TMS link, and a list of tags, then delegates to the driver. Adding a new currency pair is a one-file change — no test logic to copy.
+2. **The driver wraps `describe`/`beforeAll`/`it` itself.** Because Jest `testMatch` only runs files ending in `.spec.ts`, drivers are safe to co-locate: they are only loaded when a spec imports them.
 
-The two methods share a common structure that is worth naming explicitly — the **"snapshot the port, launch a fresh Speculos, run a CLI command, restore"** pattern:
+`specs/swap/otherTestCases/swapExportHistoryOperations.spec.ts` (QAA-604):
 
-1. **Guard.** `if (!provider.contractAddress || !fromAccount.parentAccount) return;` — bail early for native-asset providers (no contract address) and non-token accounts. This is the cheap escape hatch that lets the same POM method be called for every provider in a parameterised test, without the caller having to filter.
-2. **Snapshot.** `const previousSpeculosPort = getEnv("SPECULOS_API_PORT");` — capture the current Speculos port. The test may already have a Speculos instance running (the Exchange app for the swap UI flow). We are about to launch a *different* Speculos instance (the Ethereum app for the approve/revoke transaction). Restoring the port at the end lets the swap UI code resume against its original Exchange-app Speculos.
-3. **Launch.** `const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);` — start a new Speculos for the token's chain (e.g. Ethereum for USDC). This call sets `SPECULOS_API_PORT` to the new instance's port and registers the HTTP transport so the CLI subprocess can connect. Chapter 5.5 covers the full lifecycle.
-4. **Act.** Inside the try, the CLI helper runs (`approveTokenCommand` or `revokeTokenCommand`), which spawns the CLI subprocess and concurrently drives the device tap. The result string goes into Allure for traceability.
-5. **Restore.** `await cleanSpeculos(speculos, previousSpeculosPort);` in the `finally` — stop the new Speculos, unregister its transport, and reset `SPECULOS_API_PORT` to the original. Even on throw, this runs.
+```typescript
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { Provider } from "@ledgerhq/live-common/e2e/enum/Provider";
+import { Addresses } from "@ledgerhq/live-common/e2e/enum/Addresses";
+import { runExportSwapHistoryOperationsTest } from "./swap.other";
 
-The differences between the two methods are exactly the differences in semantics:
+const swapHistoryTestConfig = {
+  swap: new Swap(Account.SOL_1, Account.ETH_1, "0.07"),
+  provider: Provider.EXODUS,
+  swapId: "wQ90NrWdvJz5dA4",
+  addressFrom: Addresses.SWAP_HISTORY_SOL_FROM,
+  addressTo: Addresses.SWAP_HISTORY_ETH_TO,
+  tmsLinks: ["B2CQA-604"],
+  tags: [
+    "@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5",
+    "@solana", "@family-solana", "@ethereum", "@family-evm",
+  ],
+};
 
-- **`ensureTokenApproval` does a pre-check.** Calling `isTokenAllowanceSufficientCommand` before launching Speculos avoids the entire device dance when the allowance is already enough — a major speedup in re-runs. `revokeTokenApproval` does not pre-check because revoking an already-zero allowance is a no-op gas-wise, and the test author wants the deterministic "after this method, allowance is zero" guarantee.
-- **`ensureTokenApproval` applies a 1.2x slippage buffer.** `new BigNumber(minAmount).times(12).div(10).toFixed()` multiplies the minimum amount by 1.2 before passing it to `approveTokenCommand`, so the approved allowance leaves headroom for swap-rate fluctuations between the time the test approves and the time it executes. `revokeTokenApproval` has no such math because revoke always sets to zero.
-
-Layer 5 is the integration point. From the perspective of a layer-5 author, the entire stack below collapses into "two helpers, one Speculos lifecycle, one Allure description." That is the abstraction the four lower layers were designed to provide.
-
-### 5.4.7 The End-to-End Trace
-
-When a desktop swap spec calls `await app.swap.revokeTokenApproval(account, provider)`, here is the complete sequence of events. Read it once with the layer numbers to anchor each step in the file you would open to debug it:
-
-```
-1. POM (Layer 5):  getEnv("SPECULOS_API_PORT")  → save previous port
-                   (the Exchange-app Speculos already running for the swap UI)
-
-2. POM (Layer 5):  launchSpeculos(currency.speculosApp.name)  → starts Ethereum-app Speculos
-                   ↳ utils/speculosUtils.ts (Chapter 5.5)
-                       ↳ startSpeculos(testTitle, specs[appName], previousPort)
-                           ↳ Docker container OR remote pool (REMOTE_SPECULOS=true)
-                       ↳ setEnv("SPECULOS_API_PORT", device.port)
-                       ↳ process.env.SPECULOS_API_PORT = String(device.port)
-                       ↳ CLI.registerSpeculosTransport(port, getSpeculosAddress())
-                       ↳ allure.description("SPECULOS\n" + appInfo)
-
-3. POM (Layer 5):  await revokeTokenCommand(account, spender)
-                   ↳ Layer 3: setDisableTransactionBroadcastEnv("0")  → returns original
-                   ↳ Layer 3: runCliTokenApproval({
-                                 currency: "ethereum",
-                                 mode: "revokeApproval",
-                                 token: "ethereum/erc20/usd_coin",
-                                 spender: "0xRouter",
-                                 index: 0,
-                                 waitConfirmation: true,
-                               })  → returns Promise<string> (NOT awaited yet)
-                       ↳ Layer 2: runCliCommandWithRetry(joined-command-string)
-                           ↳ Layer 2: spawn("node", [LEDGER_LIVE_CLI_BIN, ...args])
-                               ↳ Layer 1: apps/cli/bin/index.js parses argv
-                               ↳ Layer 1: dispatches to send.ts
-                               ↳ Layer 1: scan(account) + inferTransactions(mode=revokeApproval)
-                               ↳ Layer 1: bridge.signOperation(...) — waits for device APDU
-                                          (subprocess is now blocked here)
-                   ↳ Layer 3: await approveToken()  ← runs in parallel with the subprocess
-                       ↳ Layer 4: isTouchDevice() → false (assume Nano X)
-                       ↳ Layer 4: approveTokenButtonDevice()
-                           ↳ Layer 4: waitFor(REVIEW_TRANSACTION_TO)
-                           ↳ Layer 4: pressUntilTextFound(SIGN_TRANSACTION)
-                           ↳ Layer 4: getButtonsController().both()
-                       ↳ device confirms → APDU response sent to CLI subprocess
-                   ↳ Layer 1: subprocess unblocks, builds + signs tx
-                   ↳ Layer 1: broadcast gate: DISABLE_TRANSACTION_BROADCAST="0" → broadcast runs
-                   ↳ Layer 1: bridge.broadcast({ account, signedOperation })
-                   ↳ Layer 1: waitForTransactionConfirmation (because --wait-confirmation)
-                   ↳ Layer 1: subprocess writes result to stdout, exits 0
-                   ↳ Layer 2: runCliCommand resolves with output string
-                   ↳ Layer 3: finally → setDisableTransactionBroadcastEnv(original)
-                   ↳ Layer 3: return await result;  → the CLI stdout
-
-4. POM (Layer 5):  allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`)
-
-5. POM (Layer 5):  finally → cleanSpeculos(speculos, previousSpeculosPort)
-                   ↳ stopSpeculos(device.id)
-                   ↳ unregisterTransportModule("speculos-http-" + port)
-                   ↳ setEnv("SPECULOS_API_PORT", previousPort)  → restore Exchange-app port
-                   ↳ process.env.SPECULOS_API_PORT = String(previousPort)
+runExportSwapHistoryOperationsTest(
+  swapHistoryTestConfig.swap,
+  swapHistoryTestConfig.provider,
+  swapHistoryTestConfig.swapId,
+  swapHistoryTestConfig.addressFrom,
+  swapHistoryTestConfig.addressTo,
+  swapHistoryTestConfig.tmsLinks,
+  swapHistoryTestConfig.tags,
+);
 ```
 
-Sixteen distinct things happen between the spec's one-liner and the test moving on. The reason to read this trace once with the layers attached is that, when something goes wrong, the failure mode usually points at a specific layer — and the first move is to open that layer's file.
+Note:
 
-A tour of the common failure shapes:
+- **Shared enums from `@ledgerhq/live-common/e2e/`.** `Account.SOL_1`, `Provider.EXODUS`, `Addresses.SWAP_HISTORY_SOL_FROM` — exactly the same references desktop uses.
+- **No `describe` or `it` in the spec.** The entire test lives in the driver (`swap.other.ts`'s `runExportSwapHistoryOperationsTest(...)`).
+- **Tags drive CI filters.** The `test_filter` input on the reusable CI workflow accepts tag expressions — running only `@family-solana` or `@NanoSP` is a one-flag operation at the PR dispatch.
 
-- **"Cannot find module .../apps/cli/bin/index.js"** → Layer 1 not built. Run `pnpm --filter @ledgerhq/live-cli build`.
-- **"❌ Failed to execute CLI command ... Exit Code: 1"** → Layer 1 returned non-zero. Read the `🧾 CLI Error` line in the envelope to see what the CLI itself logged.
-- **"⚠️ CLI attempt 1/3 ... retrying in 3000ms"** → Layer 2 retry policy fired. Transient. If it happens 3 times, the underlying error is no longer transient.
-- **"REVIEW_TRANSACTION_TO not found within timeout"** → Layer 4 device tap could not find a screen label. Either the device firmware changed (label drift), the CLI subprocess never reached the signing screen (a Layer 1 problem), or `SPECULOS_API_PORT` is pointing at the wrong device (a Layer 5 / Chapter 5.5 problem).
-- **"Speculos not started"** → Layer 5 / Chapter 5.5. `startSpeculos` could not boot a container. Local Docker issue, or remote pool exhaustion.
-- **The test passes but the next test runs against the wrong env** → `setDisableTransactionBroadcastEnv` did not restore. Almost always means a try/finally was forgotten in a new helper. Chapter 5.6.
+Inside `specs/swap/otherTestCases/swap.other.ts` (538 lines) you will find every driver for swap edge cases: `runSwapWithoutAccountTest`, `runSwapCheckProviderTest`, `runExportSwapHistoryOperationsTest`, `runSwapUserRefusesTransactionTest`, `runSwapSwitchSendAndReceiveCurrenciesTest`, `runSwapWithDifferentSeedTest`, `runSwapWithSendMaxTest`, `runSwapTooLowAmountForQuoteTest`, `runSwapNetworkFeesAboveAccountBalanceTest`, etc. Each spec in `otherTestCases/` matches exactly one of these.
 
-### 5.4.8 Where the Layers Are Imported From
+Some specs at the top of `specs/` are not drivered — they are one-off scenarios:
 
-The layer-3 helpers are the single point of contact between specs and the CLI. Here is the catalogue of how they are consumed across the desktop test workspace today, which should anchor any new helper you add in real usage patterns:
+- `market.spec.ts` — a single `describe` block that initialises with ETH, navigates to Market, stars ETH, filters starred. Tags `@family-evm`, `@ethereum`.
+- `onboardingReadOnly.spec.ts`, `userOpensApplication.spec.ts`, `languageChange.spec.ts`, `deeplinks.spec.ts` — small, standalone.
 
-| Spec | Helpers imported |
-|---|---|
-| `tests/page/swap.page.ts` | `approveTokenCommand`, `isTokenAllowanceSufficientCommand`, `revokeTokenCommand` |
-| `tests/specs/earn.v2.spec.ts` | `liveDataCommand`, `liveDataWithAddressCommand` |
-| `tests/specs/newSendFlow.tx.spec.ts` | `liveDataWithRecipientAddressCommand` |
-| `tests/specs/receive.address.spec.ts` | `liveDataCommand` |
-| `tests/specs/validation.swap.spec.ts` | `liveDataWithAddressCommand` |
-| `tests/specs/earn.spec.ts` | `liveDataCommand`, `liveDataWithAddressCommand` |
-| `tests/specs/rename.account.spec.ts` | `liveDataCommand` |
-| `tests/specs/delete.account.spec.ts` | `liveDataCommand` |
-| `tests/specs/settings.spec.ts` | `liveDataCommand` |
-| `tests/specs/delegate.spec.ts` | `liveDataCommand` |
-| `tests/specs/entrypoint.swap.spec.ts` | `liveDataWithAddressCommand` |
-| `tests/specs/accounts.swap.spec.ts` | `liveDataWithAddressCommand` |
-| `tests/specs/subAccount.spec.ts` | `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithParentAddressCommand` |
-| `tests/specs/buySell.spec.ts` | `liveDataCommand` |
-| `tests/specs/activate.private.balance.spec.ts` | `liveDataCommand` |
-| `tests/specs/send.swap.spec.ts` | `liveDataWithAddressCommand` |
-| `tests/specs/ui.swap.spec.ts` | `liveDataWithAddressCommand` |
-| `tests/specs/provider.swap.spec.ts` | `liveDataWithAddressCommand` |
-| `tests/specs/send.tx.spec.ts` | (multiple) |
+### 5.7.12 Userdata JSON Files
 
-The pattern is overwhelmingly **`liveDataCommand` plus, optionally, an address-resolving variant.** The vast majority of specs need exactly one thing from Layer 3: "seed the account, optionally also tell me its device-derived address." The approve/revoke pair is, today, used in only one file — `swap.page.ts` — because token-allowance is a swap-specific concern. As QAA expands its broadcast-enabled coverage to staking, NFT, and lending flows, expect `approveTokenCommand` and `revokeTokenCommand` (and possibly siblings yet to be written) to spread.
+`userdata/` holds Redux state snapshots the bridge uses to hydrate the app. Every file has the same top-level shape:
 
-The mobile workspace consumes the same helpers but through a different mechanism. `e2e/mobile/jest.environment.ts` line 29 imports `* as cliCommandsUtils`, and line 138 does `Object.assign(this.global, cliCommandsUtils)`. Every helper becomes a Jest global. Type definitions live at `e2e/mobile/types/global.d.ts:104-111`. A mobile spec calls e.g. `await liveDataCommand(account)(userdataPath)` *without an import statement*, because the helper is already on the global. This is a deliberate divergence between the two workspaces: desktop uses ESM imports (Playwright/Vitest convention); mobile uses globals (Jest convention, easier interop with Detox's existing globals).
-
-The desktop fixture engine is the other consumption path. `e2e/desktop/tests/fixtures/common.ts` consumes the `cliCommands: [...]` field from each test's fixture data and runs each curried function in the test setup phase. A typical use:
-
-```ts
-// from a hypothetical earn spec
-test.use({
-  cliCommands: [liveDataCommand(account)],
-  userdataFile: "skip-onboarding",
-});
 ```
-
-The fixture engine, reading the array, calls each entry with the resolved userdata path. The currying on `liveDataCommand` is what makes this work — the spec author binds the account at write time, the engine binds the userdata path at run time.
-
-### 5.4.9 Error Propagation
-
-Each layer has a different mode of failure and a different recovery story:
-
-**Layer 1 (CLI exits non-zero).** The CLI process writes its error to stderr and exits with a non-zero code. Layer 2's `child.on("exit", code => …)` handler builds the multi-line error envelope (`❌ Failed to execute CLI command`, currency, index, exit code, trimmed stderr) and rejects the promise. The error envelope is the most actionable single artefact for a CLI failure — paste it into a Jira ticket as-is.
-
-**Layer 2 (retryable error).** `runCliCommandWithRetry` catches the rejection from `runCliCommand`, consults `isRetryableError` against the error message, and either retries (up to 3 attempts, 3-second delay) or rethrows. The retry loop is silent on success and emits a `⚠️ CLI attempt N/3 …` warning on each retry. If you see two warnings followed by success, the underlying issue is transient and probably acceptable; if you see three followed by failure, the issue has a non-retryable root cause hiding behind a retryable signature, and the final exception is the one that matters.
-
-**Layer 3 (env restore failure).** If `setDisableTransactionBroadcastEnv` is called but the `finally` block is omitted, an exception in the helper body (the device tap, typically) leaves `process.env.DISABLE_TRANSACTION_BROADCAST` mutated for the rest of the run. Subsequent CLI calls — even ones that have nothing to do with approvals — will see the wrong broadcast state and silently behave differently. The `try/finally` in `approveTokenCommand` and `revokeTokenCommand` is the defensive pattern that prevents this. Any new helper that flips an env var must do the same. Chapter 5.6 covers the discipline in full.
-
-**Layer 4 (device tap timeout).** The screen primitives (`waitFor`, `pressUntilTextFound`) reject when their internal timeout elapses. A common cause is firmware label drift: the device renders "Sign Transaction" with a capital T but `DeviceLabels.SIGN_TRANSACTION` was registered as "Sign transaction". Another common cause is the CLI subprocess not actually reaching the signing screen — usually because of a Layer 1 argument error that takes the CLI down a different code path. If the device tap rejects, the CLI subprocess (Layer 1) is still blocked waiting for an APDU; it will hang until its own `wait-confirmation-timeout` (default 120 seconds) expires. The two timeouts together cap the total failure time at around two minutes.
-
-**Layer 5 (Speculos cleanup miss).** If a POM method's `finally` is omitted (or the `cleanSpeculos` call inside it fails silently), the Docker container leaks and the transport-module registry retains a stale entry. Subsequent tests in the same process may pick up the stale Speculos port via `getEnv("SPECULOS_API_PORT")` and route their CLI calls to a dead device. Chapter 5.5 covers the lifecycle hygiene in full and shows exactly why the snapshot-and-restore pattern matters.
-
-The general rule: errors propagate up through the layers, but each layer adds context. By the time an exception reaches the test runner, it should carry enough information (the error envelope from Layer 2, the helper name from Layer 3, the POM step name from Layer 5's `@step` decorator) for a triage engineer to know which file to open without re-running anything.
-
-### 5.4.10 The Complete File List
-
-Here is every file a Layer 5 author might touch, ranked by frequency:
-
-**Frequent — one or both of these per ticket:**
-- `e2e/desktop/tests/page/swap.page.ts`, `e2e/desktop/tests/page/<feature>.page.ts` — POM methods.
-- `e2e/mobile/page/trade/swap.page.ts`, `e2e/mobile/page/<feature>/<feature>.page.ts` — mobile POM methods.
-- `e2e/desktop/tests/specs/*.spec.ts`, `e2e/mobile/specs/**/*.spec.ts` — the test files themselves.
-- `e2e/desktop/tests/fixtures/common.ts` (occasionally) — when adding a new `cliCommands`-style fixture field.
-- `e2e/desktop/tests/userdata/*.json`, `e2e/mobile/userdata/*.json` — when a new account or feature flag is needed.
-
-**Occasional — a few times a quarter:**
-- `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` — Layer 3 helper extensions for new tickets.
-- `libs/ledger-live-common/src/e2e/enum/Account.ts`, `Currency.ts`, `Provider.ts` — when a ticket introduces a new currency, account fixture, or swap provider.
-
-**Rare — once or twice a year for a typical QA engineer:**
-- `apps/cli/src/commands/blockchain/*.ts` — only when adding a brand-new CLI subcommand. Coordinate with the platform team; this is shared with non-QA consumers.
-- `libs/ledger-live-common/src/e2e/runCli.ts` — engine extensions (a new public engine helper, a new retry pattern). Almost always platform-team work, not QA.
-- `libs/ledger-live-common/src/e2e/families/evm.ts` — new device-tap pattern (a new transaction type with a new screen flow). Coordinate with the firmware team for the screen labels.
-- `libs/ledger-live-common/src/e2e/speculos.ts`, `speculosCI.ts`, `speculosAppVersion.ts` — Speculos lifecycle and version detection. Almost never QA work; covered in Chapter 5.5.
-
-Touching a file from the "rare" tier should always come with a code review request from the senior engineers. Touching a file from the "frequent" tier should be a routine PR.
-
-### 5.4.11 Cross-Reference With Part 3 and Part 4
-
-This chapter sits between the desktop and mobile codebase deep dives. Part 3 Chapter 3.6 catalogues `e2e/desktop/`; Part 4 Chapter 4.7 catalogues `e2e/mobile/`. Both workspaces describe their own page objects, fixtures, runners, and configurations in detail. **The CLI integration layer this chapter describes lives below both of them.**
-
-The crucial fact for a new QA engineer is this: layers 1 through 4 are *one* codebase, used identically by both workspaces. There is no desktop CLI helper and a separate mobile CLI helper. There is no Playwright-specific spawn engine and a separate Detox-specific spawn engine. `cliCommandsUtils.ts` is imported by Playwright specs through ESM and by Jest specs through Jest globals, but it is the same TypeScript file. Bug-fix one helper, both workspaces benefit. Add one helper, both can use it.
-
-Layer 5 is where the workspaces diverge:
-
-- **Desktop POM methods** live in `e2e/desktop/tests/page/*.page.ts`. They use Playwright's `Page` API, the `@step(...)` decorator from `tests/misc/reporters/step`, and Allure via `allure-js-commons`.
-- **Mobile POM methods** live in `e2e/mobile/page/<feature>/*.page.ts`. They use Detox's matcher API (`element(by.id(...))`, `device.launchApp(...)`), often a different `@step` implementation, and the same Allure library.
-
-But both call into the same Layer 3 helpers. When you read `e2e/mobile/page/trade/swap.page.ts` and see `await revokeTokenCommand(account, spender)`, that is the *same function* the desktop swap page object calls. The shared boundary is healthy infrastructure: it forces the lower layers to stay framework-agnostic, and it lets QA engineers move between desktop and mobile tickets without re-learning the CLI integration.
-
-The one place to be careful: when a Layer 3 helper takes a curried form (`liveDataCommand(account)(userdataPath)`), the desktop fixture engine applies the second argument for you, but the mobile global usage requires you to apply both arguments by hand. Read the file you are working in. If you see `cliCommands: [...]` in a fixture, you are on desktop; if you see `await liveDataCommand(account)(userdataPath)` directly in a spec, you are on mobile.
-
-<div class="quiz-container" data-pass-threshold="80">
-  <h3>Chapter 5.4 Quiz</h3>
-  <p class="quiz-subtitle">6 questions · 80% to pass</p>
-  <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-  <div class="quiz-question" data-correct="C">
-    <p><strong>Q1.</strong> Which of the five layers is the typed wrapper layer where most new per-ticket helpers are added?</p>
-    <div class="quiz-choices">
-      <button class="quiz-choice" data-value="A">A) Layer 1 — apps/cli/bin/index.js</button>
-      <button class="quiz-choice" data-value="B">B) Layer 2 — runCli.ts</button>
-      <button class="quiz-choice" data-value="C">C) Layer 3 — cliCommandsUtils.ts</button>
-      <button class="quiz-choice" data-value="D">D) Layer 4 — families/evm.ts</button>
-    </div>
-    <p class="quiz-explanation">Layer 3 (<code>cliCommandsUtils.ts</code>) is the typed-wrapper layer. It exports <code>liveDataCommand</code>, <code>approveTokenCommand</code>, <code>revokeTokenCommand</code>, and friends. Layers 1, 2, and 4 are infrastructure that QA engineers extend rarely.</p>
-  </div>
-
-  <div class="quiz-question" data-correct="B">
-    <p><strong>Q2.</strong> Why is <code>liveDataCommand</code> a curried function (<code>(account, options?) =&gt; (userdataPath?) =&gt; Promise&lt;void&gt;</code>) instead of a single-call function?</p>
-    <div class="quiz-choices">
-      <button class="quiz-choice" data-value="A">A) Because TypeScript performance is faster with curried generics</button>
-      <button class="quiz-choice" data-value="B">B) So the spec author binds the account at write time and the fixture engine binds the userdata path at run time</button>
-      <button class="quiz-choice" data-value="C">C) Because Playwright fixtures only accept thunks</button>
-      <button class="quiz-choice" data-value="D">D) To prevent the helper from being awaited twice</button>
-    </div>
-    <p class="quiz-explanation">The currying lets the fixture engine schedule the call at the right point in the test lifecycle. The spec writes <code>cliCommands: [liveDataCommand(account)]</code>; the engine, knowing the userdata path, calls each entry with that path. This is the single most important pattern in <code>cliCommandsUtils.ts</code>.</p>
-  </div>
-
-  <div class="quiz-question" data-correct="A">
-    <p><strong>Q3.</strong> What is the retry policy in <code>runCliCommandWithRetry</code>?</p>
-    <div class="quiz-choices">
-      <button class="quiz-choice" data-value="A">A) Up to 3 attempts, 3-second delay between attempts, only retryable error patterns trigger a retry</button>
-      <button class="quiz-choice" data-value="B">B) Unlimited attempts with exponential backoff</button>
-      <button class="quiz-choice" data-value="C">C) Up to 5 attempts, 1-second delay, retries on every error</button>
-      <button class="quiz-choice" data-value="D">D) Single attempt; the caller is responsible for retrying</button>
-    </div>
-    <p class="quiz-explanation">The defaults are <code>retries = 3</code> and <code>delayMs = 3000</code>. Only error messages matching the patterns in <code>isRetryableError</code> (HTTP 502/503/504, <code>GeneralDmkError</code>, <code>ECONNREFUSED</code>, <code>ETIMEDOUT</code>, <code>ECONNRESET</code>, "socket hang up", "timeout") trigger a retry; deterministic logic errors fail fast.</p>
-  </div>
-
-  <div class="quiz-question" data-correct="D">
-    <p><strong>Q4.</strong> What does the constant <code>LEDGER_LIVE_CLI_BIN</code> resolve to at runtime?</p>
-    <div class="quiz-choices">
-      <button class="quiz-choice" data-value="A">A) The path to <code>apps/cli/src/index.ts</code></button>
-      <button class="quiz-choice" data-value="B">B) The npm-published binary at <code>node_modules/.bin/ledger-live</code></button>
-      <button class="quiz-choice" data-value="C">C) Whatever <code>which ledger-live</code> returns on the host</button>
-      <button class="quiz-choice" data-value="D">D) An absolute path to <code>apps/cli/bin/index.js</code> in the monorepo, computed from <code>__dirname</code> with four <code>..</code> segments</button>
-    </div>
-    <p class="quiz-explanation">The line is <code>path.resolve(__dirname, "../../../../apps/cli/bin/index.js")</code>. It walks back from the location of the built <code>runCli.js</code> to the monorepo root, then forward into the CLI's built <code>bin/index.js</code>. If the CLI is not built, the constant points at a non-existent file and spawn fails.</p>
-  </div>
-
-  <div class="quiz-question" data-correct="B">
-    <p><strong>Q5.</strong> In the end-to-end trace of <code>revokeTokenApproval</code>, what runs <em>in parallel</em> with the spawned CLI subprocess while the device is being signed?</p>
-    <div class="quiz-choices">
-      <button class="quiz-choice" data-value="A">A) Nothing — the CLI subprocess runs alone and the device tap runs after it exits</button>
-      <button class="quiz-choice" data-value="B">B) The Layer 4 device tap (<code>approveToken</code>), which drives Speculos's REST API to walk through the review screens and press the buttons</button>
-      <button class="quiz-choice" data-value="C">C) A second CLI subprocess that pushes button events</button>
-      <button class="quiz-choice" data-value="D">D) The Allure reporter, which records APDU traffic in real time</button>
-    </div>
-    <p class="quiz-explanation">The CLI subprocess sits inside <code>bridge.signOperation(...)</code> waiting for the device's APDU response. While it waits, the layer-3 helper <code>await</code>s <code>approveToken()</code>, which is the Layer 4 device tap driving Speculos via REST to render screens and press buttons. They are two cooperating coroutines; both must complete for the whole flow to succeed.</p>
-  </div>
-
-  <div class="quiz-question" data-correct="C">
-    <p><strong>Q6.</strong> Inside <code>revokeTokenCommand</code>, why is the call to <code>setDisableTransactionBroadcastEnv(original)</code> wrapped in a <code>finally</code> block?</p>
-    <div class="quiz-choices">
-      <button class="quiz-choice" data-value="A">A) Because <code>finally</code> blocks run faster than non-finally blocks in V8</button>
-      <button class="quiz-choice" data-value="B">B) Because <code>process.env</code> is read-only outside <code>finally</code></button>
-      <button class="quiz-choice" data-value="C">C) Because if the device tap throws, the env var would otherwise stay flipped to <code>"0"</code> for the rest of the run, silently changing broadcast behaviour for every later CLI call</button>
-      <button class="quiz-choice" data-value="D">D) To satisfy a TypeScript exhaustiveness check on the union type of the env value</button>
-    </div>
-    <p class="quiz-explanation">The <code>try/finally</code> is the safety net for env-var mutations. Without it, an exception between the flip and the restore would leak global state across tests. Chapter 5.6 covers the broadcast-discipline pattern in detail.</p>
-  </div>
-
-  <div class="quiz-score"></div>
-</div>
-
-<div class="chapter-outro">
-You now have a layer-by-layer map of how a single line in a desktop spec — <code>await app.swap.revokeTokenApproval(account, provider)</code> — descends through five distinct files, spawns a Node subprocess, drives a Speculos REST API in parallel with that subprocess, and reaches an on-chain broadcast on a public testnet. The next chapter zooms in on one of the supporting cast members of this trace: the Speculos lifecycle. <code>launchSpeculos</code> and <code>cleanSpeculos</code> appeared at the top and bottom of every Layer 5 method in this chapter; Chapter 5.5 takes them apart, shows what <code>startSpeculos</code> does inside (Docker container or remote pool), explains the <code>SPECULOS_API_PORT</code> snapshot-and-restore pattern in full, and gives you the playbook for debugging Speculos boot failures.
-</div>
-## Speculos Lifecycle in CLI Tests
-
-<div class="chapter-intro">
-The CLI subprocess and the Speculos device-tap automation run in parallel during every approve or revoke test. The CLI is blocked waiting for device confirmation; the Speculos helper drives the simulator's REST API as if a human were pressing buttons. Both processes need to agree on which Speculos instance is the device — and that agreement is brokered by a small, careful pair of utility functions in <code>e2e/desktop/tests/utils/speculosUtils.ts</code>. This chapter walks through that pair, the snapshot-and-restore pattern that lets a single test orchestrate two Speculos instances, the local-versus-remote toggle, and the failure modes you will hit if you skip cleanup.
-</div>
-
-### 5.5.1 Why Speculos Lifecycle Matters in CLI Tests
-
-A CLI test that signs a transaction has two parallel actors:
-
-- **The CLI subprocess** — `node apps/cli/bin/index.js send --currency ethereum --mode revokeApproval ...` — spawned by `runCliCommand`, blocked at `bridge.signOperation` waiting for `hw-transport-node-speculos-http` to return signed bytes.
-- **The Speculos device-tap helper** — `approveToken()` from `families/evm.ts` — driving the Speculos REST API, polling screen text, pressing buttons or doing the touch-screen hold.
-
-Both actors need to talk to the same Speculos container. They identify it by port. The lifecycle utilities are responsible for:
-
-1. Starting Speculos with the right firmware and app for the test.
-2. Telling the CLI subprocess which port to use (via env var inheritance and explicit transport registration).
-3. Telling the device-tap helper which port to use (same env var, read directly).
-4. Stopping Speculos and unregistering its transport when the test is done.
-
-If any one of those steps is wrong or skipped, you get one of: a transport leak (next test picks up a stale entry), a port collision (`startSpeculos` errors out at setup), a stopped-Speculos timeout (test hangs waiting for a container that no longer exists), or a Docker container leak (the previous Speculos keeps running and burning memory until the worker is recycled).
-
-Most QAA spec writers don't think about this layer day-to-day — they call `launchSpeculos` and `cleanSpeculos` and trust the rest. But when something goes wrong, you need to know what these functions do. This chapter is that knowledge.
-
-### 5.5.2 The Two Functions
-
-Both live in `e2e/desktop/tests/utils/speculosUtils.ts`. Here they are verbatim.
-
-```ts
-import { setEnv } from "@ledgerhq/live-env";
-import {
-  startSpeculos, specs, stopSpeculos, type SpeculosDevice, getSpeculosAddress,
-} from "@ledgerhq/live-common/e2e/speculos";
-import invariant from "invariant";
-import * as allure from "allure-js-commons";
-import { waitForSpeculosReady } from "@ledgerhq/live-common/e2e/speculosCI";
-import { CLI } from "./cliUtils";
-import { unregisterTransportModule } from "@ledgerhq/live-common/hw/index";
-
-export async function launchSpeculos(appName, testTitle?, previousDevice?): Promise<SpeculosDevice> {
-  if (testTitle) testTitle = testTitle.replace(/ /g, "_");
-
-  if (previousDevice) await cleanSpeculos(previousDevice);
-
-  const device = await startSpeculos(
-    testTitle ?? "cli_speculos",
-    specs[appName.replace(/ /g, "_")],
-    previousDevice?.port,
-  );
-  invariant(device, "[E2E Setup] Speculos not started");
-
-  if (process.env.REMOTE_SPECULOS === "true") {
-    await waitForSpeculosReady(device.id);
-  }
-
-  setEnv("SPECULOS_API_PORT", device.port);
-  process.env.SPECULOS_API_PORT = device.port.toString();
-  CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());
-
-  let info = `App: ${device.appName || ""} (${device.appVersion || ""})`;
-  if (device.dependencies?.length) {
-    info += `\nDependencies: ${device.dependencies?.map(dep => dep.name + " (" + dep.appVersion + ")").join(", ") || ""}`;
-  }
-  await allure.description("SPECULOS\n" + info);
-
-  return device;
-}
-
-export async function cleanSpeculos(speculos, previousPort?) {
-  await stopSpeculos(speculos.id);
-  unregisterTransportModule("speculos-http-" + String(speculos.port));
-  if (previousPort) {
-    setEnv("SPECULOS_API_PORT", previousPort);
-    process.env.SPECULOS_API_PORT = String(previousPort);
+{
+  "data": {
+    "SPECTRON_RUN": { "localStorage": { ... } },
+    "settings": { ... Redux settings slice ... },
+    "user": { "id": "<uuid>" },
+    "accounts": [ ... list of accounts, possibly huge ... ],
+    "countervalues": { ... },
+    "featureFlags": { "overrides": { ... optional ... } }
   }
 }
 ```
 
-About thirty lines of code. Every line earns its place — there is no spare ceremony here. The next subsections walk through each function step by step.
+The simplest one is `skip-onboarding.json` (~1 KB):
 
-### 5.5.3 What `launchSpeculos` Does, Step by Step
-
-Signature:
-
-```ts
-launchSpeculos(appName, testTitle?, previousDevice?): Promise<SpeculosDevice>
+```json
+{
+  "data": {
+    "SPECTRON_RUN": { "localStorage": { "acceptedTermsVersion": "2019-12-04" } },
+    "settings": {
+      "hasCompletedOnboarding": true,
+      "counterValue": "USD",
+      "language": "en",
+      "theme": "light",
+      "locale": "en-US",
+      "hasSeenAnalyticsOptInPrompt": true,
+      "preferredDeviceModel": "nanoS",
+      "hasInstalledApps": true,
+      "starredAccountIds": [],
+      "hasPassword": false
+    },
+    "user": { "id": "08cf3393-c5eb-4ea7-92de-0deea22e3971" },
+    "accounts": [],
+    "countervalues": {}
+  }
+}
 ```
 
-The three parameters:
+This is the default userdata that `Application.init()` falls back to when the caller omits `userdata`. "Onboarded, no accounts" is the most common starting state for feature tests.
 
-- `appName` — string key into the `specs` map. `"Ethereum"`, `"Bitcoin"`, `"Solana"`, etc. Spaces are replaced with underscores before lookup, so `"Exchange App"` becomes `"Exchange_App"` for the spec key.
-- `testTitle` — optional human-readable label that gets passed to `startSpeculos` as the container name suffix. Spaces are replaced with underscores. Used so that `docker ps` shows readable names while a test suite is running. Defaults to `"cli_speculos"` if omitted.
-- `previousDevice` — optional `SpeculosDevice` from a prior `launchSpeculos` call. If passed, it is cleaned up first (see step 1 below) and its port is reused for the new device.
+The heaviest is `swap-history.json` (~2.3 MB). It contains the Redux state that powers QAA-604 (Swap Export History Operations) — historical swap operations, pre-provisioned accounts for the relevant currencies, etc. The pattern generalises: the larger the test surface, the more state the userdata file encodes.
 
-Step by step:
+#### How userdata is resolved
 
-**1. Sanitise testTitle.** `testTitle.replace(/ /g, "_")` — Docker container names cannot contain spaces.
+`page/index.ts` exports the resolver:
 
-**2. Clean up previousDevice if given.** `if (previousDevice) await cleanSpeculos(previousDevice);` — this is the one-line "swap" pattern. If a test had Speculos A running and now needs Speculos B, the helper stops A and unregisters its transport before starting B. Importantly, this is the only branch that performs cleanup automatically; if you call `launchSpeculos` twice without passing `previousDevice` to the second call, the first one keeps running and you leak a container.
-
-**3. Start the new Speculos.** `startSpeculos(testTitle ?? "cli_speculos", specs[appName.replace(/ /g, "_")], previousDevice?.port)` — this is the heavy lift. It pulls the spec for the requested app (firmware path, app path, model id), then either spawns a Docker container locally or asks the remote Stargate pool for a Speculos instance. `previousDevice?.port` is passed as a port hint — if a previous device existed, the helper tries to reuse its port for the new instance. This matters in the swap-then-revoke case: starting on the same port avoids a port reservation race. `startSpeculos` lives in `@ledgerhq/live-common/e2e/speculos` and returns a `SpeculosDevice` object with `id`, `port`, `appName`, `appVersion`, `dependencies`, and a few internal handles.
-
-**4. Invariant check.** `invariant(device, "[E2E Setup] Speculos not started");` — fail loudly if `startSpeculos` returned undefined. This shouldn't happen in practice (it would throw before returning) but is a defensive belt-and-braces.
-
-**5. Wait for readiness if remote.** `if (process.env.REMOTE_SPECULOS === "true") { await waitForSpeculosReady(device.id); }` — when running against the production CI Speculos pool, the device may not be immediately responsive after `startSpeculos` returns. `waitForSpeculosReady` polls the remote API until the container reports ready. Local Docker is reliably synchronous and skips this step.
-
-**6. Set the port env var, twice.** `setEnv("SPECULOS_API_PORT", device.port);` and `process.env.SPECULOS_API_PORT = device.port.toString();` — both forms are written, defensively, because the codebase has two ways to read it: `getEnv("SPECULOS_API_PORT")` from `@ledgerhq/live-env` (used by the device-tap helper) and `process.env.SPECULOS_API_PORT` (used by anything that reads raw env). Setting both means whichever consumer reads first sees the right value. The CLI subprocess inherits `process.env` at spawn time, so it gets the right port automatically.
-
-**7. Register the transport.** `CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());` — this tells the live-common transport registry that there is a `speculos-http-<port>` transport now available. The CLI subprocess, when it instantiates its `hw-transport-node-speculos-http`, looks up its config from the transport registry. Without registration, the CLI either uses a default port (wrong) or errors out. `getSpeculosAddress()` returns either `"localhost"` (Docker-local default) or the `SPECULOS_ADDRESS` env var when set (remote pool case).
-
-**8. Write the Allure description.** Composes a string like `"SPECULOS\nApp: Ethereum (1.10.4)"` (plus a list of dependencies if the app has them — Ethereum loaded with the Plugin app for clear-signing has both shown). `allure.description` writes this to the test's Allure report so anyone investigating a failed test can immediately see which Speculos was active.
-
-**9. Return the device handle.** The caller stores it for the matching `cleanSpeculos` in `finally`.
-
-### 5.5.4 What `cleanSpeculos` Does
-
-Signature:
-
-```ts
-cleanSpeculos(speculos, previousPort?)
-```
-
-Two parameters:
-
-- `speculos` — the `SpeculosDevice` returned by `launchSpeculos`.
-- `previousPort` — optional. The port that was in use before this Speculos was launched. When passed, the cleanup restores it.
-
-Step by step:
-
-**1. Stop Speculos.** `stopSpeculos(speculos.id)` — kills the Docker container locally, or asks Stargate to release the remote slot. Idempotent; calling stop twice on the same id is a no-op.
-
-**2. Unregister the transport.** `unregisterTransportModule("speculos-http-" + String(speculos.port));` — removes the entry from the live-common transport registry. Without this step, the registry would keep accumulating dead `speculos-http-<port>` entries for every test in the suite. Eventually a later test, calling `registerSpeculosTransport` for a *different* port, would find a stale entry on the same port number first and route to the dead container. Test hangs, eventually times out.
-
-**3. Restore previousPort if given.** `if (previousPort) { setEnv("SPECULOS_API_PORT", previousPort); process.env.SPECULOS_API_PORT = String(previousPort); }` — if the caller saved the port that was active before this Speculos was launched, restore it. This is the second half of the snapshot-and-restore pattern (see 5.5.6). Without restoration, after a sub-test inside a larger swap test cleans up its revoke Speculos, the env points to nothing and the outer swap test's next CLI call fails.
-
-### 5.5.5 The `specs` Map
-
-`specs` is imported from `@ledgerhq/live-common/e2e/speculos`. It is a flat object keyed by app name:
-
-```ts
-const specs = {
-  Ethereum:    { firmware: "...", app: "...", model: "nanoSP", ... },
-  Bitcoin:     { firmware: "...", app: "...", model: "nanoSP", ... },
-  Solana:      { firmware: "...", app: "...", model: "nanoSP", ... },
-  Exchange_App:{ firmware: "...", app: "...", model: "nanoSP", ... },
-  ...
+```typescript
+export const getUserdataPath = (userdata: string) => {
+  return path.resolve("userdata", `${userdata}.json`);
 };
 ```
 
-Each entry contains:
+Relative to `process.cwd()`, which Detox sets to `e2e/mobile/`. `Application.init()` calls this twice: once to resolve the source file (the canonical snapshot, read-only), and once to compute the destination for the per-test copy (`temp-userdata-<uuid>.json`). Only the temp copy is ever passed to Speculos CLI commands or loaded over the bridge; the canonical file is never mutated.
 
-- `firmware` — path to the firmware ELF inside the Speculos Docker image. Different device models have different firmware paths.
-- `app` — path to the app ELF. For Ethereum, this is the Ethereum app build for the matching firmware.
-- `model` — the device model id (`"nanoSP"`, `"nanoX"`, `"stax"`, `"flex"`). Determines screen size, button layout, and the device-tap helper branch (`isTouchDevice()`).
-- Optional `dependencies` — sibling apps that need to be loaded alongside (e.g. Plugin Ethereum for clear-sign decoders, or Exchange app for swap flows).
+### 5.7.13 Scripts and Types
 
-The map is the single source of truth for "what does the Ethereum app on Speculos look like for QAA tests." Updating to a new app version is a one-line change in the map, propagated to every test automatically.
+#### `scripts/typecheck.js`
 
-The `appName.replace(/ /g, "_")` in `launchSpeculos` accommodates app names with spaces — `"Exchange App"` is keyed as `Exchange_App` in the map.
+```javascript
+const ts = require("typescript");
+const rootDirectory = path.resolve(__dirname, "..", "..", "..");
+const e2eDirectory = path.resolve(__dirname, "..");
 
-### 5.5.6 The Snapshot-and-Restore Pattern
+function compile() {
+  const config = ts.parseJsonConfigFileContent(require("../tsconfig.json"), ts.sys, e2eDirectory);
+  const program = ts.createProgram(config.fileNames, { ...config.options, noEmit: true });
 
-This is the canonical wrapper around `launchSpeculos`/`cleanSpeculos` in any test that needs to interact with a Speculos device.
-
-Here is `ensureTokenApproval` from `e2e/desktop/tests/page/swap.page.ts` — the existing twin of the new revoke method. Verbatim:
-
-```ts
-async ensureTokenApproval(fromAccount, provider, minAmount) {
-  if (!provider.contractAddress || !fromAccount.parentAccount) return;
-
-  // Pre-check — skip the device dance if we already have enough
-  const currentAllowance = await isTokenAllowanceSufficientCommand(
-    fromAccount, provider.contractAddress, minAmount,
-  );
-  console.log("CLI result: Current Allowance: ", currentAllowance);
-  if (currentAllowance) return;
-
-  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-  try {
-    const result = await approveTokenCommand(
-      fromAccount,
-      provider.contractAddress,
-      new BigNumber(minAmount).times(12).div(10).toFixed(),  // 1.2x for slippage buffer
+  const allDiagnostics = ts
+    .getPreEmitDiagnostics(program)
+    .filter(
+      diag =>
+        diag.file &&
+        diag.file.fileName.startsWith(e2eDirectory) &&
+        /\.tsx?/.test(diag.file.fileName),
     );
-    await allure.description(`Token approval result for ${provider.uiName}:\n\n ${result}`);
-  } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
+  // ... print diagnostics, exit 1 on errors
+}
+compile();
+```
+
+Why a custom script? Because the TypeScript program has to include cross-workspace references (`apps/ledger-live-mobile/src/const`, `libs/ledger-live-common/src/e2e/*`), so naive `tsc` would report errors in those trees — which are not this workspace's responsibility. The filter `diag.file.fileName.startsWith(e2eDirectory)` scopes the output to errors that originate **inside** `e2e/mobile/`. Run it with `pnpm --filter e2e-mobile run typecheck` or `pnpm typecheck` from within `e2e/mobile/`.
+
+#### `scripts/build-ai-artifact.sh`
+
+A shell script that post-processes Allure results and collects them into an archive for AI-assisted failure analysis. Enabled by the `generate_ai_artifacts` input on the reusable CI workflow; see Part 8 Chapter 8.3.
+
+#### `types/global.d.ts`
+
+The single source of truth for the ambient globals that `jest.environment.ts` installs. Every `tapById`, `waitForElementById`, `app`, `Currency`, etc. that you use in a spec file without importing is declared here. The file is about 110 lines and maps one-to-one with the assignments inside `jest.environment.ts`'s `setup()`.
+
+A small excerpt:
+
+```typescript
+declare global {
+  var IS_FAILED: boolean;
+  var speculosDevices: Map<string, number>;
+  var webSocket: {
+    wss: Server | undefined;
+    ws: WebSocket | undefined;
+    messages: { [id: string]: MessageData };
+    e2eBridgeServer: Subject<ServerData>;
+  };
+  var app: Application;
+  var Step: typeof StepType;
+  var $TmsLink: typeof $TmsLinkType;
+  var $Tag: typeof $TagType;
+  var Currency: typeof CurrencyType;
+  var Account: typeof AccountType;
+  var Swap: typeof SwapType;
+  var tapById: typeof NativeElementHelpers.tapById;
+  var waitForElementById: typeof NativeElementHelpers.waitForElementById;
+  // ... and many more
+}
+```
+
+When you add a helper to `jest.environment.ts`, you must add its ambient type here. Otherwise the spec compiles locally but CI typecheck fails.
+
+#### `types/jest-allure2-reporter.d.ts`
+
+A small module augmentation that declares `$TmsLink(name: string)` and `$Tag(name: string)` as top-level calls (they come from `jest-allure2-reporter/api`, but typing them as globals makes them ergonomic in specs).
+
+### 5.7.14 `utils/initUtil.ts` — the Real Engine Behind `app.init()`
+
+`Application.init()` is a three-liner; the real work happens in `utils/initUtil.ts` inside the `InitializationManager.initialize(...)` static method. Understanding this file is the difference between "I can write a spec that calls `app.init({})`" and "I know why my test deadlocked during initialisation".
+
+The exported types:
+
+```typescript
+export type InitOptions = {
+  speculosApp?: SpeculosAppType;
+  cliCommands?: CliCommand[];
+  cliCommandsOnApp?: {
+    app: SpeculosAppType;
+    cmd: CliCommand;
+  }[];
+  userdata?: string;
+  testedCurrencies?: string[];
+  featureFlags?: PartialFeatures;
+};
+```
+
+`InitOptions` is re-exported from `page/index.ts` as `ApplicationOptions`. Every argument passed to `app.init(...)` must match this shape.
+
+The static entry point:
+
+```typescript
+export class InitializationManager {
+  static async initialize(
+    options: InitOptions,
+    userdataPath: string,
+    userdataSpeculos: string,
+  ): Promise<void> {
+    const { speculosApp, cliCommands = [], cliCommandsOnApp = [], featureFlags } = options;
+
+    // 1. Group commands by app name
+    const commandsByAppMap = new Map<string, { app: SpeculosAppType; cmds: CliCommand[] }>();
+    for (const { app, cmd } of cliCommandsOnApp) {
+      const existing = commandsByAppMap.get(app.name);
+      if (existing) { existing.cmds.push(cmd); }
+      else { commandsByAppMap.set(app.name, { app, cmds: [cmd] }); }
+    }
+    const commandsByApp = Array.from(commandsByAppMap.values());
+
+    // 2. Launch all needed Speculos devices in parallel
+    const appsToLaunch = [
+      ...new Map(
+        commandsByApp.map(x => x.app)
+          .concat(speculosApp ? [speculosApp] : [])
+          .map(app => [app.name, app]),
+      ).values(),
+    ];
+    const speculosDevices = await launchSpeculosDevices(appsToLaunch);
+
+    // 3. Execute app-specific commands (with retry & instance recreation)
+    await executeCliCommandsOnApp(commandsByApp, speculosDevices, userdataPath, speculosApp);
+
+    // 4. Set up the main Speculos app (if declared)
+    if (speculosApp) {
+      await setupMainSpeculosApp(speculosApp, speculosDevices);
+    }
+
+    // 5. Execute global commands (with retry & full-run recovery)
+    await executeCliCommands(cliCommands, userdataPath, speculosApp, speculosDevices);
+
+    // 6. Load userdata over the bridge
+    await loadConfig(userdataSpeculos, true);
+
+    // 7. Apply Wallet 4.0 default flags + user-supplied overrides
+    const defaultFlags = {
+      lwmWallet40: { enabled: isWallet40, params: { /* ... */ } },
+      llmModularDrawer: { enabled: true, params: { /* ... */ } },
+    };
+    await setFeatureFlags({ ...defaultFlags, ...featureFlags });
   }
 }
 ```
 
-And here is the new `revokeTokenApproval`, also verbatim from the senior's commit:
+Seven phases, three retry loops, one load, one flag merge. Let me unpack the important ones:
 
-```ts
-@step("Ensure token approval")  // copy-paste bug; final PR should say "Revoke token approval"
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+- **Phase 1: Group commands by app.** `cliCommandsOnApp` is a flat array — two commands for the same Speculos app share one launch. The grouping halves the Speculos surface when your test needs "live-data for BTC, live-data for ETH, token-allowance for ETH" (the ETH ops run against a single ETH Speculos, not two).
+- **Phase 2: Parallel launch.** All Speculos containers boot concurrently via `Promise.all`. Each entry records `name`, `speculosPort`, `deviceId`. The test does not wait for Speculos N+1 before asking for Speculos N's data.
+- **Phase 3: Per-app commands, with retry.** For each grouping, try the commands up to three times. On failure, delete the Speculos container, re-launch a fresh one, re-register, and retry. Between groups that are **not** the main `speculosApp`, the container is deleted — the live-data fetch is done, we do not need that container any more.
+- **Phase 4: Main Speculos setup.** If `options.speculosApp` is set, that container becomes "the device the app will talk to": `registerSpeculos(port)` plus `registerKnownSpeculos(port)` (which sends `addKnownSpeculos` over the bridge so the app knows about it). Three-attempt retry here too, with full instance recreation on failure.
+- **Phase 5: Global commands, with full-run recovery.** `cliCommands` (without `app:`) run against the main Speculos. On failure, the main Speculos is recreated **and the entire command list restarts**. This protects against partial-mutation states (e.g. a CLI command half-applied a token allowance and then failed).
+- **Phase 6: Load userdata.** `loadConfig(userdataSpeculos, true)` reads the temp userdata file, sends it over the bridge. Under the hood this translates to `importSettings`, `navigate`, `importAccounts`, and optionally `setFeatureFlags({ overrides })`.
+- **Phase 7: Feature-flag merge.** Default flags for the Wallet 4.0 rollout and the modular drawer get applied, then any caller-supplied `featureFlags` override on top. This is where `beforeAllFunctionSwap` (in `specs/swap/swap.setup.ts`) enables `ptxSwapLiveAppMobile` and `llmAnalyticsOptInPrompt`.
 
-  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-  try {
-    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
-  } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
+Each retry loop starts with a call to `checkTestFailed()`:
+
+```typescript
+function checkTestFailed(): void {
+  if (globalThis.IS_FAILED) {
+    throw new Error("Test failed - aborting initialization to prevent orphaned Speculos instances");
   }
 }
 ```
 
-The shape is identical:
+`IS_FAILED` is flipped by `jest.environment.ts`'s `handleTestEvent` on hook or test failure. Without this guard, a fail-fast in the middle of initialisation could leave Speculos containers running forever; the guard forces initialisation to abort cleanly and propagate the failure.
 
-```ts
-const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-try {
-  // ... CLI command + device tap ...
-} finally {
-  await cleanSpeculos(speculos, previousSpeculosPort);
-}
+### 5.7.15 How a Spec Actually Boots — end-to-end trace
+
+Here is the sequence when you run `pnpm test:ios` from `e2e/mobile/`:
+
+```
+pnpm test:ios
+ │
+ └─ pnpm detox test --configuration ios.sim.release
+     │
+     ├─ Reads detox.config.js
+     │   • Picks app: ios.release, device: simulator
+     │   • testRunner.$0: jest  -->  spawns Jest with --config jest.config.js
+     │
+     ├─ Jest starts
+     │   │
+     │   ├─ [1] Runs globalSetup: jest.globalSetup.ts (once)
+     │   │       • tsconfig-paths.register(…)
+     │   │       • Verify apps/ledger-live-mobile/.env.mock exists
+     │   │       • setupSpeculosCleanupHandlers()
+     │   │       • cleanupPreviousNanoAppJsonFile()
+     │   │       • await detox/runners/jest.globalSetup()
+     │   │       • Enable video if on last retry
+     │   │
+     │   ├─ Spawns N workers (N = 3 in CI, 1 locally)
+     │   │
+     │   └─ For each worker:
+     │       │
+     │       ├─ [2] Constructs TestEnvironment (jest.environment.ts)
+     │       │       • If workerId > 1: rewrite detoxConfig.device
+     │       │       • super.setup() boots Detox for this worker
+     │       │         (installs app, launches simulator, opens WS, etc.)
+     │       │       • setupEnvironment()
+     │       │       • new Application()  ← the `app` global
+     │       │       • Install globals (enums, helpers, cliCommandsUtils)
+     │       │       • Install handleTestEvent for failure capture
+     │       │
+     │       └─ For each spec file matching specs/**/*.spec.ts:
+     │           │
+     │           ├─ [3] Runs setupFilesAfterEnv: setup.ts (per file)
+     │           │       • const broadcastOriginalValue = getEnv("DISABLE_TRANSACTION_BROADCAST")
+     │           │       • setupEnvironment()
+     │           │       • Registers beforeAll():
+     │           │           launchApp()  ← finds free port, inits bridge, device.launchApp({ wsPort })
+     │           │           device.reverseTcpPort(8081) + port + 52619
+     │           │           setAllureDescription()
+     │           │       • Registers afterAll():
+     │           │           restore broadcast, closeBridge, app.common.removeSpeculos()
+     │           │
+     │           ├─ [4] Spec body runs — typically:
+     │           │       describe("...", () => {
+     │           │         beforeAll(async () => {
+     │           │           await app.init({ userdata, speculosApp, cliCommands, featureFlags })
+     │           │              ↓
+     │           │              @Step("Account initialization")
+     │           │              ├─ copy userdata → temp-userdata-<uuid>.json
+     │           │              └─ InitializationManager.initialize(...)
+     │           │                  ├─ group commandsByApp
+     │           │                  ├─ launchSpeculosDevices in parallel
+     │           │                  ├─ executeCliCommandsOnApp (retry)
+     │           │                  ├─ setupMainSpeculosApp (retry)
+     │           │                  ├─ executeCliCommands (retry + full-run recovery)
+     │           │                  ├─ loadConfig(userdataSpeculos) over bridge
+     │           │                  └─ setFeatureFlags(defaultFlags ⊕ options.featureFlags)
+     │           │         });
+     │           │         it("…", async () => {
+     │           │           await app.portfolio.waitForPortfolioPageToLoad()
+     │           │           await app.swap.openViaDeeplink()       ← each @Step becomes an Allure step
+     │           │           await app.swap.verifyAmountsAndAcceptSwap(swap, amount)
+     │           │           // ...
+     │           │         });
+     │           │       });
+     │           │
+     │           ├─ [5] On failure: handleTestEvent fires
+     │           │       • IS_FAILED = true
+     │           │       • takeSpeculosScreenshot()
+     │           │       • takeAppScreenshot("Test Failure")
+     │           │       • attachTestExecutionConsoleToAllure()
+     │           │       • attachSpeculosStartupErrorToAllure()
+     │           │       • getLogs() over the bridge → attachFailureLogsToAllure()
+     │           │       • captureNativeViewHierarchy() → Allure XML attachment
+     │           │
+     │           └─ [6] afterAll (from setup.ts) runs
+     │
+     ├─ [7] Runs globalTeardown: jest.globalTeardown.ts (once)
+     │       • If CI and SHARD_INDEX == 1: relaunch app, load userdata, write environment.properties
+     │       • globalTeardown() (detox, 60 s timeout)
+     │       • cleanupUserdata() (glob temp-userdata-*.json)
+     │       • forceGarbageCollection()
+     │
+     └─ Jest writes allure-results under ./artifacts
+         • pnpm allure picks them up on demand
 ```
 
-**Why this shape?**
+Read this once end-to-end. Every time you see a weird behaviour at runtime — "why did my Speculos container leak?" (phase 1 handler), "why are there two `beforeAll` hooks firing before my spec runs?" (phases 3 and 4), "why does `app` exist even though I never imported anything?" (phase 2) — the answer sits in one of these numbered steps.
 
-The outer test (a swap spec, for example) is already running with one Speculos active — the Exchange app Speculos that the swap flow uses. When the test wants to do a token revoke, it needs the *Ethereum* app Speculos, not the Exchange app Speculos. So:
+### 5.7.16 Cross-Reference with Part 4 Chapter 4.6
 
-1. **Snapshot.** `getEnv("SPECULOS_API_PORT")` reads the currently active Speculos port (the swap's Exchange Speculos) into a local variable.
-2. **Swap.** `launchSpeculos("Ethereum")` starts a new Speculos with the Ethereum app. The env var now points to the Ethereum Speculos. The CLI subprocess will pick this up.
-3. **Use.** Inside the `try`, the `revokeTokenCommand` runs against the Ethereum Speculos. The CLI signs a revoke transaction; the device-tap helper drives the Ethereum app's screen flow.
-4. **Restore.** `cleanSpeculos(speculos, previousSpeculosPort)` stops the Ethereum Speculos, unregisters its transport, and restores the env var to the original Exchange Speculos port. The outer swap test continues as if nothing happened.
+If you have read Part 4 Chapter 4.6 (Desktop Codebase Deep Dive), many shapes here will feel familiar. The two suites converge where the domain matches and diverge where the platform forces the hand:
 
-**Why two Speculos instances at all?** Each Speculos container runs *one* app at a time. The Exchange app and the Ethereum app are different apps. The swap flow needs Exchange (because the swap is mediated through Ledger's Exchange app for the clear-sign decoder of swap-specific calldata); the revoke is a plain ERC-20 `approve(spender, 0)` on Ethereum which needs the Ethereum app. You can't time-share — the swap is mid-flow, holding state on the Exchange Speculos. So you start a second Speculos in parallel, do the revoke, tear it down, and the swap's Speculos is untouched.
-
-**Why the `finally`?** Because if `revokeTokenCommand` throws — the device-tap fails, the broadcast errors out, the transaction reverts on-chain — the cleanup must still run. Otherwise the second Speculos leaks, the env var stays pointed at the dead container, and every subsequent CLI call in the outer test fails with a confusing transport error.
-
-The pattern is dense but local: one snapshot variable, one launch, one `finally` block. Once you internalise it, every multi-Speculos test reads the same.
-
-### 5.5.7 A Concrete Timeline — Swap with Mid-Test Revoke
-
-Walk through the full timeline of a `provider.swap.spec.ts` run that calls `revokeTokenApproval` before exercising the swap. Every step matters; the order is what makes the orchestration safe.
-
-**T=0.** Test starts. Test fixture sets up the desktop app, runs `liveDataWithAddressCommand` to seed the account. No Speculos yet. `SPECULOS_API_PORT` is unset (or set by a previous test that cleaned up correctly).
-
-**T=1.** Test enters its body. Calls `await app.swap.swapAndCheck(...)`. The swap flow internally calls `launchSpeculos("Exchange App")`. At this point:
-- `previousDevice` is undefined, so no cleanup branch runs.
-- `startSpeculos("swap_test", specs.Exchange_App, undefined)` spawns a Docker container exposing the Speculos REST API on a fresh port — say port 41001.
-- `SPECULOS_API_PORT` is set to `"41001"` (both via `setEnv` and `process.env`).
-- `CLI.registerSpeculosTransport("41001", "localhost")` adds the entry `speculos-http-41001 → http://localhost:41001` to the live-common transport registry.
-- Allure description gets `App: Exchange App (3.0.0)`.
-
-The swap flow now drives the Exchange Speculos. The test holds the device handle in a variable like `swapSpeculos`.
-
-**T=2.** Mid-test, before broadcasting the swap, the test wants to clear any leftover token allowance. It calls `await app.swap.revokeTokenApproval(fromAccount, provider)`. Inside that method:
-- `previousSpeculosPort = getEnv("SPECULOS_API_PORT")` reads `"41001"` and stores it.
-- `launchSpeculos(fromAccount.currency.speculosApp.name)` is called with `"Ethereum"` (assuming an EVM swap).
-  - `previousDevice` not passed — the previous device is the *swap's Exchange Speculos*, but we don't want to stop it. We want it preserved. So we do *not* pass it as the third arg. Instead, the swap Speculos keeps running while we start a sibling.
-  - `startSpeculos("cli_speculos", specs.Ethereum, undefined)` spawns a *second* container, on a *different* port — say 41002.
-  - `SPECULOS_API_PORT` gets overwritten to `"41002"`.
-  - `CLI.registerSpeculosTransport("41002", "localhost")` adds the `speculos-http-41002` entry. The registry now has both 41001 and 41002.
-  - Allure picks up another description: `App: Ethereum (1.10.4)`. The test report shows both blocks.
-
-**T=3.** The test calls `revokeTokenCommand(fromAccount, provider.contractAddress)`. This:
-- Sets `DISABLE_TRANSACTION_BROADCAST="0"` (saving the previous value).
-- Spawns `node apps/cli/bin/index.js send --currency ethereum --mode revokeApproval ...` via `runCliCommand`. The CLI subprocess inherits `process.env`, so it reads `SPECULOS_API_PORT=41002`. It instantiates `hw-transport-node-speculos-http`, looks up `speculos-http-41002` in the registry, finds the constructor we registered at T=2, and connects to `localhost:41002`. It begins signing.
-- In parallel, the test code awaits `approveToken()` from `families/evm.ts`. That helper polls Speculos REST at port 41002 (read from `SPECULOS_API_PORT`), pages through the review screens, and presses both buttons (or holds-to-sign on touch devices). The CLI subprocess unblocks with signed bytes. CLI broadcasts the tx. CLI exits with code 0.
-
-**T=4.** `revokeTokenCommand` restores `DISABLE_TRANSACTION_BROADCAST` to its prior value. Returns the CLI stdout.
-
-**T=5.** Back in `revokeTokenApproval`, the `try` block ends successfully. `finally` runs: `cleanSpeculos(speculos, previousSpeculosPort)`:
-- `stopSpeculos(speculos.id)` kills the Ethereum Speculos container at port 41002.
-- `unregisterTransportModule("speculos-http-41002")` removes that entry.
-- `previousSpeculosPort = "41001"` was passed, so `setEnv("SPECULOS_API_PORT", "41001")` and `process.env.SPECULOS_API_PORT = "41001"` restore the swap Speculos's port.
-
-**T=6.** Control returns to the swap flow. The Exchange Speculos at port 41001 is still running. `SPECULOS_API_PORT` is back to `"41001"`. The transport registry still has `speculos-http-41001`. The next CLI call (or the next device-tap) inside the swap flow finds everything as it was at T=2, before the revoke nest. The swap proceeds, broadcasts, completes.
-
-**T=7.** Swap test ends. The outer fixture or the swap flow cleans up the swap Speculos (`cleanSpeculos(swapSpeculos)` — no port restoration needed because at T=0 nothing was active). Container at 41001 stops. Registry is clean. `SPECULOS_API_PORT` reset.
-
-The whole orchestration is fifteen lines of test code. The two utility functions handle every subtle bit. Once you trace this once, you'll trust the pattern.
-
-### 5.5.8 Local Speculos vs Remote
-
-`process.env.REMOTE_SPECULOS === "true"` is the toggle.
-
-**Local mode (default).** `REMOTE_SPECULOS` unset or `"false"`. `startSpeculos` spawns a Docker container on the local machine. The container exposes the Speculos REST API on a host-bound port. `getSpeculosAddress()` returns `"localhost"`. This is what you get when you run `pnpm e2e:test` on your laptop, or when a CI runner is configured for self-hosted Speculos.
-
-**Remote mode.** `REMOTE_SPECULOS=true`. `startSpeculos` does not spawn anything locally. Instead, it asks the Stargate-managed Speculos pool to allocate a slot. Stargate is the production CI Speculos cluster. The pool returns a host:port that points to a remote Speculos instance. `getSpeculosAddress()` returns whatever `SPECULOS_ADDRESS` is set to — typically the Stargate gateway hostname. `waitForSpeculosReady(device.id)` polls the remote API until the container reports ready; this extra wait exists because remote allocations have higher startup latency than local Docker.
-
-The same code path produces the right device handle in both modes. The lifecycle utilities don't branch based on local vs remote; they only branch on the readiness wait. Everything else — port management, transport registration, env var setting, allure description — is identical.
-
-The relevant env vars:
-
-- `REMOTE_SPECULOS` — `"true"` to enable remote mode. Anything else is local.
-- `SPECULOS_ADDRESS` — the host (or hostname) where Speculos is reachable. `"localhost"` for Docker-local; a Stargate-issued hostname for remote.
-- `SPECULOS_API_PORT` — set by `launchSpeculos`; read by `cleanSpeculos`, by the device-tap helpers, and inherited by the spawned CLI subprocess.
-
-For day-to-day spec writing, you don't think about local vs remote. You write the spec, it works in your local Docker setup, and it also works in CI with `REMOTE_SPECULOS=true`. The lifecycle layer absorbs the difference.
-
-### 5.5.9 The Transport Registration Step
-
-The single most subtle line in `launchSpeculos`:
-
-```ts
-CLI.registerSpeculosTransport(device.port.toString(), getSpeculosAddress());
-```
-
-What does it actually do?
-
-`hw-transport-node-speculos-http` is a transport implementation in `@ledgerhq/hw-transport-node-speculos-http`. It is the bridge between live-common's transport API (`open`, `exchange`, `close`) and Speculos's HTTP API. To use it, code calls something like:
-
-```ts
-const transport = await SpeculosHttpTransport.open("speculos-http-<port>");
-```
-
-But `transport` resolution is dynamic — the `open` call goes through a registry of named transports, and `speculos-http-<port>` is dynamic per-instance. The CLI subprocess and the device-tap helper both need to find the right transport entry by name, but the name encodes the port, which is only known at runtime after Speculos starts.
-
-`CLI.registerSpeculosTransport(port, address)` adds an entry to the live-common transport registry mapping the name `speculos-http-<port>` to a constructor that opens a connection to `<address>:<port>`. After this call, any code that does `transport.open("speculos-http-<port>")` succeeds.
-
-The CLI subprocess inherits `process.env` (including `SPECULOS_API_PORT`) at spawn time. When the CLI internally instantiates its transport, it reads `SPECULOS_API_PORT`, builds the name `speculos-http-<port>`, and calls `open` on it. The registry entry registered just above is what makes this resolve to the right Speculos.
-
-The cleanup counterpart, `unregisterTransportModule("speculos-http-" + port)`, removes that entry. If you skip the unregister step, the registry accumulates dead entries; if a later test happens to reuse a port number for a new Speculos, the registry might find the old (dead) entry first.
-
-This subsystem is invisible to you when it works. When it breaks — when you see "transport not found" or "ECONNREFUSED on port XXXX" or a CLI hang waiting for a response that never comes — the transport registry is usually where the bug lives. Knowing the registry exists and how to inspect it is the difference between a one-hour debug session and a one-day one.
-
-### 5.5.10 Error Modes
-
-What happens when something goes wrong?
-
-**Skipped `cleanSpeculos`.** The Speculos container keeps running locally (or the remote slot stays allocated). The transport registry retains the `speculos-http-<port>` entry. Two failure modes downstream:
-- A subsequent test, on a fresh `launchSpeculos`, may receive the same port from the remote pool (or from local Docker port reuse) and find the stale entry resolved to a now-dead container. Mismatch, hang, timeout.
-- Memory pressure: each leaked Docker Speculos eats hundreds of megabytes. Run a hundred tests with leaks and your CI worker runs out of RAM.
-
-The correct fix is always `try`/`finally`. There is no scenario where you want to leak.
-
-**Port collision on `startSpeculos`.** `startSpeculos` errors out with something like "port already in use." This usually means a previous test left its Speculos running and the new test got the same port assignment. Symptom: test fails on setup, before any spec code runs. Diagnosis: check `docker ps` for stale Speculos containers. Mitigation: kill them and restart; root cause is almost always a missing `cleanSpeculos`.
-
-**Forgot to restore `SPECULOS_API_PORT`.** You called `cleanSpeculos(speculos)` without the second argument. The Speculos itself is correctly stopped; the env var is left pointing at the now-dead port. The next CLI call in the outer test reads `SPECULOS_API_PORT`, points the spawned subprocess at the dead port, and the CLI hangs trying to connect. Eventually times out. The subtle part: the failure is several lines after the missing argument, so reading the stack trace doesn't immediately point you at the bug. Mitigation: always pass `previousSpeculosPort` to `cleanSpeculos` if you snapshotted it.
-
-**Two `launchSpeculos` calls without intermediate cleanup.** You called `launchSpeculos("Ethereum")`, then later `launchSpeculos("Bitcoin")` without cleaning up the first. If you passed the first device handle as the third argument (`previousDevice`) to the second call, the helper cleans up for you — that's why the parameter exists. If you didn't pass it, the first Speculos leaks. The Bitcoin one starts up fine but the Ethereum one keeps running until the worker is recycled. In CI, the leak is noticed when the next batch of tests spawn and the host runs out of free ports or memory. Mitigation: either pass `previousDevice`, or call `cleanSpeculos` explicitly between the two `launchSpeculos` calls.
-
-**Transport registered but never unregistered.** Symptom: tests pass individually but the suite slows down over time as the transport registry grows. Eventually, port reuse plus a stale entry causes a confusing routing error. Mitigation: pair every `register` with an `unregister`. The cleanup helper does this for you when called.
-
-**REMOTE_SPECULOS set incorrectly.** If `REMOTE_SPECULOS=true` is set but no Stargate pool is reachable, `waitForSpeculosReady` polls forever (or until the test timeout). If `REMOTE_SPECULOS=false` (or unset) but the local Docker daemon isn't running, `startSpeculos` errors immediately. Both produce loud, easy-to-diagnose failures. The dangerous case is mismatched `SPECULOS_ADDRESS` — pointing at a host that exists but isn't a Speculos pool. Then the calls succeed-then-fail mid-test in confusing ways. Mitigation: set both env vars together, never one without the other.
-
-### 5.5.11 Allure Integration
-
-The last few lines of `launchSpeculos`:
-
-```ts
-let info = `App: ${device.appName || ""} (${device.appVersion || ""})`;
-if (device.dependencies?.length) {
-  info += `\nDependencies: ${device.dependencies?.map(dep => dep.name + " (" + dep.appVersion + ")").join(", ") || ""}`;
-}
-await allure.description("SPECULOS\n" + info);
-```
-
-Every `launchSpeculos` writes a Speculos description block to the current test's Allure report. The block includes:
-
-- The app name and version (e.g. `Ethereum (1.10.4)`).
-- Any dependencies and their versions (e.g. for Ethereum with Plugin: `Ethereum (1.10.4)\nDependencies: Plugin Ethereum (1.4.0)`).
-
-When a test fails, the Allure UI shows this block in the description tab. You see immediately which Speculos was active, which app version was loaded, and whether the test was using a particular plugin variant. For tests that launch two Speculos instances (the snapshot-and-restore case), each call contributes its own description block; the report shows both.
-
-This is the single highest-leverage debugging artifact in the Speculos lifecycle. It has saved many hours that would otherwise have been spent re-running tests with verbose logs to figure out which app a failed signature came from.
-
-A small operational note: `allure.description` is *additive* — calling it multiple times in the same test doesn't overwrite, it appends. So a snapshot-and-restore test gets both Speculos blocks in the description. Easy to read; nothing to configure.
-
-<div class="chapter-outro">
-<strong>Key takeaway:</strong> <code>launchSpeculos</code> and <code>cleanSpeculos</code> are thirty lines of glue holding the CLI subprocess and the device-tap helper to the same Speculos instance, across local and remote modes. The snapshot-and-restore pattern is what lets a swap test do a revoke mid-flow without disturbing the outer Speculos. Every step earns its place — skip one and you get container leaks, transport registry corruption, or hangs that look like they came from elsewhere. When in doubt, mirror the <code>ensureTokenApproval</code>/<code>revokeTokenApproval</code> shape exactly.
-</div>
-
-### 5.5.12 Quiz
-
-<!-- ── Chapter 5.5 Quiz ── -->
-
-<div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 5.5 Quiz</h3>
-<p class="quiz-subtitle">6 questions · 80% to pass</p>
-<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> Why does a swap-then-revoke test need TWO Speculos instances?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) For redundancy in case one Docker container crashes</button>
-<button class="quiz-choice" data-value="B">B) To run the test twice in parallel</button>
-<button class="quiz-choice" data-value="C">C) Each Speculos runs one app at a time — swap needs the Exchange app, revoke needs the Ethereum app</button>
-<button class="quiz-choice" data-value="D">D) One handles signing, the other handles broadcasting</button>
-</div>
-<p class="quiz-explanation">A single Speculos container loads one app at a time. The swap flow holds state on the Exchange Speculos; the revoke needs an Ethereum Speculos. The snapshot-and-restore pattern lets the test launch a second Speculos for the revoke, then tear it down so the outer swap continues against its original Exchange Speculos.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> What does <code>unregisterTransportModule("speculos-http-" + port)</code> do?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Stops the Speculos Docker container</button>
-<button class="quiz-choice" data-value="B">B) Removes the named transport entry from the live-common transport registry, preventing later tests from picking up a stale entry pointing at a dead container</button>
-<button class="quiz-choice" data-value="C">C) Closes the WebSocket bridge to the React Native app</button>
-<button class="quiz-choice" data-value="D">D) Resets the SPECULOS_API_PORT env var</button>
-</div>
-<p class="quiz-explanation">The live-common transport registry maps names like <code>speculos-http-&lt;port&gt;</code> to constructors. <code>unregisterTransportModule</code> removes that mapping so the registry stays clean across tests. Stopping the container is <code>stopSpeculos</code>; the env reset is the third <code>cleanSpeculos</code> step.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> What happens if you forget to pass <code>previousSpeculosPort</code> to <code>cleanSpeculos</code> after snapshotting it at launch?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The Speculos is correctly stopped, but SPECULOS_API_PORT is left pointing at the dead port; subsequent CLI calls in the outer test connect to a stopped container and time out</button>
-<button class="quiz-choice" data-value="B">B) Nothing — the cleanup is idempotent</button>
-<button class="quiz-choice" data-value="C">C) The Docker container leaks but the test still passes</button>
-<button class="quiz-choice" data-value="D">D) The transport registry is corrupted and the entire suite crashes</button>
-</div>
-<p class="quiz-explanation">The Speculos itself is fine — <code>stopSpeculos</code> always runs. But the env var restore is gated on <code>previousPort</code> being passed. Without restoration, the next CLI call uses the dead port. The failure happens several lines after the bug, making it tricky to trace.</p>
-</div>
-
-<div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> What is the role of the <code>specs</code> map in <code>launchSpeculos</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It defines test specifications and assertions</button>
-<button class="quiz-choice" data-value="B">B) It is a list of Playwright fixtures used per test</button>
-<button class="quiz-choice" data-value="C">C) It maps test titles to Allure descriptions</button>
-<button class="quiz-choice" data-value="D">D) It maps app names (Ethereum, Bitcoin, etc.) to firmware path, app path, model id, and optional dependencies — the blueprint <code>startSpeculos</code> uses to launch the right device</button>
-</div>
-<p class="quiz-explanation">The <code>specs</code> map (imported from <code>@ledgerhq/live-common/e2e/speculos</code>) is the single source of truth for which firmware and app to launch per app name. Updating to a new app version means updating one entry in this map.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What does <code>process.env.REMOTE_SPECULOS === "true"</code> change in the lifecycle flow?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) It disables Speculos entirely and runs against a real device</button>
-<button class="quiz-choice" data-value="B">B) It routes <code>startSpeculos</code> to the Stargate-managed remote Speculos pool, and adds a <code>waitForSpeculosReady</code> readiness poll because remote allocation has startup latency</button>
-<button class="quiz-choice" data-value="C">C) It enables a verbose debug log mode</button>
-<button class="quiz-choice" data-value="D">D) It runs every test twice for reliability</button>
-</div>
-<p class="quiz-explanation">Local mode (default) spawns Docker; remote mode asks Stargate for a slot. The only branch in the helper code is the <code>waitForSpeculosReady</code> call — port management, transport registration, env vars, and Allure are identical in both modes.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q6.</strong> Why must the launch/clean pair be wrapped in <code>try</code>/<code>finally</code>?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Because TypeScript syntax requires it for async functions</button>
-<button class="quiz-choice" data-value="B">B) Because Allure can't write the description otherwise</button>
-<button class="quiz-choice" data-value="C">C) Because if the inner CLI call throws, cleanup must still run — otherwise the Speculos container leaks, the env var stays pointed at a dead port, and the transport registry retains a stale entry</button>
-<button class="quiz-choice" data-value="D">D) Because Docker requires explicit cleanup signals</button>
-</div>
-<p class="quiz-explanation">The <code>finally</code> block guarantees cleanup in both the success and exception paths. Skip the <code>finally</code> and any thrown error from the device-tap or CLI subprocess leaks the container, leaves SPECULOS_API_PORT corrupted, and pollutes the transport registry — symptoms that show up in *later* tests, not this one.</p>
-</div>
-
-<div class="quiz-score"></div>
-</div>
-
----
-
-With the Speculos lifecycle internalised, the next stop is the final piece of the broadcast picture: `DISABLE_TRANSACTION_BROADCAST`, the env-var gate that determines whether a CLI-signed transaction actually hits the network or just produces a signed-bytes envelope. Chapter 5.6 walks through that gate, the discipline of try/finally around it, and why mobile and desktop have different defaults.
-## DISABLE_TRANSACTION_BROADCAST and Broadcast Discipline
-
-<div class="chapter-intro">
-The previous chapter showed how Speculos runs alongside the CLI subprocess and how the two share an HTTP port via the transport registry. This chapter zooms in on a single environment variable — <code>DISABLE_TRANSACTION_BROADCAST</code> — and on the discipline that surrounds it. The variable is one of the smallest pieces of state in the whole CLI integration, but it is also one of the most consequential: it is the single switch that decides whether a signed transaction lands on a real testnet or evaporates as a string in a CLI log line. Get it right and your tests are deterministic, cheap, and reproducible. Get it wrong and you either pay gas you did not budget for or, worse, leave on-chain state behind that breaks the next test in the suite.
-</div>
-
-### 5.6.1 Why Broadcast Control Matters in QA
-
-There is a fundamental tension at the heart of every signing test in Ledger Live's QAA suite. On one side, automated tests want to be **deterministic** — every run should start from the same state and produce the same observable outcome. On the other side, the artefacts that signing tests verify (signed payload bytes, device-screen renderings, intermediate Bridge events) generally do not require the transaction to actually be sent. So the simplest, fastest, cheapest behaviour is: **sign the transaction, capture the signed bytes, throw them on the floor**. No gas, no pending mempool entries, no chain state to worry about.
-
-Most QAA tests work exactly this way. A send-flow regression checks that the device shows the correct recipient, the correct amount, the correct fee — once the user (Speculos) approves, the test asserts on the signed event and exits. There is no need for the transaction to ever touch a node.
-
-But a small and important class of tests is fundamentally different. **Allowance state lives on-chain.** When you call `approve(spender, N)` on an ERC-20 contract, the new allowance is written to the token's storage and stays there until another `approve` overwrites it. If your test broadcasts an approve in run #1 and then run #2 starts up expecting `allowance == 0`, you have a stale-state bug that no amount of seed-resetting in your test runner can fix. The seed is local; the allowance is global. The chain remembers.
-
-That is the tension. Most tests want broadcast off so they are cheap and stateless. Allowance-bearing tests need broadcast on so the test seed can actually be reset to a known allowance value (typically zero) between runs. The wrong default for either category breaks the suite.
-
-The way the codebase resolves this tension is **broadcast is off by default per-test (via the env var) and explicitly turned on for the brief window where it is needed (via the helper)**. The helper restores the previous value on its way out so the surrounding test environment is unchanged. This chapter walks through the mechanics: what values mean what, where the variable is read, where it is set, and the try/finally discipline that keeps the whole system honest.
-
-### 5.6.2 The Env Var Values
-
-`DISABLE_TRANSACTION_BROADCAST` is a string. It can hold three meaningful states:
-
-| Value | Meaning | Effect on `send` |
+| Concern | Desktop (`e2e/desktop/`) | Mobile (`e2e/mobile/`) |
 |---|---|---|
-| `"1"` (or any truthy string except `"0"`) | Broadcast disabled | CLI signs, prints the signed event, **does not** call `bridge.broadcast` |
-| `"0"` | Broadcast enabled | CLI signs, then submits the signed payload via `bridge.broadcast` |
-| `undefined` (unset) | Falsy → broadcast enabled by default | Same as `"0"` |
-
-> **Verify:** the actual coercion is `getEnv("DISABLE_TRANSACTION_BROADCAST")` returning a string that is then evaluated for truthiness in a JavaScript `||` chain. Empty string and `"0"` are both falsy in this context (`!!"0"` is `true` in plain JS, but `live-env`'s typed `getEnv` returns the value coerced through its declared schema, which for boolean-like envs treats `"0"` as `false`). When in doubt, set `"1"` to disable and `"0"` to enable, and never rely on "unset implies disabled".
-
-The variable lives in two places at once. `live-env`'s internal config registry holds the in-process value that any live-common module reads via `getEnv("DISABLE_TRANSACTION_BROADCAST")`. The OS-level `process.env` holds the value that subprocesses inherit when the test spawns the CLI. The next subsections explain why both matter and which code reads from which.
-
-The default state — **unset** — means `getEnv` falls back to whatever schema default `live-env` declares. In the QAA suite the practical baseline you see when running locally is "broadcast happens", because tests that need broadcast off set it explicitly to `"1"` and tests that need it on set it explicitly to `"0"`. The unset case is the no-test, no-helper path — a stray `runCli` call from a debug scratchpad would broadcast for real.
-
-### 5.6.3 The End-to-End Flow
-
-The single most important snippet in this whole chapter is the rxjs gate inside `apps/cli/src/commands/blockchain/send.ts`. It is short enough to quote in full and worth reading line by line:
-
-```ts
-.pipe(
-  // ...
-  bridge.signOperation({ account, transaction: t, deviceId: opts.device || "" })
-    .pipe(
-      map(toSignOperationEventRaw),
-      // ── BROADCAST GATE ──
-      ...(opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")
-        ? []
-        : [
-            concatMap((e) => {
-              if (e.type === "signed") {
-                return from(
-                  bridge.broadcast({ account, signedOperation: e.signedOperation })
-                    // ...
-                );
-              }
-              return of(e);
-            }),
-          ]),
-      // ...
-    );
-```
-
-**Reading it line by line:**
-
-1. `bridge.signOperation({...})` is called first. This produces a stream of events: typically `device-permission-requested`, `device-permission-granted`, `device-streaming` (chunked transmission), and finally `signed`. The signed event carries the signed payload bytes and the optimistic operation. **Signing happens regardless of the broadcast gate.** The gate decides only what happens to the signed bytes after they exist.
-
-2. `.pipe(map(toSignOperationEventRaw), ...)` converts the events into a serialisable shape. This is what the CLI prints to stdout.
-
-3. The `...(condition ? [] : [...])` is JavaScript's spread-into-an-array trick used to **conditionally include an rxjs operator**. If the condition is truthy, the spread expands `[]` (zero operators added). If the condition is falsy, the spread expands a single-element array containing one `concatMap` operator.
-
-4. The condition is `opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")`. **Two gates** — the CLI flag `--disable-broadcast` AND the environment variable. Either truthy is enough to skip broadcast. This redundancy is intentional: the flag lets a CLI invocation disable broadcast inline (useful for one-off manual testing), while the env var lets a test harness disable broadcast for every CLI call in a test file without rebuilding the command line for each one.
-
-5. When the gate evaluates as **broadcast skipped** (truthy), the pipeline ends after the `map(toSignOperationEventRaw)`. The signed event is printed and the rxjs observable completes. The signed bytes are never submitted to a node. The CLI exits cleanly.
-
-6. When the gate evaluates as **broadcast enabled** (falsy), the `concatMap` operator is inserted. For each emitted event:
-   - If it is the `signed` event, call `bridge.broadcast({ account, signedOperation: e.signedOperation })`. Convert the resulting promise to an observable with `from(...)`. The downstream pipeline waits for the broadcast to complete before continuing.
-   - Otherwise (any non-signed event — device permissions, streaming, etc.), pass it through unchanged via `of(e)`.
-
-The fact that **the gate is at the operator-injection level, not inside the operator itself**, is why the disabled path produces zero overhead — there is literally no broadcast operator in the pipeline, so there is nothing to short-circuit. This is rxjs idiomatic; it is also the reason a debugger break inside the broadcast block reveals nothing when the gate is closed: that code never ran.
-
-### 5.6.4 Read Sites in live-common
-
-The variable is read in nine places across the monorepo. The CLI reads it once, in the file you just walked through. Live-common reads it in eight more places — every site where signing produces something the consumer might either submit on-chain or hold for later.
-
-**CLI commands:**
-- `apps/cli/src/commands/blockchain/send.ts` — the rxjs gate quoted verbatim above.
-- `apps/cli/src/commands/blockchain/botTransfer.ts` — the bot's transfer command uses the same gate idiom, because the bot also signs first and broadcasts second; QAA does not invoke the bot directly but the symmetry is worth knowing about.
-
-**live-common modules (`libs/ledger-live-common/src/`):**
-- `exchange/swap/setBroadcastTransaction.ts` — the swap-specific path. Inside the swap acceptance flow, after the user signs the on-chain swap transaction, this module is responsible for broadcasting it. It checks `DISABLE_TRANSACTION_BROADCAST` to decide whether to actually call the node or return a simulated success. This is the path mobile swap tests exercise.
-- `wallet-api/react.ts`, `wallet-api/useDappLogic.ts`, `wallet-api/ACRE/server.ts` — three files in the Live Apps signing path. When a Live App requests a transaction signature via the wallet API, these sites consult the env var to decide whether to broadcast or to return only the signed bytes back to the dApp. Broadcast-disabled Live App tests rely on this gate to assert what the dApp would see post-sign without actually sending the transaction.
-- `hooks/useBroadcast.ts` — the React hook used by both desktop and mobile UI for the in-app "broadcast this signed tx" step. The same env-var check exists here so that UI-layer e2e tests can sign through the UI and assert on intermediate state without paying gas.
-- `bot/engine.ts` — the long-running bot engine; same gate, same reasoning as `botTransfer.ts`.
-
-The pattern is consistent: **wherever a signed payload is about to leave the process**, there is an env-var check. There is no central enforcer. Each broadcast-capable site owns the check.
-
-### 5.6.5 Set Sites
-
-Reading is one half; writing is the other. Three groups of code write the variable.
-
-**Canonical helper — `setDisableTransactionBroadcastEnv` in `cliCommandsUtils.ts`.** This is the only setter QAA test code should call. Its signature is:
-
-```ts
-setDisableTransactionBroadcastEnv(value: string | undefined): string | undefined
-```
-
-It writes to **both** `live-env` (via `setEnv`) and `process.env` (so spawned subprocesses inherit the new value). It returns the **previous** value so the caller can restore it. That return value is the cornerstone of the try/finally discipline (next subsection).
-
-**Mobile swap module-load setter — `e2e/mobile/specs/swap/otherTestCases/swap.other.ts`.** Mobile swap tests default-off broadcast at module load:
-
-```ts
-setEnv("DISABLE_TRANSACTION_BROADCAST", true);
-```
-
-This is fired once when the spec file is loaded. Every CLI/Bridge call originating from the spec inherits the disabled state. The mobile swap suite is the highest-volume consumer of CLI calls outside the desktop suite, and it relies on this default to keep the suite reproducible without per-test boilerplate.
-
-**The new `revokeTokenCommand` and the existing `approveTokenCommand`.** Both are token-allowance helpers; both **need** broadcast on for their work and **must not** leave broadcast on when they exit. They follow the canonical pattern verbatim:
-
-```ts
-const original = setDisableTransactionBroadcastEnv("0");
-
-const result = runCliTokenApproval({
-  // ...
-  waitConfirmation: true,
-});
-
-try {
-  await approveToken();
-} finally {
-  setDisableTransactionBroadcastEnv(original);
-}
-return await result;
-```
-
-The pattern in plain English:
-1. Capture the previous value while flipping to `"0"` (broadcast enabled). The return value of `setDisableTransactionBroadcastEnv` gives you the previous value in one call.
-2. Kick off the CLI subprocess (which will sign and, because broadcast is enabled, submit the transaction).
-3. In parallel, drive Speculos through the device-tap dance via `approveToken()`.
-4. Once the device tap is done — or even if it threw — restore the previous value in `finally`.
-5. Return the awaited CLI result.
-
-The order matters. The CLI process is started *before* the try block so that `approveToken()` and the CLI subprocess race in parallel. If you started the CLI inside the try, you would serialise them and the test would deadlock — the CLI would block waiting for a device confirmation that no one is performing.
-
-### 5.6.6 The Try/Finally Discipline
-
-Every flip of `DISABLE_TRANSACTION_BROADCAST` must be paired with a restore in a `finally` block. Not after the try. Not in a side-effect callback. **In `finally`.**
-
-The reason becomes obvious once you walk through the failure scenarios.
-
-**Scenario 1 — `approveToken()` throws because the device tap fails.** Speculos misses a screen, `pressUntilTextFound` times out, an exception bubbles up. Without `finally`:
-
-```ts
-const original = setDisableTransactionBroadcastEnv("0");
-const result = runCliTokenApproval({...});
-await approveToken();              // <-- throws here
-setDisableTransactionBroadcastEnv(original);  // <-- never runs
-```
-
-The throw escapes; the restore never runs. `DISABLE_TRANSACTION_BROADCAST` stays at `"0"` for the rest of the process lifetime. Every subsequent CLI call in the same Jest/Playwright worker silently broadcasts when it was supposed to be off. Allowance state leaks; the next test that asserts "expected zero allowance" sees the residue and fails for unrelated-looking reasons.
-
-**Scenario 2 — `runCliTokenApproval` rejects because the CLI subprocess crashes.** Same problem in reverse: the await on the result inside the function rejects, the finally still gets the restore, but only because there is a `finally`.
-
-**Scenario 3 — a test runner abort signal mid-flow.** If Jest or Playwright sends a SIGTERM, the JS runtime executes `finally` blocks before exiting. If you used a plain post-await line, the runtime exits without running it.
-
-The pattern that handles all three correctly is the one in `revokeTokenCommand`:
-
-```ts
-const original = setDisableTransactionBroadcastEnv("0");
-const result = runCliTokenApproval({...});
-try {
-  await approveToken();
-} finally {
-  setDisableTransactionBroadcastEnv(original);
-}
-return await result;
-```
-
-Note the **second** `await result` outside the try/finally. The CLI subprocess promise is awaited *after* the env has been restored. If `runCliTokenApproval` rejects, the rejection propagates after the env is already restored, so the restore is guaranteed regardless of which side fails. If you put the `await result` inside the try, the same restore semantics still hold, but you risk re-entering the env-restore logic if you wrap the whole thing in another try elsewhere. The current shape is the conservative one and it is what the codebase consistently uses.
-
-> **Tip:** when you write a new helper that flips broadcast, copy the existing pattern character-for-character. The cost of getting this wrong is a flaky suite that nobody knows is flaky because the symptoms surface in unrelated tests two hours later.
-
-### 5.6.7 Speculos Interaction
-
-Broadcast off does **not** mean signing off. Speculos still receives the unsigned transaction, walks through its normal "review transaction → sign" UI flow, and emits the signed bytes back over the speculos-http transport. The signed bytes travel up the device → transport → bridge stack and surface in the rxjs pipeline as a `signed` event. From there:
-
-- **Broadcast disabled:** the `signed` event is the terminal state of the pipeline. The CLI prints it (in `default` or `json` format) and exits. The signed bytes are visible in CLI stdout but go nowhere. They are dropped on the floor. No `bridge.broadcast`, no node submission, no on-chain effect.
-- **Broadcast enabled:** the `signed` event triggers the `concatMap` operator. `bridge.broadcast({ account, signedOperation: e.signedOperation })` ships the bytes to a node (the configured RPC endpoint for that currency). The node returns a transaction hash (or an error). The optimistic operation is updated with the hash; the CLI prints `✔️ broadcasted! optimistic operation: ...` and exits.
-
-This is why a `--mode revokeApproval` call with broadcast disabled is **useful for nothing in production tests** — the revoke needs to land on chain or it has not happened. It is, however, useful for debugging. Run the same revoke command with `DISABLE_TRANSACTION_BROADCAST=1` and you can verify that signing works, the device-tap automation walks the right screens, the data field is the right calldata, and so on, all without spending a single cent of testnet ETH. Once that local validation passes, set the variable to `"0"` and let the broadcast happen for real.
-
-The decoupling also means Speculos and the broadcast gate are orthogonal concerns. Speculos always emulates a hardware device; the broadcast gate decides what happens to the device's output. Tests that need to assert on device-screen content (for clear-signing audits, e.g.) run with broadcast off so they are cheap; tests that need to verify on-chain state changes run with broadcast on. The choice is per-test and per-helper, not global.
-
-### 5.6.8 `--wait-confirmation` Interaction (a Gotcha)
-
-`runCliTokenApproval` builds its CLI command with `--wait-confirmation` whenever its `waitConfirmation` option is true. The flag exists on `send.ts` and adds a final step to the rxjs pipeline: after the broadcast resolves, wait for the transaction to be confirmed on-chain (via `waitForTransactionConfirmation`) before exiting.
-
-Critically, `waitForTransactionConfirmation` lives **inside the broadcast block** in the rxjs pipe. Looking back at the gate from §5.6.3:
-
-```ts
-...(opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")
-  ? []
-  : [
-      concatMap((e) => {
-        if (e.type === "signed") {
-          return from(
-            bridge.broadcast({ account, signedOperation: e.signedOperation })
-              // ── waitForTransactionConfirmation lives in HERE ──
-          );
-        }
-        return of(e);
-      }),
-    ]),
-```
-
-The `--wait-confirmation` step only runs when the broadcast block is part of the pipeline. If broadcast is disabled, the broadcast block is replaced with an empty operator list and `waitForTransactionConfirmation` never runs — there is no transaction hash to poll for, so there is nothing meaningful to wait on.
-
-**This is a silent no-op**, not an error. The CLI does not warn that `--wait-confirmation` was supplied with broadcast disabled. It simply exits as soon as the signed event is printed. This is fine in normal flows — `revokeTokenCommand` and `approveTokenCommand` always set broadcast on before invoking, so the `--wait-confirmation` is honoured. The gotcha shows up only when someone copy-pastes a CLI command for manual debugging and forgets to clear `DISABLE_TRANSACTION_BROADCAST`.
-
-> **Tip:** if you are debugging a CLI invocation by hand and `--wait-confirmation` seems to do nothing, check `echo $DISABLE_TRANSACTION_BROADCAST`. A leftover `1` from a previous shell session is the most common culprit.
-
-### 5.6.9 `setEnv` (live-env) vs `process.env`
-
-There are two parallel environment registries in play, and the `setDisableTransactionBroadcastEnv` helper writes to both. Understanding why is essential for reasoning about test isolation.
-
-**`live-env`'s typed registry.** The package `@ledgerhq/live-env` exports `setEnv(key, value)` and `getEnv(key)` functions backed by an internal `EnvName → typed value` map. Every live-common module that reads an env var goes through `getEnv`, not `process.env`. The benefits are: type safety (each env name has a declared type — boolean, string, number — and `getEnv` returns the typed value), declared defaults (the schema declares the default for unset keys), and centralised validation (invalid values throw at registration time).
-
-**`process.env`.** Plain Node.js OS-level environment. Subprocesses inherit it. Unrelated to live-env's registry.
-
-The two are normally in sync because live-common's bootstrap reads `process.env` once and pushes the values into live-env. After bootstrap, however, modifying one does not modify the other. This is where the asymmetry matters:
-
-- **Internal callers** (anything inside live-common, including `useBroadcast`, `setBroadcastTransaction`, the wallet-api gates) read via **`getEnv`**, so they see the live-env registry's value. To change what they see, you must call `setEnv`.
-- **CLI subprocesses** are spawned by `runCliCommand` via `child_process.spawn` with `env: process.env`. The spawned `node apps/cli/bin/index.js ...` process inherits **`process.env`**, not the parent's live-env registry. Inside the CLI, `getEnv` will re-read `process.env` and rebuild its own live-env registry from those values. So to change what the CLI sees, you must mutate **`process.env`** before spawning.
-
-Hence `setDisableTransactionBroadcastEnv` writes both:
-
-```ts
-export function setDisableTransactionBroadcastEnv(value: string | undefined) {
-  const previous = process.env.DISABLE_TRANSACTION_BROADCAST;
-  setEnv("DISABLE_TRANSACTION_BROADCAST", value === "1");  // typed boolean for live-env
-  if (value === undefined) {
-    delete process.env.DISABLE_TRANSACTION_BROADCAST;
-  } else {
-    process.env.DISABLE_TRANSACTION_BROADCAST = value;
-  }
-  return previous;
-}
-```
-
-> **Verify:** the precise body of `setDisableTransactionBroadcastEnv` may evolve. The principle — write both sides defensively — is stable.
-
-If you only set live-env, the parent process's internal callers see the new value but the spawned CLI subprocess inherits the unchanged `process.env` and ignores it. If you only set `process.env`, the CLI sees the new value but the parent process's live-common modules (the ones that decide whether to broadcast in `useBroadcast`, for example) read from live-env and see the stale value. Both must move together for the abstraction to hold.
-
-### 5.6.10 Verifying Broadcast Happened
-
-Once a test has flipped broadcast on, run the helper, and flipped it back, how do you actually confirm the transaction landed? The answer is layered.
-
-**Layer 1 — CLI stdout.** When broadcast succeeds, the CLI emits a line like:
-
-```
-✔️ broadcasted! optimistic operation: { hash: "0xabc...", value: "0", ... }
-```
-
-This is your immediate signal. The optimistic operation is the local representation of the transaction; the `hash` field is the transaction hash that was returned by the node. If you see this line, the broadcast call returned without error.
-
-**Layer 2 — `--wait-confirmation`.** When the helper passes `waitConfirmation: true` (the default for `revokeTokenCommand` and `approveTokenCommand`), the CLI also waits for the transaction to be confirmed before exiting. A successful confirmation typically appears in stdout as a confirmed-operation log; a timeout will throw. So if your helper returns at all, the transaction was both broadcast and confirmed within the timeout window.
-
-**Layer 3 — the next test's allowance read.** The most important layer in practice. After a revoke, the next test that calls `getEvmTokenAllowance` (via `tokenAllowance` CLI or via `isTokenAllowanceSufficientCommand`) should see the allowance you just set. If revoke set it to zero, the next call returns zero; if approve set it to N, the next call returns N. This is the **after-the-fact verification** pattern and it is the only one that proves chain state. Layers 1 and 2 prove the broadcast call returned; only layer 3 proves the chain saw it.
-
-**Layer 4 — out-of-band tools.** For one-off audits (Chapter 5.3), open `revoke.cash` or Etherscan's read-contract tab on the testnet you broadcast to, plug in the seed's address, and read the allowance directly. This bypasses the test harness entirely and is useful when something feels wrong and you want to know what the chain actually says.
-
-The four layers form a verification ladder. In automated tests, layers 1 and 3 are the everyday signals — layer 1 fails fast if the broadcast did not return, layer 3 confirms the state actually changed. Layer 2 catches confirmation timeouts. Layer 4 is the manual escape hatch.
-
-### 5.6.11 Chapter 5.6 Quiz
+| Workspace location | Top-level peer workspace | Top-level peer workspace |
+| Runner | Playwright Test | Detox on Jest |
+| Entry config | `playwright.config.ts` | `detox.config.js` + `jest.config.js` |
+| Per-run bootstrap | Playwright `globalSetup` | `jest.globalSetup.ts` + `detox/runners/jest` |
+| Per-worker env | `TestFixtures` | `jest.environment.ts` (extends `DetoxEnvironment`) |
+| POM hub | `Application` class injected via fixture | `Application` class instantiated per worker, exposed as `app` global |
+| POM instantiation | Constructed on fixture access | `lazyInit<T>()` thunks inside the class |
+| POM decorator | `@Step` from `allure-playwright` | `@Step` from `jest-allure2-reporter/api` |
+| Globals | None — everything passed as fixture parameters | Many — `tapById`, `app`, enums, etc. on `globalThis` |
+| Device mocking | Hook directly into the Electron main process (no bridge) | WebSocket bridge (`bridge/server.ts`) |
+| Userdata | `userdata/*.json` replayed via app bridge | `userdata/*.json` replayed via bridge `loadConfig` |
+| Shared enums | `@ledgerhq/live-common/e2e/enum/*` | Same package, same path alias |
+| Spec shape | Imperative `test("…", async ({ page, app }) => …)` | Thin config → `runXxxTest(...)` driver that calls `describe`/`it` itself |
+| Driver pattern | Occasional (e.g. `addAccount.shared.ts`) | Dominant (one driver per bucket: `swap.ts`, `swap.other.ts`, `send.ts`, `addAccount.ts`, ...) |
+| CI workflow | `test-desktop-e2e-reusable.yml` | `test-mobile-e2e-reusable.yml` (peer) |
+
+The most consequential difference is the bridge. Desktop can poke at the Electron main process in-process; mobile cannot — the test runs in Node on your host, but the app runs on a device/simulator with its own JS runtime, on the other side of the OS sandbox. The WS bridge is how the test process says "import these accounts" or "enable this flag" without rebuilding the app. Every architectural decision downstream from that — why `app.init()` is so complex, why there is a separate `speculos.page.ts`, why `userdata/` is shipped as Redux-shaped JSON — follows from the bridge being the only control plane.
+
+<div class="chapter-outro">
+You now have a map of <code>e2e/mobile/</code>. Every <code>.ts</code> file has a purpose, every subdirectory has a role, every global has a declaration and an installer. The next chapter (4.8) turns this map into muscle memory: every flag on every command, every environment file toggle, every way a mobile test can go wrong — and exactly how to recover.
+</div>
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 5.6 Quiz</h3>
-<p class="quiz-subtitle">5 questions · 80% to pass</p>
+<h3 class="quiz-title">Chapter 5.7 Quiz</h3>
+<p class="quiz-subtitle">6 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> What does <code>DISABLE_TRANSACTION_BROADCAST="1"</code> mean for a <code>send</code> CLI invocation?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CLI skips signing entirely and exits with code 0</button>
-<button class="quiz-choice" data-value="B">B) The CLI signs and broadcasts but does not wait for confirmation</button>
-<button class="quiz-choice" data-value="C">C) The CLI signs (Speculos still walks the device flow), but the rxjs broadcast operator is not added to the pipeline, so the signed bytes are printed to stdout and never submitted to a node</button>
-<button class="quiz-choice" data-value="D">D) Equivalent to passing <code>--ignore-errors</code> — broadcast is attempted, errors are swallowed</button>
-</div>
-<p class="quiz-explanation">The gate is at the rxjs operator-injection level. When the env var (or the CLI flag) is truthy, the spread expands to <code>[]</code> — no broadcast operator is part of the pipeline at all. Signing still happens; the signed bytes are emitted and the pipeline ends.</p>
-</div>
-
 <div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> You pass <code>--wait-confirmation</code> to <code>send</code> but also have <code>DISABLE_TRANSACTION_BROADCAST=1</code> in the environment. What happens?</p>
+<p><strong>Q1.</strong> Where does the canonical mobile E2E suite live in the monorepo, and where do the native build artifacts end up?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CLI errors out with "cannot wait for confirmation while broadcast is disabled"</button>
-<button class="quiz-choice" data-value="B">B) The flag is a silent no-op — <code>waitForTransactionConfirmation</code> lives inside the broadcast block, which is replaced by <code>[]</code> when broadcast is disabled, so there is no transaction to wait on; the CLI exits as soon as the signed event is printed</button>
-<button class="quiz-choice" data-value="C">C) The CLI waits for any pending transaction on the account, regardless of whether the current run broadcast one</button>
-<button class="quiz-choice" data-value="D">D) The flag forces broadcast back on, overriding the env var</button>
+<button class="quiz-choice" data-value="A">A) Tests and artifacts both live under <code>apps/ledger-live-mobile/e2e/</code></button>
+<button class="quiz-choice" data-value="B">B) Tests live under <code>e2e/mobile/</code> (peer workspace); native binaries are built under <code>apps/ledger-live-mobile/ios/build/</code> and <code>apps/ledger-live-mobile/android/app/build/</code>, and <code>detox.config.js</code> reaches across with <code>path.resolve(__dirname, "../..")</code></button>
+<button class="quiz-choice" data-value="C">C) Tests live under <code>e2e/mobile/</code> and the binaries are also produced under <code>e2e/mobile/artifacts/</code></button>
+<button class="quiz-choice" data-value="D">D) Both tests and binaries live under <code>libs/ledger-live-common/src/e2e/</code></button>
 </div>
-<p class="quiz-explanation">The confirmation wait is part of the broadcast block in the rxjs pipeline. Disable broadcast and the entire block (including the confirmation wait) is omitted. No warning is printed — this is the gotcha.</p>
+<p class="quiz-explanation">The workspace is a top-level peer (like <code>e2e/desktop/</code>), but the binaries still belong to the app project because <code>xcodebuild</code> and <code>gradlew</code> run from the app directory. The detox config bridges the gap with a relative <code>../..</code> jump.</p>
 </div>
 
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> Why is the env-restore call placed in <code>finally</code> rather than after the <code>try</code> block in <code>revokeTokenCommand</code>?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> How many POMs does the <code>Application</code> class in <code>page/index.ts</code> expose, and what mechanism delays their construction?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) If <code>approveToken()</code> throws (e.g., a Speculos screen-tap timeout), a post-try restore would never run, leaving <code>DISABLE_TRANSACTION_BROADCAST</code> stuck at <code>"0"</code> for the rest of the process and silently corrupting subsequent tests</button>
-<button class="quiz-choice" data-value="B">B) <code>finally</code> is just a stylistic preference — the two forms are equivalent</button>
-<button class="quiz-choice" data-value="C">C) The TypeScript compiler emits a warning if you place state-restoration outside <code>finally</code></button>
-<button class="quiz-choice" data-value="D">D) <code>finally</code> blocks run before the awaited promise resolves, which is what the test needs</button>
+<button class="quiz-choice" data-value="A">A) 20 POMs, constructed eagerly in the constructor</button>
+<button class="quiz-choice" data-value="B">B) 32 POMs, all constructed eagerly in the constructor</button>
+<button class="quiz-choice" data-value="C">C) 32 POMs, each wrapped in a <code>lazyInit&lt;T&gt;()</code> thunk that constructs the instance on first getter access and caches it</button>
+<button class="quiz-choice" data-value="D">D) A variable number of POMs loaded via dynamic <code>import()</code> based on the current spec's tags</button>
 </div>
-<p class="quiz-explanation"><code>finally</code> guarantees execution even on throw. Without it, an exception escapes the try block and the restore line never runs — broadcast stays enabled for the rest of the worker, and subsequent CLI calls broadcast unintentionally. This produces flake that surfaces in tests unrelated to the original failure.</p>
+<p class="quiz-explanation">32 POMs total (including <code>swap</code>, <code>swapLiveApp</code>, <code>earnV2Dashboard</code>, <code>modularDrawer</code>). Each getter calls a thunk produced by <code>lazyInit</code>, so constructing <code>new Application()</code> is cheap and instances are created on demand and cached.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Why does <code>setDisableTransactionBroadcastEnv</code> write to both <code>live-env</code>'s registry (via <code>setEnv</code>) and <code>process.env</code>?</p>
+<p><strong>Q3.</strong> A spec calls <code>await app.init({ userdata: "1AccountBTC1AccountETHReadOnlyFalse", speculosApp: AppInfos.EXCHANGE, cliCommandsOnApp: [...] })</code>. What happens between the call and the first <code>it()</code> body?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Defensive duplication for backwards compatibility with an old env-loading library</button>
-<button class="quiz-choice" data-value="B">B) <code>process.env</code> is read-only inside ESM modules, so live-env is the canonical store</button>
-<button class="quiz-choice" data-value="C">C) Only one of the two writes actually matters; the other is dead code from a refactor</button>
-<button class="quiz-choice" data-value="D">D) Internal live-common consumers read via <code>getEnv</code> (live-env's typed registry), but spawned CLI subprocesses inherit <code>process.env</code> only — both must change so that both audiences see the new value</button>
+<button class="quiz-choice" data-value="A">A) Jest reinstalls the app from scratch, then the bridge handshakes</button>
+<button class="quiz-choice" data-value="B">B) The userdata JSON is written to the device filesystem</button>
+<button class="quiz-choice" data-value="C">C) Detox directly calls the Exchange app over USB</button>
+<button class="quiz-choice" data-value="D">D) <code>Application.init</code> copies the userdata to a temp file, then <code>InitializationManager.initialize</code> launches all required Speculos devices in parallel, runs per-app then global CLI commands with retry, sets up the main Speculos device, sends <code>loadConfig</code> over the bridge, and applies default + caller-supplied feature flags</button>
 </div>
-<p class="quiz-explanation">The two registries are independent after bootstrap. Modules inside the parent process read live-env; the CLI subprocess re-bootstraps live-env from <code>process.env</code> on startup. Setting both keeps internal and subprocess consumers aligned.</p>
+<p class="quiz-explanation">The <code>@Step("Account initialization")</code> on <code>Application.init</code> shows up as the first Allure step. Everything described in D happens inside <code>InitializationManager.initialize</code> in <code>utils/initUtil.ts</code>.</p>
 </div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> A QAA test runs a revoke helper, asserts no errors are thrown, and moves on. Two test runs later, an unrelated allowance test fails because the seed has a non-zero allowance. What is the most likely root cause?</p>
+<div class="quiz-question" data-correct="A">
+<p><strong>Q4.</strong> Why does <code>jest.environment.ts</code> read <code>JEST_WORKER_ID</code> and selectively rewrite <code>detoxConfig.device</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CLI subprocess crashed silently during signing</button>
-<button class="quiz-choice" data-value="B">B) Speculos lost its Docker container between runs and replayed a stale signature</button>
-<button class="quiz-choice" data-value="C">C) The revoke broadcast either failed (no <code>✔️ broadcasted!</code> line in stdout) or was a silent no-op because <code>DISABLE_TRANSACTION_BROADCAST</code> was not flipped to <code>"0"</code> for that run — the after-the-fact <code>getEvmTokenAllowance</code> read is the only true verification of state change</button>
-<button class="quiz-choice" data-value="D">D) <code>--wait-confirmation</code> timed out and the test should retry</button>
+<button class="quiz-choice" data-value="A">A) Because <code>jest.config.js</code> sets <code>maxWorkers: 3</code> in CI, and the three <code>simulator</code>/<code>simulator2</code>/<code>simulator3</code> (or <code>emulator*</code>) entries in <code>detox.config.js</code> exist so each parallel worker can own a distinct device</button>
+<button class="quiz-choice" data-value="B">B) Because Detox requires each test to pick its device at runtime</button>
+<button class="quiz-choice" data-value="C">C) Because Jest does not support parallel execution natively</button>
+<button class="quiz-choice" data-value="D">D) It is a dead-code path; <code>maxWorkers</code> is always 1</button>
 </div>
-<p class="quiz-explanation">The verification ladder from §5.6.10 — CLI stdout, wait-confirmation, follow-up allowance read, manual revoke.cash — exists exactly because "no thrown error" is not proof of on-chain state change. If the revoke ran with broadcast disabled (env var still <code>"1"</code>, or the helper's flip-to-<code>"0"</code> was bypassed), the signed bytes were dropped and the chain was unchanged.</p>
+<p class="quiz-explanation">Workers 2 and 3 would fight over the same simulator UDID otherwise. The rewrite happens <em>before</em> <code>super.setup()</code> so Detox's own bootstrap sees the right device.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> What is the relationship between <code>specs/swap/swapBTC_NATIVE_SEGWIT_LTC.spec.ts</code>, <code>specs/swap/swap.ts</code>, and <code>specs/swap/swap.setup.ts</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Only the <code>.spec.ts</code> file runs; the others are dead code kept for historical reasons</button>
+<button class="quiz-choice" data-value="B">B) The <code>.spec.ts</code> file is a thin config bundle that calls <code>runSwapTest</code> exported by <code>swap.ts</code> (the driver). <code>swap.ts</code> calls <code>beforeAllFunctionSwap</code> from <code>swap.setup.ts</code> for shared initialisation. Only files matching <code>specs/**/*.spec.ts</code> are executed by Jest; <code>swap.ts</code> and <code>swap.setup.ts</code> are plain modules imported by specs</button>
+<button class="quiz-choice" data-value="C">C) <code>swap.ts</code> is the spec; <code>swap.setup.ts</code> configures Detox</button>
+<button class="quiz-choice" data-value="D">D) All three files must be listed in <code>jest.config.js</code>'s <code>testMatch</code> to run</button>
+</div>
+<p class="quiz-explanation">This is the thin-spec + shared-driver pattern. A new currency pair is a ~20-line <code>.spec.ts</code> file; all the test logic lives in the driver. Jest's <code>testMatch</code> glob (<code>specs/**/*.spec.ts</code>) keeps the drivers out of the run list.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q6.</strong> Which structural difference with the desktop workspace most directly explains the existence of <code>bridge/server.ts</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Mobile uses Jest, desktop uses Playwright Test</button>
+<button class="quiz-choice" data-value="B">B) Mobile writes POMs in TypeScript, desktop in JavaScript</button>
+<button class="quiz-choice" data-value="C">C) Mobile has more POMs (32 vs fewer on desktop)</button>
+<button class="quiz-choice" data-value="D">D) On desktop, the test process can poke at the Electron main process in-process (shared memory, one Node runtime). On mobile, the test process runs on the host in Node, but the app runs on a simulator/emulator with its own JS runtime and an OS sandbox between them. A WebSocket bridge is the only control plane for importing accounts, overriding feature flags, and dispatching programmatic navigation</button>
+</div>
+<p class="quiz-explanation">Every architectural decision downstream (separate <code>speculos.page.ts</code>, Redux-shaped <code>userdata/*.json</code>, the request/response <code>pendingCallbacks</code> map, the <code>ACK</code> protocol) follows from the bridge being the only way across the runtime boundary.</p>
 </div>
 
 <div class="quiz-score"></div>
-</div>
-
-<div class="chapter-outro">
-You now know what <code>DISABLE_TRANSACTION_BROADCAST</code> does, where it is read, where it is written, and why the try/finally restore is non-negotiable. The next chapter zooms back out from the single env var to the full daily workflow — pick up a ticket, orient yourself in the codebase, choose the right change shape, iterate locally, and ship a PR. The broadcast discipline you just learned is one of the moving parts; the workflow is the assembly line that keeps it moving.
 </div>
 
 ---
 
-## Daily CLI Workflow
+## Running & Debugging Mobile E2E Tests
 
 <div class="chapter-intro">
-Chapters 5.1 through 5.6 covered the architecture, the primitives, the env discipline, and the moving parts. This chapter is the assembly line: the exact, repeatable sequence you will follow every time a CLI-related QAA ticket lands in your queue. It mirrors the daily-workflow chapters in Parts 3 and 4 (desktop and mobile) but tracks the realities of CLI work — the legacy <code>apps/cli</code>, the five-layer architecture, the Speculos lifecycle, and the four change shapes that cover almost every ticket. Follow it every time. Even small tickets benefit from the recon pass; especially small tickets, because that is when you are most tempted to skip it and most likely to misjudge scope.
+Chapters 34 and 35 taught you how Detox finds elements, how the bridge mocks a device, and how a spec file is structured. Chapter 5.7 grounded you in the actual repository layout. This chapter turns that knowledge into muscle memory: every flag on every command, every environment file toggle, every way a mobile test can go wrong — and exactly how to recover. By the end you should be able to boot a simulator, reproduce a failing scheduled CI run on your laptop, attach a debugger, and read the artifacts like a native speaker.
 </div>
 
-### 5.7.1 Workflow at a Glance
+### 5.8.1 Prerequisites Recap
 
-Every CLI ticket follows the same backbone:
+Before running a single `detox test`, confirm the toolchain from Chapter 5.4 is in place. Unlike desktop Playwright — where launching the Electron binary is essentially self-contained — mobile E2E depends on **three** external processes that must all be alive simultaneously: the simulator/emulator, the Metro bundler (for debug builds), and the Detox test-host process.
 
-```
-pick a ticket
-   │
-   │ read AC, find linked B2CQA, identify scope
-   ▼
-orient yourself (5-min recon)
-   │
-   │ where does the change land in the 5-layer model?
-   ▼
-decide change shape
-   │  (one of four — see 5.7.3)
-   ▼
-branch from develop
-   │
-   │ support/qaa-XXX-... or feat/qaa-XXX-...
-   ▼
-iterate locally
-   │
-   │ tight inner loop on Speculos, sub-minute per turn
-   ▼
-smoke against a real device (only if needed)
-   │
-   │ REMOTE_SPECULOS=true or USB-connected Ledger
-   ▼
-typecheck / lint / clean up commits
-   │
-   ▼
-PR + reviewer routing
-```
+**iOS checklist (on macOS only):**
+- Xcode 15+ installed (`xcode-select -p` should point to `/Applications/Xcode.app/Contents/Developer`)
+- Command-line tools: `xcode-select --install`
+- A booted simulator matching the Detox config: typically `iPhone 15` on iOS 17.x. List them with `xcrun simctl list devices`.
+- `applesimutils` installed (`brew tap wix/brew && brew install applesimutils`) — Detox uses this to set permissions.
+- CocoaPods synced (Chapter 5.4 `pod install` in `apps/ledger-live-mobile/ios`).
 
-The only step that varies in size is "decide change shape". The rest is the same shape whether you are adding a one-line spec change or a brand-new typed helper. Treat the backbone as muscle memory and reserve mental bandwidth for the change-shape decision and the actual implementation.
+**Android checklist (macOS or Linux):**
+- Android Studio installed, or at least the `cmdline-tools` package via `sdkmanager`.
+- An AVD created matching the config name — typically `Android_Emulator` API 35 `pixel_7_pro`.
+- `ANDROID_HOME` exported and `$ANDROID_HOME/platform-tools` on `PATH` (so `adb` resolves).
+- Emulator booted and visible: `adb devices` should list exactly one device in `device` state.
 
-### 5.7.2 Orientation — The 5-Minute Recon
+**Universal checklist:**
+- `pnpm` installed and `pnpm i` run at the monorepo root.
+- `pnpm e2e:mobile i` (Chapter 5.7 explained why the `e2e/mobile/` workspace pulls its own Detox + Jest deps).
+- Speculos coin apps accessible — either a local `COINAPPS` directory or the `selectMockDevice` bridge helper (see 37.10).
 
-Before writing a single line of code, run the recon. Five minutes spent here saves hours of going down the wrong path.
+> **Tip:** Run `pnpm e2e:mobile exec detox --version` from the repo root before anything else (or `cd e2e/mobile && pnpm exec detox --version`). If that command fails, nothing else will work. A non-zero exit here almost always means `pnpm i` was never run inside the `e2e/mobile/` workspace.
 
-**Step 1 — Branch off `develop`.** Never `main`. Never the previous feature branch.
+A running simulator or emulator is **not optional**. Detox does not spin one up for you the way Playwright spins up Chromium. If you forget this step you will see `DetoxRuntimeError: Failed to run application on the device` within the first ten seconds.
+
+### 5.8.2 Build Commands in Depth
+
+Detox separates **build** from **test**. The build step compiles a binary wired for Detox (`detox.frameworkBundle` injected, testability enabled). The test step installs and drives that binary. You almost never want to rebuild on every run — it takes 5–15 minutes for iOS, 3–8 minutes for Android.
+
+#### iOS debug build
 
 ```bash
-git checkout develop
-git pull
-git checkout -b support/qaa-XXX-add-revoke-helper
+# From the repo root (recommended):
+pnpm e2e:mobile run build:ios:debug
+
+# Or, from inside the E2E workspace:
+cd e2e/mobile && pnpm build:ios:debug
+
+# Or, directly via Nx (what CI ultimately runs):
+nx run live-mobile:e2e:build -- --configuration ios.sim.debug
 ```
 
-**Step 2 — Refresh dependencies.** `pnpm i` is typically a no-op when no `package.json` has changed, but it is cheap and it surfaces lockfile drifts before they bite you mid-iteration.
+**What each piece does:**
+- `pnpm e2e:mobile` — root-level alias defined in the monorepo `package.json` (`"e2e:mobile": "pnpm --filter ledger-live-mobile-e2e-tests"`). It targets the `e2e/mobile/` workspace.
+- `build:ios:debug` — script in `e2e/mobile/package.json`. It delegates to `pnpm --filter live-mobile run e2e:build --configuration ios.sim.debug`, which ultimately runs `detox build -c ios.sim.debug` with `e2e/mobile/detox.config.js` as the config.
+- `ios.sim.debug` — a configuration defined in `e2e/mobile/detox.config.js`. The name encodes platform (`ios`), target (`sim` = simulator), and variant (`debug`).
+
+A **debug** build is compiled with Metro serving JS at runtime. Reloads are fast (edit code → `r` in Metro → hot reload), but you pay the cost of a live Metro server on port 8081 during the test run.
+
+#### iOS release build
 
 ```bash
-pnpm i
+pnpm e2e:mobile run build:ios
+# equivalent to: nx run live-mobile:e2e:build -- --configuration ios.sim.release
 ```
 
-**Step 3 — Read the ticket end-to-end.** Twice. The first pass to get the gist; the second pass to spot the precise verb in the AC. "Add a helper" and "wire an existing helper into a fixture" sound similar but land in different layers. The verb tells you which layer.
+A **release** build bundles JS into `main.jsbundle` at build time, inlines it into the `.app`, and runs Hermes bytecode. No Metro needed. This is what CI uses because it is faster per-test (no Metro round-trips) and more representative of production.
 
-**Step 4 — Identify the layer.** Use the table from Chapter 5.4 as a mental sieve:
+Use `release` when:
+- You are debugging a flaky test that you suspect is timing-related.
+- You want to reproduce a CI failure exactly.
+- You have finished iterating and want a final validation pass.
 
-| Verb in AC | Likely layer |
-|---|---|
-| "Add a CLI command for X" | Layer 1 (apps/cli) + Layer 2 + Layer 3 |
-| "Add a typed helper for X" | Layer 3 (`cliCommandsUtils.ts`) |
-| "Wire helper into the swap POM" | Layer 5 (`swap.page.ts`) |
-| "Add a regression test for X" | Spec file only (`tests/specs/...`) |
-| "Fix the device-tap dance for X" | Layer 4 (`families/evm.ts`) |
+Use `debug` when:
+- You are authoring a new test and want to tweak the spec and re-run without rebuilding.
+- You want to use React DevTools or the Metro logs to inspect app state.
 
-Most tickets land squarely in one layer. Tickets that span multiple layers (a brand-new CLI command, e.g.) are the ones to flag with your lead before starting.
-
-**Step 5 — Open the relevant file.** Whatever layer you identified, open the file in your editor and skim it for context. For most QAA tickets, that means:
+#### Android builds
 
 ```bash
-code libs/ledger-live-common/src/e2e/cliCommandsUtils.ts
+pnpm e2e:mobile run build:android:debug
+pnpm e2e:mobile run build:android         # release
 ```
 
-Read the existing helpers. Note the naming conventions. Note the curried-function pattern (`liveDataCommand` returns a function that takes `userdataPath`). Note that `approveTokenCommand` and `revokeTokenCommand` set broadcast on, while `liveDataCommand` does not (because liveData has no on-chain side-effect).
+Same split: `debug` uses Metro, `release` uses a bundled APK. The emulator config expects an AVD named exactly `Android_Emulator` — look at `e2e/mobile/detox.config.js` for the `avdName` field.
 
-**Step 6 — Find existing usage.** Search for the helpers you will likely interact with:
+#### The prerelease variant
 
 ```bash
-grep -rn "approveTokenCommand\|isTokenAllowanceSufficientCommand\|revokeTokenCommand" e2e/
+nx run live-mobile:e2e:build -- --configuration ios.sim.prerelease
+nx run live-mobile:e2e:build -- --configuration android.emu.prerelease
 ```
 
-Read three or four usage sites. The patterns repeat — most consumers are POM methods in `swap.page.ts` or fixture entries in `tests/specs/*.spec.ts`. After fifteen minutes of grep + read, you have a mental map of where your change fits.
+`prerelease` is a third variant used for pre-release validation against production services. It compiles the app with `ENVFILE=apps/ledger-live-mobile/.env.mock.prerelease` (see below), which points Firebase Remote Config at the **production** project instead of staging. You rarely need this locally; CI uses it when `production_firebase: true` is set on the workflow (Chapter 7.3.12).
 
-> **Tip:** if a CLI helper does not yet exist for the operation you are automating, do not invent one in the spec or the POM. Add the helper to `cliCommandsUtils.ts` first, then call it from the higher layers. Specs that build their own CLI commands inline are a maintenance bomb.
+#### The `ENVFILE` toggle
 
-### 5.7.3 Picking the Change Shape
+Every React Native build reads an `.env` file at compile time via `react-native-config`. Detox variants pick different env files:
 
-Almost every CLI-related QAA ticket maps to one of four change shapes. Identifying yours up front is the single most important framing decision of the day.
+| Variant | ENVFILE | Firebase | Intended use |
+|---------|---------|----------|--------------|
+| `*.debug`, `*.release` | `.env.mock` | Staging project | Normal dev & scheduled CI |
+| `*.prerelease` | `.env.mock.prerelease` | Production project | Release gating, dogfood validation |
 
-#### Shape A — New CLI command needed
+**What changes downstream when you flip the file:**
+- `FIREBASE_*` keys (API key, project ID, app ID) swap to production.
+- Remote Config feature flags are read from the production namespace — a flag disabled in staging may be enabled in prod or vice versa.
+- Analytics endpoints change (Segment write keys, etc.), though the E2E harness typically stubs these.
+- The bundle ID of the installed `.app` / `.apk` changes (e.g., `com.ledger.live.dev.detox` vs `com.ledger.live.detox.prerelease`). This matters because the test can only drive the binary whose bundle ID matches the Detox config.
 
-The ticket needs an operation that no `apps/cli` command supports today. Example: a hypothetical "register a domain on ENS" ticket would need a brand-new `apps/cli/src/commands/blockchain/registerEnsDomain.ts` because none of the 16 existing commands cover it.
+> **Warning:** If you rebuild with a different `ENVFILE` without uninstalling the previous binary, the simulator may still launch the old one — Detox resolves apps by bundle ID. Run `xcrun simctl uninstall booted <bundleId>` between variant switches, or simply `device.uninstallApp()` at the start of a spec.
 
-**Layers touched:** 1 (CLI), 2 (engine helper in `runCli.ts`), 3 (typed wrapper in `cliCommandsUtils.ts`), and possibly 4 (if the new operation needs a new device-tap helper).
+#### Build caching
 
-**Who to talk to first:** the wallet-ci team. They own `apps/cli`. New CLI commands need their review and there is often architectural prior art ("this overlaps with `signMessage` — extend that instead of adding a new command"). Do not start implementing without that conversation; you will rewrite half of it.
+The native build artifact is large (several hundred MB) and its content is deterministic per the combination of:
+- The `ios/` or `android/` source tree (hashed).
+- The selected variant.
+- The `ENVFILE` content.
 
-**Frequency:** rare. Maybe one or two tickets per quarter.
+CI keys its S3 cache off `hashFiles('apps/ledger-live-mobile/ios')` — locally, you get the same effect by not touching native code between runs. If you only edit TypeScript specs, the previously-built `.app` or `.apk` is reused and you just re-run tests.
 
-#### Shape B — New typed helper needed
+### 5.8.3 Test Execution
 
-The CLI command exists but no `cliCommandsUtils.ts` wrapper does. The senior's QAA-615 work — adding `revokeTokenCommand` — is exactly this shape. The underlying `send --mode revokeApproval` already worked; the helper layer needed a new typed entry point.
-
-**Layers touched:** 3 only.
-
-**Who to talk to first:** wallet-xp owns `cliCommandsUtils.ts` (it lives in `libs/ledger-live-common/src/e2e/`). A passing review here is straightforward as long as the new helper follows the existing naming and try/finally conventions.
-
-**Frequency:** common. Most "automate this on-chain operation" tickets land here.
-
-#### Shape C — New POM method needed
-
-The CLI command and helper both exist but the POM method that orchestrates Speculos + helper for a particular UI flow does not. Example: a swap-cleanup hook that needs to revoke an allowance before each test. The senior's `revokeTokenApproval` POM method on `swap.page.ts` is exactly this shape.
-
-**Layers touched:** 5 only (the relevant page object). Possibly a fixture file in `e2e/desktop/tests/fixtures/` if the new method should be invoked declaratively from `cliCommands: [...]`.
-
-**Who to talk to first:** the team that owns the page (wallet-xp for `swap.page.ts`; PTX for swap-specific fixtures).
-
-**Frequency:** common. Pairs naturally with shape B — sometimes the same PR adds the helper *and* the POM method.
-
-#### Shape D — Just a new spec using existing POMs
-
-The CLI command, helper, and POM method all exist. You are writing a regression spec under `tests/specs/` that consumes them. This is the lowest-cost change shape and the most common.
-
-**Layers touched:** spec file only.
-
-**Who to talk to first:** the test owners for the relevant area (wallet-xp for desktop e2e; mobile QA for mobile e2e).
-
-**Frequency:** very common. The bread and butter of QAA work.
-
-#### The decision tree
-
-```
-Does the operation exist as a CLI command?
-   no  → Shape A (new CLI command, talk to wallet-ci)
-   yes ↓
-Does a cliCommandsUtils.ts helper wrap it?
-   no  → Shape B (new helper)
-   yes ↓
-Does the relevant POM expose a method that calls the helper?
-   no  → Shape C (new POM method)
-   yes ↓
-Are you adding new test coverage that consumes existing POM methods?
-   yes → Shape D (spec only)
-```
-
-Walk the tree top-to-bottom. When you reach a "no", stop — that is your shape. Do not pre-emptively add layers below your stopping point unless the ticket explicitly needs them.
-
-### 5.7.4 Local Iteration Loop
-
-Once you have branched, identified the shape, and started writing, your inner loop is what determines how productive the day is. The target is **sub-minute per iteration** for spec changes and **under two minutes** for changes that touch live-common (which require a TypeScript rebuild of the library).
-
-The canonical command to run a single test that uses the CLI:
+Once a build exists, test execution is invoked from inside the `e2e/mobile/` workspace (or via `pnpm e2e:mobile run ...` from the repo root):
 
 ```bash
-cd e2e/desktop
-pnpm run test:e2e --grep "B2CQA-XXXX"
+cd e2e/mobile
+pnpm test:ios:debug
+pnpm test:android:debug
+# equivalently from the repo root:
+pnpm e2e:mobile run test:ios:debug
 ```
 
-`--grep` is Playwright's filter against the test title. Every test title carries the B2CQA tag, so this is the single-test filter you use 90% of the time. Variants:
+The script expands to `pnpm detox test --configuration <config> [...]` with `detox` resolved against `e2e/mobile/` (so the workspace's `detox.config.js` is picked up). Anything after the script passes through to Detox and thence to Jest.
 
-- `--debug` — opens Playwright Inspector, lets you step through actions, see DOM at each step. Good for the first run on a new test.
-- `--ui` — interactive UI mode. Tree view of all tests, click to run, watch artifacts in real-time. Good for exploratory debugging.
-- `--reuse-context` — reuses the Electron context across tests if you have multiple in the grep. Saves ~30s per spec on Speculos boot but can mask state-leak bugs, so use only when the tests are independent.
-- `--workers=1` — force serial. Useful when you suspect a Speculos port collision.
+#### Filtering which tests run
 
-When the test runs, three things happen behind the scenes:
+Jest supplies the selection primitives; Detox just forwards them. The examples below assume you are inside `e2e/mobile/` — prepend `pnpm e2e:mobile run` if running from the repo root.
 
-1. Playwright starts Electron (the desktop binary).
-2. The fixture engine sees `cliCommands: [...]` in the test data and runs each curried function. If your helper is in there, this is when it fires.
-3. The test body runs; POM methods that call CLI helpers fire as the test progresses.
-
-For the first run on a fresh repo, expect ~30 seconds of Speculos Docker container boot. Subsequent runs reuse the container and start in 2–5 seconds.
-
-> **Verify:** the exact root pnpm script for desktop e2e tests is `pnpm desktop e2e:test --grep ...` from the monorepo root, or the path-prefixed `cd e2e/desktop && pnpm run test:e2e --grep ...` from the workspace. Both invoke the same Playwright config. If neither resolves, check `e2e/desktop/package.json` for the current script name on your branch.
-
-#### Watching artifacts in real-time
-
-Each run writes to `e2e/desktop/artifacts/<run-id>/`. Tail it in a second terminal:
+**By test name (`-t` or `--testNamePattern`):**
 
 ```bash
-cd e2e/desktop
-ls -lt artifacts/ | head -5
-# pick the latest run-id
-tail -f artifacts/<run-id>/test-name/output.log
+pnpm test:ios:debug -- -t "Portfolio"
+pnpm test:ios:debug -- --testNamePattern "B2CQA-604"
 ```
 
-For CLI invocations specifically, the spawn engine (`runCli.ts`) prints `[CLI] Executing: ledger-live <command>` to stderr; that line shows up in the run log and is your single-best signal that the CLI is being invoked with the args you expect.
+This matches anything in the concatenation of `describe` + `it` titles. Since every `it()` in the suite embeds a `$TmsLink("B2CQA-604")` tag in its title (Chapter 5.7.5), `-t "B2CQA-604"` is the single-ticket filter you will use most often.
 
-#### When the loop is broken
-
-If a single test takes more than two minutes per iteration, something is wrong. Common culprits:
-
-- **Speculos won't start.** Docker daemon is down, or a previous Speculos container is wedged on the port. `docker ps` and `docker rm -f $(docker ps -aq --filter ancestor=ghcr.io/ledgerhq/speculos)` clears it.
-- **Live-common changes not picked up.** If you edited `cliCommandsUtils.ts`, the desktop test imports the compiled output. `pnpm common:build` (or `pnpm -w build:libs` depending on which scripts your branch has) recompiles.
-- **You are accidentally running the full suite.** `--grep` requires a string; if you forget the value Playwright runs everything. Always quote the B2CQA tag.
-
-### 5.7.5 Running a Single Test That Uses the CLI
-
-The most common iteration command, in full:
+**By file path (`--testPathPattern`):**
 
 ```bash
-cd e2e/desktop
-pnpm run test:e2e --grep "B2CQA-1234"
+pnpm test:ios:debug -- --testPathPattern specs/portfolio
+pnpm test:ios:debug -- --testPathPattern "addAccount|send"
 ```
 
-What you should see, in order:
+This is a regex against the absolute path of each spec file. It runs before the test files are loaded, so it is cheaper than `-t` when you know you only want a subset.
 
-1. `[CLI] Executing: ledger-live liveData --currency ethereum ...` — the fixture seeding the account.
-2. The Electron window opening (or running headless, depending on your config).
-3. Optionally `[CLI] Executing: ledger-live tokenAllowance ...` if the test pre-checks an allowance.
-4. The Speculos device window — either as a Docker container's HTTP UI on a local port, or virtualised entirely.
-5. `[CLI] Executing: ledger-live send --mode revokeApproval ...` if the test invokes a revoke.
-6. `✔️ broadcasted! optimistic operation: { hash: ... }` if broadcast was enabled.
-7. The spec asserting on UI state and either passing or failing.
+**Combining them:**
 
-If you do not see step 1, the fixture wiring is broken. If you see step 1 but not step 2, Electron failed to start. If you see step 5 but not step 6, the broadcast did not return — likely a Speculos device-tap timeout or a node connectivity issue. Each missing step points to a different layer; learning to read the sequence is half the debugging skill.
-
-#### Docker prerequisite
-
-Speculos runs in Docker by default. If Docker is not running, the test fails almost immediately with a transport-registration error. Start Docker Desktop (or `dockerd` on Linux) before iterating. The first Speculos boot pulls the image; subsequent boots reuse it.
-
-### 5.7.6 Smoke Against a Real Device
-
-Most QAA work stays on Speculos. But before merging changes that affect signing flows for high-stakes coins (ETH mainnet via testnet, BTC, etc.), run a smoke against a real device once. The pyramid:
-
-1. **Speculos local Docker** — the everyday default. Fast, deterministic, isolated.
-2. **Speculos remote pool** — `REMOTE_SPECULOS=true` plus `SPECULOS_ADDRESS=<pool-host>:<port>`. Same protocol, different host. Useful when your laptop's Docker is misbehaving or when you want to mirror what CI does. Most of the time, identical-looking results to local Speculos.
-3. **Real Ledger device wired via USB.** The final smoke. Open Ledger Live's developer-mode "use real device" path (or set the appropriate env to bypass Speculos), connect a Nano X / S+ / Stax / Flex with the relevant app installed, and run the same test. The device will physically buzz and ask for confirmation; you tap; the test should pass identically to Speculos.
-
-Real-device smokes are slow (you are physically pressing buttons) and not scriptable — they are a final manual sanity check, not part of the inner loop. Do them once before PR, not once per commit.
-
-> **Tip:** the most common surprise on real-device smoke is screen-text mismatch. Speculos uses the same `DeviceLabels` registry as a real device, but firmware-version drift can introduce wording differences. If your test passes on Speculos and fails on a real device with a `pressUntilTextFound` timeout, the device is on a different app version. Update the app on the device (Ledger Live's Manager) and retry.
-
-### 5.7.7 Reading Existing Usage
-
-The fastest way to learn the right shape for your change is to read three or four existing examples. Open these specs and scan the `cliCommands: [...]` lines:
-
-**`e2e/desktop/tests/specs/earn.v2.spec.ts`** (around line 86):
-
-```ts
-test.describe.configure({ mode: "serial" });
-test.use({
-  cliCommands: [liveDataCommand(account)],
-});
+```bash
+pnpm test:ios:debug -- --testPathPattern specs/swap/otherTestCases -t "swapExportHistoryOperations"
 ```
 
-The fixture engine sees `liveDataCommand(account)` (the curried function). When the test starts, the engine calls it with the userdataPath argument the fixture supplies. The result is a seeded account ready in the test environment before the test body runs.
+Runs only spec files under `specs/swap/otherTestCases/`, and within those only `it()` names matching `/swapExportHistoryOperations/`.
 
-**`e2e/desktop/tests/specs/delegate.spec.ts`** (around line 110):
+**Excluding paths (`--testPathIgnorePatterns`):**
 
-Same pattern, different account. The test data is different but the fixture mechanic is identical. Reading multiple specs that use the same helper makes the contract obvious — `liveDataCommand` always returns a curried function, the fixture engine always hands it `userdataPath`.
-
-**`e2e/desktop/tests/specs/provider.swap.spec.ts`** (line 11):
-
-```ts
-test.use({
-  cliCommands: [liveDataWithAddressCommand(account)],
-});
+```bash
+pnpm test:ios:debug -- --testPathIgnorePatterns specs/experimental
 ```
 
-Same shape, but the helper is `liveDataWithAddressCommand` — same as `liveDataCommand` plus it caches the device address on the `account` object. Useful when the test body needs the address (`account.address`) without making a separate `getAddress` call.
+Handy when a directory is known-broken and you want to skip it wholesale without editing `jest.config.js`.
 
-**`e2e/desktop/tests/page/swap.page.ts`**:
+#### Worker and lifecycle flags
 
-```ts
-async revokeTokenApproval(fromAccount, provider) {
-  // ...
-  const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-  // ...
+```bash
+pnpm test:ios:debug -- --maxWorkers=1 --cleanup --reuse
+```
+
+- `--maxWorkers=1` — run tests serially in a single process. This is actually the **default** (and only supported) configuration for mobile E2E; the codebase sets `maxWorkers: 1` in `jest.config.js` because Detox can only drive one device per worker and the bridge port would collide with parallel workers. CI achieves parallelism across **shards**, not workers (Chapter 8.3).
+- `--cleanup` — uninstall the app at the end of the run. Without this, the app stays on the simulator and subsequent runs start faster (but may see stale Redux persist state).
+- `--reuse` — skip the install step and reuse the binary already on the device. Fastest iteration mode when nothing has been rebuilt.
+- `--forceExit` — kill Jest's process even if there are unhandled handles. Used in CI to avoid timing out on lingering WebSocket connections.
+- `--retries 2` — retry a failed `it()` up to 2 times. The CI orchestrator sets this; locally you usually want `0` so you see the true failure.
+- `--record-logs failing`, `--take-screenshots failing` — Detox artifact policies. Keep logs and screenshots only for failing tests (see 37.6).
+- `--headless` — boot the simulator/emulator without a visible window. CI uses this; locally you probably want the window so you can watch.
+- `--loglevel warn` — Detox log verbosity. Values: `trace`, `debug`, `info`, `warn`, `error`. For a frustrating failure, bump to `trace` and grep the output.
+
+#### Putting it together
+
+A realistic local iteration loop on a single ticket:
+
+```bash
+# One-time: build (or rebuild if native code changed)
+pnpm e2e:mobile run build:ios:debug
+
+# Many times: run just the failing test with verbose logging and no retries
+cd e2e/mobile
+pnpm test:ios:debug \
+  -- -t "B2CQA-604" \
+  --reuse \
+  --retries 0 \
+  --loglevel trace \
+  --record-logs all \
+  --take-screenshots all
+```
+
+### 5.8.4 The `scripts/e2e-ci.mjs` Orchestrator
+
+Opening the workflow YAML you saw in Chapter 5.7, the actual command every shard runs is not `detox test` directly — it is a `zx` script at `apps/ledger-live-mobile/scripts/e2e-ci.mjs` (the script still lives under the mobile app, not in the E2E workspace, because it orchestrates native-build caching that is app-local). Read it verbatim; it is small (~210 lines) and explains itself:
+
+```js
+#!/usr/bin/env zx
+// apps/ledger-live-mobile/scripts/e2e-ci.mjs (excerpt)
+let platform, test, build, bundle, bundleSize;
+let testType = "mock";
+let cache = true;
+let shard = "";
+let target = "release";
+let filter = "";
+let outputFile = "";
+```
+
+**Flags it accepts:**
+
+| Flag | Meaning |
+|------|---------|
+| `-p <ios\|android>` | Which platform to target. Required. |
+| `-t` | Run the `test` step. |
+| `-b` | Run the `build` step (native compile). |
+| `--bundle` | Run the JS bundling step (produces `main.jsbundle`). |
+| `--bundle-size` | Produce a minified bundle for size reporting only (not used for tests). |
+| `--cache / --no-cache` | On iOS, whether to copy the JS bundle into the cached `Release-iphonesimulator` directory so subsequent cache hits are valid. |
+| `--e2e` | Switch `testType` from `mock` (default) to `e2e` — flips between the mock-bridge test script and the real-Speculos test script. |
+| `--shard N/M` | Forwarded to Detox/Jest as `--shard N/M`. |
+| `--production` | Switch the Detox target from `release` to `prerelease`. |
+| `--filter <pattern>` | Not forwarded directly; present so the orchestrator can strip it from trailing args. |
+| `-o / --outputFile <path>` | Appends `--json --outputFile=<path>` to the Jest command for timing-data collection. |
+
+**How it invokes Detox.** The production-test call shells out to the `e2e/mobile/` workspace scripts — conceptually:
+
+```js
+await $`pnpm e2e:mobile run ${testType === "e2e" ? "test" : "mock:test"}:ios:${target}\
+    --loglevel warn \
+    --record-logs failing \
+    --take-screenshots failing \
+    --forceExit \
+    --headless \
+    --retries 2 \
+    --cleanup \
+    ${filteredArgs}`.nothrow();
+```
+
+> **Verify:** the exact shape of the command and the `mock:test` / `test:ios` script split can drift between refactors — when you need the literal command line a shard runs, open `apps/ledger-live-mobile/scripts/e2e-ci.mjs` on the branch you care about.
+
+`filteredArgs` is every trailing positional argument that isn't one of the recognized flags — in practice, the list of spec file paths computed by the sharding step (Chapter 8.3.5).
+
+**The mock/e2e split.** The `mock` path uses the bridge mock device (no Speculos required — see Chapter 5.6 and 37.10). The `e2e` path uses a real Speculos container. CI almost always uses `--e2e` because scheduled runs exercise real device flows; `mock` is kept as an option for speed-critical smoke passes.
+
+**The bundle-then-build dance.** Notice `bundle_ios_with_cache` copies `main.jsbundle` into the already-built `Release-iphonesimulator/` directory. This lets CI cache the native build (which is expensive and rarely changes) and only re-bundle JS (which is cheap and changes every commit).
+
+**Metro and the bridge.** For `release`/`prerelease` builds, there is no Metro — the JS is already inside the `.app`/`.apk`. The Detox bridge still runs (that is the WebSocket that ships mock device commands from spec to app), on port 8099 by default. For `debug` builds, Metro runs on 8081 and the bridge on 8099 — two distinct processes with two distinct ports.
+
+### 5.8.5 Debugging Cookbook
+
+This section is a field guide. Each entry is a symptom, a diagnosis, and the exact command or code change that resolves it.
+
+#### Symptom: "App is busy"
+
+```
+DetoxRuntimeError: Timed out while waiting for the app to become idle
+```
+
+**Diagnosis:** Detox synchronizes with the app — it won't execute the next action until the JS thread, animations, pending network requests, and timers have all settled. If your app has a never-closing WebSocket or a repeating poller, Detox waits forever.
+
+**Fix:** Blacklist the URL or disable synchronization locally.
+
+```typescript
+// Globally blacklist a URL from the sync check
+await device.setURLBlacklist([".*/polling/.*", ".*/sse/.*"]);
+
+// Or disable synchronization for a block of actions
+await device.disableSynchronization();
+try {
+  await Tap(button).click();
+  await AnimationThatTakesForever.waitFor({ timeout: 5000 });
+} finally {
+  await device.enableSynchronization();
 }
 ```
 
-This is the **other** way to consume CLI helpers — directly from a POM method, not through the fixture engine. Use this shape when the CLI call must happen in the middle of a test (e.g., between assertions on UI state), not just as setup. The senior's QAA-615 commit added exactly this pattern.
+See Detox's [synchronization troubleshooting guide](https://wix.github.io/Detox/docs/troubleshooting/synchronization) — the full list of strategies includes disabling specific modules (`device.setSyncSettings`) and whitelisting vs blacklisting.
 
-### 5.7.8 Writing Tests as You Go (TDD-Lite)
+#### Symptom: "Element not found"
 
-Once you know the shape, you can iterate effectively in a TDD-lite loop:
+```
+Error: Test Failed: No elements found for “MATCHER(id == 'send-button')”
+```
 
-1. **Stub the POM method first.** Add the method signature and body (with a `console.log` inside) to the POM file.
-2. **Write the spec calling it.** Or modify the existing spec to call it.
-3. **Run with `.only` to isolate.** Playwright's `test.only` (or `test.describe.only`) limits the run to one test — combine with `--grep` for a stable single-target run.
-4. **Watch it fail.** The console.log from step 1 should appear in stdout. If it does not, the wiring (import, instantiation, fixture) is broken. Fix that before doing any real work.
-5. **Fill in the POM method.** Replace `console.log` with the actual `revokeTokenCommand(...)` call (or whatever your helper is).
-6. **Watch it go green.** If the test now passes, you are done — refactor as needed and remove `.only`.
+**Diagnosis:** The `testID` you expect isn't on the screen. Either (a) the screen is not rendered yet, (b) the element uses a different `testID`, or (c) it's inside a `FlatList` that hasn't virtualized it into view yet.
 
-The advantage over write-everything-then-run is that you isolate the wiring problem (import, fixture, instantiation) from the logic problem (what the CLI actually does). Two small failures are much faster to debug than one big one.
+**Fix:** Dump the view hierarchy at the moment of failure.
 
-> **Warning:** Always remove `test.only` before pushing. CI runs it as you wrote it, and a stray `.only` will reduce the entire run to one test, which can mask real failures elsewhere. Most repos lint against `.only` in CI; the lint catches it before it merges, but the failed CI run still wastes time.
+```typescript
+// In the failing test, just before the action:
+const xml = await device.generateViewHierarchyXml();
+console.log(xml);
+// Or to a file:
+await device.generateViewHierarchyXml({ path: "/tmp/hierarchy.xml" });
+```
 
-### 5.7.9 Codegen, Lint, Typecheck
+The XML contains every `testID`, `accessibilityLabel`, and `text` value currently on screen. Grep it for a partial match. If the element is genuinely missing, the preceding action must not have completed — walk back through the spec.
 
-Unlike wallet-cli (which has a `bunli generate` step), the legacy `apps/cli` has **no codegen step** in the QAA workflow. There is a build step (`pnpm --filter live-cli build`, ultimately `zx ./scripts/build.mjs`) that you run only if you actually edited an `apps/cli` source file. For changes confined to `cliCommandsUtils.ts`, page objects, fixtures, or specs, no rebuild is needed — TypeScript compiles on demand via the test runner's transformer.
+If the element is offscreen in a list:
 
-Before pushing, run the standard quality checks:
+```typescript
+await waitFor(element(by.id("item-42")))
+  .toBeVisible()
+  .whileElement(by.id("scrollable-list"))
+  .scroll(200, "down");
+```
+
+#### Symptom: Metro port collision
+
+```
+error Metro is already running on port 8081
+```
+
+**Diagnosis:** A previous run left Metro alive, or another project is using 8081.
+
+**Fix:**
 
 ```bash
-# Workspace-local typecheck
-pnpm --filter ledger-live-common typecheck
-pnpm --filter ledger-live-desktop-e2e typecheck
-
-# Lint your changed files
-pnpm lint
+# Find the process
+lsof -i :8081
+# Kill it
+kill -9 <pid>
+# Or kill every node process listening on 8081
+lsof -t -i :8081 | xargs kill -9
 ```
 
-The exact filter names vary by branch; check `package.json` at the workspace root for the canonical scripts. The typecheck is non-negotiable — it catches the kind of error (a renamed type, a missing export) that would otherwise blow up CI five minutes after you push.
-
-> **Verify:** if `pnpm typecheck` does not exist as a root-level script on your branch, run the workspace-specific equivalents instead. The point is to typecheck both `live-common` (where helpers live) and `desktop-e2e` (where they are consumed) before opening a PR.
-
-### 5.7.10 Commit and PR
-
-Commits follow the global Conventional Commits convention (see `git-workflow.md` in the global rules). For CLI work, the typical scopes are `desktop`, `mobile`, `coin`, or `common`.
-
-The senior's commit on QAA-615 was in this style:
-
-```
-test(desktop): add token approval command in e2e
-```
-
-The verb is imperative, lowercase. The scope identifies the area (`desktop` since the change ultimately serves the desktop e2e suite). The description names the new capability concretely.
-
-**Branch naming:**
-
-| Prefix | When to use |
-|---|---|
-| `support/qaa-XXX-...` | Test helpers, refactors, fixture additions, infra tweaks |
-| `feat/qaa-XXX-...` | New test capability that did not exist before (e.g., the first-ever revoke helper) |
-| `bugfix/qaa-XXX-...` | Fixing a flake, fixing a broken existing helper |
-| `chore/qaa-XXX-...` | Tooling, configs, dependency bumps |
-
-Names use kebab-case. Keep them short and action-oriented. For QAA-615, `support/qaa_add_revoke_token` (the senior used underscores; the global convention prefers kebab — pick what your team's recent branches use).
-
-**Pushing and opening a PR:**
+For Android specifically, even if Metro is running on the host, the emulator must be told to forward its own `localhost:8081` to the host's. This happens automatically when Detox installs a debug APK, but if you sideload manually:
 
 ```bash
-git push -u origin support/qaa-XXX-add-revoke-helper
-gh pr create --base develop --title "test(desktop): add revoke token command in e2e" \
-  --body "$(cat <<'EOF'
-## Summary
-- Adds `revokeTokenCommand` to `cliCommandsUtils.ts`.
-- Adds `revokeTokenApproval` POM method to `swap.page.ts`.
-- Wires QAA-615 acceptance test.
-
-## Test plan
-- [x] `pnpm test:e2e --grep "B2CQA-XXXX"` passes locally on Speculos
-- [x] Typecheck passes for `ledger-live-common` and `desktop-e2e`
-- [x] Lint passes
-EOF
-)"
+adb reverse tcp:8081 tcp:8081
 ```
 
-Cross-reference Part 0 Chapter 0.4 for the broader release flow — how `develop` rolls into `main` via the weekly release branches, where Xray sees your test results, and how the changelog is auto-generated.
+See Android's [adb forwardports docs](https://developer.android.com/tools/adb#forwardports) — `adb reverse` is the opposite direction (device → host) and is what React Native's Metro bridge depends on.
 
-### 5.7.11 Reviewer Routing
-
-Open `.github/CODEOWNERS` near each file you touched and note the owners. The recurring routes for CLI work:
-
-| Path | Owner |
-|---|---|
-| `apps/cli/**` | `@ledgerhq/wallet-ci` (and the relevant coin-module team for coin-specific changes) |
-| `libs/ledger-live-common/src/e2e/**` | `@ledgerhq/wallet-xp` |
-| `libs/ledger-live-common/src/families/<coin>/**` | the coin-module team for that coin (e.g., `@ledgerhq/coin-evm` for EVM) |
-| `e2e/desktop/**` | `@ledgerhq/wallet-xp` |
-| `e2e/desktop/tests/specs/*.swap.spec.ts`, `swap.page.ts` | `@ledgerhq/wallet-xp` + `@ledgerhq/ptx` (PTX owns swap product) |
-| `e2e/mobile/**` | `@ledgerhq/wallet-xp` (mobile QA shares this owner) |
-
-For a change that adds a swap-related helper plus a swap POM method plus a swap regression spec, you will end up with two reviewers (`wallet-xp` for the e2e workspace, `ptx` for the swap-specific paths). Tag both in the PR description if they are not auto-added by CODEOWNERS.
-
-> **Tip:** if your change touches `apps/cli` even in passing (e.g., you added a flag to an existing command), wallet-ci review is non-optional. Ping them in the PR thread early — they review CLI changes carefully because the CLI is shared infra used by the bot, by QAA, and by manual operators.
-
-### 5.7.12 Common Debugging Recipes
-
-Even with the best discipline, things break. Here are the recurring failure modes and what they look like.
-
-#### Speculos won't start
+#### Symptom: Bridge WebSocket not connecting
 
 ```
-Error: Failed to start Speculos: port 5000 already in use
+DetoxRuntimeError: The app has not started communicating with the test runner
 ```
 
-A previous Speculos container did not clean up. Either:
+**Diagnosis:** The Detox bridge runs on port 8099. Either the port is taken, the app build didn't include the Detox framework, or the device cannot reach the host.
+
+**Fix checklist:**
+1. `lsof -i :8099` — if something else is there, kill it.
+2. Rebuild with `-c <config>` matching the one you're testing against. A common mistake is building `ios.sim.debug` and trying to test with `ios.sim.release` — the binary on the simulator is the old one.
+3. Check `e2e/mobile/detox.config.js` and the app's `AppDelegate.mm` — confirm `wsPort: 8099` matches on both sides. The bridge host and port are injected at launch via `launchArgs`. The canonical bridge server implementation lives at `e2e/mobile/bridge/server.ts`.
+4. On Android, verify `adb reverse tcp:8099 tcp:8099` is active.
+
+#### Symptom: Timeouts
+
+```
+thrown: "Exceeded timeout of 120000 ms for a test"
+```
+
+**Diagnosis:** Jest's per-test timeout is exhausted. Mobile tests are slow — a default 30s is far too short.
+
+**Fix:** `e2e/mobile/jest.config.js` sets the default.
+
+```js
+// Typical config
+module.exports = {
+  testTimeout: 300000,    // 5 minutes per it()
+  maxWorkers: 1,          // Detox constraint
+  resetModules: true,
+  setupFilesAfterEnv: ["<rootDir>/setup.ts"],
+};
+```
+
+For a specific slow action, use `waitFor(...).withTimeout()`:
+
+```typescript
+await waitFor(element(by.id("sync-complete-banner")))
+  .toBeVisible()
+  .withTimeout(180000); // 3 minutes
+```
+
+#### Symptom: Flaky test ordering
+
+Test A passes alone but fails when run after Test B.
+
+**Diagnosis:** State leaking between tests — usually Redux state persisted across `it()` blocks.
+
+**Fix:** The harness already sets `resetModules: true`. What you likely need is `device.reloadReactNative()` in a `beforeEach` — it reboots the JS runtime without reinstalling the native side. If that's not enough, `device.launchApp({ delete: true })` reinstalls fresh.
+
+Do not attempt to run tests in parallel by bumping `maxWorkers`. The bridge port alone makes that impossible; the codebase pins `maxWorkers: 1` on purpose.
+
+### 5.8.6 Screenshots, Videos, View Hierarchy Dumps
+
+Detox's `artifacts` section in `e2e/mobile/detox.config.js` controls automated captures.
+
+```js
+artifacts: {
+  rootDir: "./artifacts",
+  plugins: {
+    log: "failing",
+    screenshot: {
+      enabled: true,
+      shouldTakeAutomaticSnapshots: true,
+      keepOnlyFailedTestsArtifacts: true,
+      takeWhen: { testStart: true, testDone: true, testFailure: true },
+    },
+    video: "failing",
+    instruments: "failing",
+    uiHierarchy: "enabled",
+  },
+}
+```
+
+**What lands where:**
+- Screenshots: `./artifacts/<run-id>/<spec-name>/<test-name>/<step>.png`
+- Videos: `./artifacts/<run-id>/<spec-name>/<test-name>/test.mp4` (iOS only; Android uses screen recording when the emulator supports it)
+- View hierarchy: `.viewhierarchy` files on iOS, XML dumps on Android
+- Logs: `device.log`, `app.log`, `jest.log`
+
+The `failing` policy means artifacts are only retained for failed tests — passing tests' captures are deleted at the end of the run to save disk.
+
+**Allure pickup.** The Jest Allure reporter (configured in `jest.config.js`) writes one JSON per `it()` to `./allure-results/`. When the Detox run emits an artifact for a failing test, the reporter attaches the file path as an Allure attachment so the eventual HTML report embeds the screenshot and video inline.
+
+### 5.8.7 Allure Output Locally
+
+After a run, the raw Allure JSON and attachments sit under:
+
+```
+e2e/mobile/artifacts/
+```
+
+Each `it()` produces one `<uuid>-result.json` plus an `-attachment.json` file for each attached artifact.
+
+The workspace ships an `allure` script that combines generate + open:
 
 ```bash
-docker ps                                # find the orphan
-docker rm -f <container-id>              # kill it
-# or, blanket clean:
-docker rm -f $(docker ps -aq --filter ancestor=ghcr.io/ledgerhq/speculos)
+cd e2e/mobile
+pnpm allure
+# runs: allure generate ./artifacts --clean -o ./artifacts/allure-report
+#   and: allure open ./artifacts/allure-report
 ```
 
-If Docker itself is not running:
+You can also run the two halves separately — `pnpm allure:generate` and `pnpm allure:open`. They call `allure-commandline` from the workspace's own `node_modules`, so no system-wide install is required. If you prefer the live-reload experience of `allure serve`, install the CLI globally (`brew install allure`) and point it at the same folder:
 
 ```bash
-# macOS
-open -a "Docker"
-# Linux
-systemctl start docker
+allure serve e2e/mobile/artifacts
 ```
 
-Re-run after Docker is healthy.
+Cross-reference Part 3 Chapter 3.5 for the full Allure internals — the mobile setup reuses the same reporter conventions as desktop, so the mental model is identical. For the official specification, see the [Allure documentation](https://allurereport.org/docs/).
 
-#### CLI subprocess hangs
+### 5.8.8 Logs on Failure
 
-The CLI command is printed but never returns:
+The test-harness setup (wired from `e2e/mobile/setup.ts` and `e2e/mobile/bridge/server.ts`) installs an `afterAll` hook that, on failure, pulls three diagnostic bundles and attaches them to Allure:
 
+- **App logs** — the output of the React Native app's `console.log` and native logs, captured by Detox's `device.log` plugin.
+- **Bridge logs** — the WebSocket traffic between the spec runner and the bridged app (the bridge WebSocket still runs on port 8099). Indispensable for "why did `selectMockDevice` fail".
+- **Memory snapshots** — on iOS only, a compact memory graph dumped via `instruments` when the app crashes.
+
+They land under `e2e/mobile/artifacts/<run-id>/`. Open the Allure report and click into the failing test — the attachments tab lists each one by name.
+
+When a CI failure is reported in Slack, your first move should be: download the artifact zip, open `app.log`, then open `bridge.log`. Three out of four failures become obvious from those two files alone.
+
+### 5.8.9 Running a Single `it()` by TmsLink
+
+Every `it()` in the Ledger suite is tagged with a Jira ticket via `$TmsLink`:
+
+```typescript
+it(
+  `@B2CQA-604 • Send BTC - valid address, broadcast disabled`,
+  async () => {
+    // ...
+  },
+);
 ```
-[CLI] Executing: ledger-live send --currency ethereum --mode approve ...
-(no output for 2 minutes, then test times out)
+
+To run only that one test (from inside `e2e/mobile/`):
+
+```bash
+pnpm test:ios:debug -- --testNamePattern "B2CQA-604"
+# or shorthand:
+pnpm test:ios:debug -- -t "B2CQA-604"
 ```
 
-Usually a missed Speculos screen tap. The CLI is blocked waiting for `bridge.signOperation` to emit `signed`, which depends on the device confirming the transaction, which depends on `approveToken()` walking the right screens. If `approveToken()` is racing the CLI and failing silently, increase the test's `waitConfirmation` timeout temporarily and retry — if it now passes, the device-tap dance was just slow, not broken.
+The `-t` pattern is a regex (case-insensitive by default for Jest), so `B2CQA-604` will match exactly one test unless there are duplicates — in which case `--testPathPattern` narrows it further:
 
-If a longer timeout does not help, dump the Speculos screen during the hang. Open the Speculos web UI (the port is logged on container start) and see what screen is currently displayed. If it is stuck on a screen `pressUntilTextFound` doesn't recognise (e.g., a new "Scam token warning" page), the device-tap helper in `families/evm.ts` needs a new label.
+```bash
+pnpm test:ios:debug -- --testPathPattern swapExportHistoryOperations
+```
 
-#### Allowance check returns the wrong value
+**Performance tip:** combine with `--testPathPattern` to skip loading spec files that can't contain the test. Jest loads every matching file and then filters by name; if you know the ticket is under `specs/swap/otherTestCases/`, adding `--testPathPattern specs/swap/otherTestCases` saves 2–5 seconds of file loading.
 
-`isTokenAllowanceSufficientCommand` returns 0 even though you just approved. Three possibilities:
+### 5.8.10 Speculos on Mobile
 
-1. **Wrong spender.** The approve was for `0xRouterA`; the read is against `0xRouterB`. Double-check the `provider.contractAddress` you passed both ways.
-2. **Wrong owner.** The approve was on account index 0; the read is on index 1. The two indices have different addresses. Check the `account` object passed to both helpers — make sure it is the same one.
-3. **The approve didn't actually broadcast.** Re-check `DISABLE_TRANSACTION_BROADCAST` — if it was `"1"` during the approve, the transaction was signed but never sent. Verification ladder from §5.6.10 applies — look for `✔️ broadcasted!` in CLI stdout.
+Chapter 4.5 (desktop) and Chapter 5.6 (mobile) both introduced Speculos. Mobile E2E has two modes:
 
-#### Broadcast didn't happen
+**Mode A: `selectMockDevice` (bridge mock — no Speculos needed).**
 
-You ran a revoke; no error was thrown; the next test still sees a non-zero allowance.
+```typescript
+import { selectMockDevice } from "@bridge/client";
 
-Most likely the env var was not flipped. Either the helper's `setDisableTransactionBroadcastEnv("0")` was bypassed (a copy-paste regression that omits the line) or a parent test left `DISABLE_TRANSACTION_BROADCAST="1"` in `process.env` and the helper's flip-and-restore is restoring it back to `"1"` after the call.
+beforeAll(async () => {
+  await selectMockDevice({ nano: "nanoX" });
+});
+```
 
-Confirm by running with verbose CLI output and looking for the broadcast line. If it is missing, the gate from §5.6.3 evaluated truthy and the broadcast operator was never injected.
+The bridge intercepts all DMK calls from the app and answers them with canned signed payloads. This is the fastest mode and is used for flows where you don't care about on-device confirmation screens (e.g., portfolio display, settings).
 
-If the helper looks correct, check whether some module-load hook in the spec set the var globally. Mobile swap's `swap.other.ts` does this (§5.6.5); a desktop spec that imports a mobile helper transitively might inherit the same hook. Search: `grep -rn 'DISABLE_TRANSACTION_BROADCAST' e2e/ libs/`.
+**Mode B: Real Speculos container.**
 
-#### Test passes locally but fails in CI
+A Speculos container (the same Docker image from Part 5) runs on the host exposing HTTP/WS on a port, typically `52619`. The app's DMK transport must be redirected to that host/port.
 
-The classic e2e symptom. Order of suspects, in increasing rarity:
+- **iOS simulator** — shares the host's network, so `http://localhost:52619` works from inside the simulator without any port-forwarding dance.
+- **Android emulator** — has its own network namespace. `localhost` from the emulator is the emulator itself, not the host. You must forward:
 
-1. **Allowance state from a previous CI run is stale.** Check on-chain via Etherscan; if there is residual allowance, the suite needs a revoke `beforeEach`.
-2. **Different Speculos image.** CI pins a specific Speculos commit; locally you have whatever Docker pulled most recently. If your test depends on a behaviour that changed between versions, this manifests.
-3. **Network flake to the testnet RPC.** Less common — most QAA tests use stable RPC endpoints — but a transient testnet outage can drop a broadcast. Re-run the CI job once before assuming the test is broken.
-4. **Race between fixture seeding and the test body.** If the fixture's CLI call is async and the test body assumes seeding is done, the assumption can hold locally (where fixtures finish faster than the test starts) and break on a slower CI runner. Check the fixture engine's `await` discipline.
+```typescript
+await device.reverseTcpPort(52619);
+// or from a shell: adb reverse tcp:52619 tcp:52619
+```
 
-### 5.7.13 Chapter 5.7 Quiz
+`device.reverseTcpPort()` is Detox's wrapper around `adb reverse`. After this call, the emulator's `localhost:52619` points at the host's Speculos container.
+
+**When to pick which:**
+- Use **`selectMockDevice`** when you're testing app-side logic and any valid-looking response is sufficient. 80% of specs are this.
+- Use **real Speculos** when the test asserts against on-device screens (confirming an address matches what the device shows), when you need signature randomness to match a specific seed, or when you're validating a transaction-signing flow end-to-end.
+
+The Chapter 8.3 CI workflow has a `speculos_device` input to pick which device firmware Speculos emulates — `nanoX`, `stax`, `flex`, etc.
+
+### 5.8.11 Chapter 5.8 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Chapter 5.7 Quiz</h3>
+<h3>Quiz — Running & Debugging Mobile E2E Tests</h3>
 <p class="quiz-subtitle">6 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> A QAA ticket asks you to "wire <code>revokeTokenCommand</code> into the swap before-each cleanup hook". Which change shape is this?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> You change a single line in a spec file and want to re-run it against the simulator as fast as possible. Which command best minimizes iteration time?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Shape A — new CLI command needed (talk to wallet-ci first)</button>
-<button class="quiz-choice" data-value="B">B) Shape B — new typed helper needed in <code>cliCommandsUtils.ts</code></button>
-<button class="quiz-choice" data-value="C">C) Shape C — new POM method on <code>swap.page.ts</code> (or fixture-engine wiring) — the helper already exists, you are just orchestrating it</button>
-<button class="quiz-choice" data-value="D">D) Shape D — spec only</button>
+<button class="quiz-choice" data-value="A">A) <code>pnpm e2e:mobile run build:ios:debug && pnpm e2e:mobile run test:ios:debug</code></button>
+<button class="quiz-choice" data-value="B">B) <code>cd e2e/mobile && pnpm test:ios:debug -- -t "B2CQA-604" --reuse --retries 0</code></button>
+<button class="quiz-choice" data-value="C">C) <code>cd e2e/mobile && pnpm test:ios -- --maxWorkers=4</code></button>
+<button class="quiz-choice" data-value="D">D) <code>nx run live-mobile:e2e:build -- --configuration ios.sim.prerelease</code></button>
 </div>
-<p class="quiz-explanation"><code>revokeTokenCommand</code> is the helper. Wiring it into a before-each is a POM/fixture concern, not a helper or CLI concern. Shape C — touch <code>swap.page.ts</code> (or the relevant fixture file) and invoke the existing helper. The CLI command is unchanged; the helper is unchanged; only the orchestration moves.</p>
+<p class="quiz-explanation">When only TypeScript changes, the native binary does not need to be rebuilt. <code>--reuse</code> skips re-installing the app, <code>-t</code> runs just the target test, and <code>--retries 0</code> surfaces the true failure instead of silently retrying. Option C is invalid because <code>maxWorkers</code> is pinned to 1 by the bridge constraint.</p>
 </div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> You need a brand-new typed helper to wrap an existing <code>tokenAllowance</code> CLI invocation with a slightly different shape (returns a structured object rather than a raw string). Where do you start?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> What is the difference between <code>.env.mock</code> and <code>.env.mock.prerelease</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>apps/cli/src/commands/blockchain/tokenAllowance.ts</code> — change the CLI output format</button>
-<button class="quiz-choice" data-value="B">B) <code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code> — add a new helper that calls <code>runCliGetTokenAllowance</code> and post-processes the output</button>
-<button class="quiz-choice" data-value="C">C) <code>e2e/desktop/tests/page/swap.page.ts</code> — bake the parsing into the POM method</button>
-<button class="quiz-choice" data-value="D">D) Inline a parser in the spec file that needs the structured object</button>
+<button class="quiz-choice" data-value="A">A) <code>.env.mock.prerelease</code> uses Metro bundling while <code>.env.mock</code> uses Hermes</button>
+<button class="quiz-choice" data-value="B">B) Only the bundle ID changes; Firebase keys are identical</button>
+<button class="quiz-choice" data-value="C">C) <code>.env.mock</code> points Firebase at the staging project; <code>.env.mock.prerelease</code> points it at the production project — Remote Config flags, analytics endpoints, and bundle IDs all change</button>
+<button class="quiz-choice" data-value="D">D) They are the same file under two names, kept for legacy reasons</button>
 </div>
-<p class="quiz-explanation">Layer 3 is the right home for a new typed helper that wraps an existing CLI command. The CLI is unchanged (so wallet-ci review is not needed); the POM should not contain parsing logic (the POM is for UI orchestration); inlining in a spec is a maintenance bomb. <code>cliCommandsUtils.ts</code> with a thin parsing function is the canonical pattern.</p>
+<p class="quiz-explanation">The ENVFILE toggle is the mechanism by which CI validates against production Firebase during release gating (<code>production_firebase: true</code> in the workflow). Everything keyed off <code>FIREBASE_*</code> and the bundle ID flips at compile time.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> What does <code>cliCommands: [liveDataWithAddressCommand(account)]</code> in a Playwright test config achieve, mechanically?</p>
+<p><strong>Q3.</strong> A test fails with “App is busy” even though nothing is visibly animating. What is the most likely cause and fix?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The fixture engine receives a curried function; before the test body runs, the engine calls it with the lifecycle's <code>userdataPath</code>; the call seeds the account via the CLI and caches the device address on <code>account.address</code></button>
-<button class="quiz-choice" data-value="B">B) It registers a Playwright project named <code>liveDataWithAddressCommand</code> and runs only that project</button>
-<button class="quiz-choice" data-value="C">C) It synchronously calls the CLI at module load time, before Playwright spins up</button>
-<button class="quiz-choice" data-value="D">D) It marks the test as requiring a real device, skipping it on Speculos</button>
+<button class="quiz-choice" data-value="A">A) A long-poll or SSE connection keeps the network idle-check from ever settling — blacklist the URL with <code>device.setURLBlacklist([...])</code></button>
+<button class="quiz-choice" data-value="B">B) The simulator is out of memory — reboot it</button>
+<button class="quiz-choice" data-value="C">C) The spec is using <code>getByText</code> — switch to <code>by.id</code></button>
+<button class="quiz-choice" data-value="D">D) Metro is not running — start it with <code>pnpm mobile start</code></button>
 </div>
-<p class="quiz-explanation">The curried-function pattern is the contract between fixture-declarable CLI helpers and the fixture engine. The engine sees a function, calls it with the userdataPath, awaits the result. The test body then runs against a world where the CLI seeding has already happened.</p>
+<p class="quiz-explanation">Detox waits for the app to be idle before each action. Persistent network sockets never become idle. <code>setURLBlacklist</code> tells the synchronization engine to ignore traffic matching the given patterns.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> Your local iteration loop is running a single test in 30+ seconds even though only one TypeScript file changed. What is the most likely cause?</p>
+<p><strong>Q4.</strong> You need to drive the app against a real Speculos Nano X on an Android emulator. Which step is required but easy to forget?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Playwright re-installs node_modules on every run</button>
-<button class="quiz-choice" data-value="B">B) Speculos reboots between test runs by design — there is no way to make it faster</button>
-<button class="quiz-choice" data-value="C">C) The CLI subprocess re-bundles itself on every invocation</button>
-<button class="quiz-choice" data-value="D">D) Speculos is booting fresh because no <code>--reuse-context</code> is set, or the previous Speculos container was killed; subsequent runs with reused state are 2–5 seconds, fresh boots are ~30 seconds</button>
+<button class="quiz-choice" data-value="A">A) Rebuild the app with <code>-c android.emu.prerelease</code></button>
+<button class="quiz-choice" data-value="B">B) Set <code>maxWorkers: 2</code> so Speculos and Detox don't share a worker</button>
+<button class="quiz-choice" data-value="C">C) Call <code>selectMockDevice({ nano: "nanoX" })</code> before the test</button>
+<button class="quiz-choice" data-value="D">D) Reverse the Speculos port to the emulator with <code>device.reverseTcpPort(52619)</code> (or <code>adb reverse tcp:52619 tcp:52619</code>)</button>
 </div>
-<p class="quiz-explanation">The first Speculos container boot dominates the loop time on a cold cache. Reuse the container or the test context across runs to stay in the sub-minute zone. If you are restarting Docker every iteration, you are paying the full boot cost every time.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> When does a CLI-related QAA ticket need wallet-ci as a reviewer?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Always — wallet-ci reviews every PR that touches e2e tests</button>
-<button class="quiz-choice" data-value="B">B) Never — wallet-ci is a different team that does not touch QAA work</button>
-<button class="quiz-choice" data-value="C">C) When the PR touches anything under <code>apps/cli/</code> (a new command, a new flag, a behavioural tweak to an existing command). Pure changes to <code>cliCommandsUtils.ts</code>, page objects, or specs are routed to wallet-xp instead</button>
-<button class="quiz-choice" data-value="D">D) Only when the change affects the bot</button>
-</div>
-<p class="quiz-explanation">CODEOWNERS routes <code>apps/cli/**</code> to wallet-ci; <code>libs/ledger-live-common/src/e2e/**</code> and <code>e2e/desktop/**</code> route to wallet-xp. A PR that changes the CLI itself needs wallet-ci review; a PR that only adds a typed helper and a spec does not.</p>
+<p class="quiz-explanation">Android emulators have their own network namespace — <code>localhost</code> is the emulator itself. <code>adb reverse</code> (wrapped by Detox's <code>device.reverseTcpPort</code>) forwards the emulator's <code>localhost:52619</code> to the host, where Speculos is listening. iOS simulators share the host network, so no forwarding is needed there. Option C is the <em>opposite</em> of using real Speculos — it is the mock-bridge mode.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> You signed off locally on a test that broadcasts a revoke on Sepolia and want to confirm the transaction actually landed before opening the PR. Which is the most reliable verification?</p>
+<p><strong>Q5.</strong> Where do Allure results from a local mobile run land, and how do you view them?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CLI exited with code 0 — that is sufficient</button>
-<button class="quiz-choice" data-value="B">B) Run a follow-up <code>tokenAllowance</code> call (or open <code>revoke.cash</code> on the seed's address) and read the actual on-chain allowance — if it is now zero, the revoke landed</button>
-<button class="quiz-choice" data-value="C">C) Re-run the same revoke; if it is idempotent it must have worked the first time</button>
-<button class="quiz-choice" data-value="D">D) Check the local Speculos logs for a "transaction signed" line</button>
+<button class="quiz-choice" data-value="A">A) <code>apps/ledger-live-mobile/coverage/</code> — open <code>index.html</code> directly</button>
+<button class="quiz-choice" data-value="B">B) <code>e2e/mobile/artifacts/</code> — run <code>cd e2e/mobile && pnpm allure</code> (or <code>allure serve e2e/mobile/artifacts</code>) to view</button>
+<button class="quiz-choice" data-value="C">C) They are only produced on CI; local runs don't generate Allure data</button>
+<button class="quiz-choice" data-value="D">D) In <code>~/.allure/</code>, indexed by run timestamp</button>
 </div>
-<p class="quiz-explanation">Layer 3 of the verification ladder (Chapter 5.6.10) — the after-the-fact allowance read — is the only one that proves chain state changed. Exit code 0 means the broadcast call returned, but a failed broadcast can also exit 0 in some configurations. Speculos logs prove signing, not broadcast. Re-running tells you nothing about the first run.</p>
+<p class="quiz-explanation">The Jest Allure reporter writes per-test JSON plus attachment metadata into <code>e2e/mobile/artifacts/</code>. The workspace's <code>pnpm allure</code> script runs <code>allure generate</code> then <code>allure open</code> against that folder; <code>allure serve</code> is an equivalent live-render alternative if you have the CLI installed globally.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> Why does <code>jest.config.js</code> pin <code>maxWorkers: 1</code> for mobile E2E, and what is the CI's parallelism strategy instead?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Jest does not support multi-worker runs — it is a framework limitation</button>
+<button class="quiz-choice" data-value="B">B) Detox can use multiple workers, but TypeScript compilation is single-threaded</button>
+<button class="quiz-choice" data-value="C">C) Each Detox worker needs its own device and bridge port; parallel workers would collide on port 8099 and on the single booted simulator. CI parallelizes across <em>shards</em> (separate GitHub runners), not workers</button>
+<button class="quiz-choice" data-value="D">D) It is a historical artifact — the value could be raised but nobody has tested it</button>
+</div>
+<p class="quiz-explanation">Mobile E2E is constrained at the device level: one simulator per process, one bridge WebSocket per simulator. Horizontal scaling therefore happens at the runner level — each CI shard is its own runner with its own simulator/emulator(s) (Chapter 8.3).</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
-<div class="chapter-outro">
-You now have the full daily workflow — recon, change shape, iteration loop, smoke, commit, PR — and the debugging vocabulary to read the failure modes that show up in practice. The next chapter takes a real ticket end-to-end: <strong>QAA-615</strong>, the senior's commit that introduced <code>revokeTokenCommand</code>, walked line-by-line through every file changed, every choice made, every alternative considered. After you have followed that walkthrough, the architecture, the env discipline, and the workflow will all click into a single coherent picture you can reproduce on your own tickets.
-</div>
-## Walkthrough QAA-615 — Line-by-Line
+---
+
+
+## Your Daily Mobile Workflow: From Ticket to PR
 
 <div class="chapter-intro">
-This is your Part 5 capstone. Unlike the QAA-702 (Part 4) and QAA-1136 (Part 6) walkthroughs — where you start from a green baseline and add a missing scenario — QAA-615 is a <strong>spike that already has a starting commit</strong>. A senior engineer (Abdurrahman SASTIM) pushed branch <code>support/qaa_add_revoke_token</code> with commit <code>4fa4868a35</code>: 3 files, 37 lines. The wiring works; the shape is incomplete; one of the lines contains a copy-paste bug. Your job is to read every one of those lines, understand <em>why</em> the senior wrote them, then identify what is still missing before this can be merged. By the end of this chapter you will be able to take the senior's branch, finish the work, and ship the spike report.
+You have learned the React Native primitives, the Detox toolchain, the matcher DSL, the bridge protocol, the singleton page-object pattern, the sharding algorithm, the Allure pipeline, and the CI graph. This chapter stitches all of that into the <strong>workflow</strong> — the exact, repeatable sequence you will execute every single day as an E2E Mobile engineer at Ledger. It mirrors Chapter 4.7 (desktop) but tracks the mobile realities: a Jira QAA ticket, a B2CQA Xray test, a Detox build, a Metro bundle, an Allure upload, and an iOS/Android CI matrix. Follow it every time. The steps do not change just because the ticket seems small.
 </div>
 
-### 5.8.1 Understanding the Ticket
+### 5.9.1 The Ticket Lifecycle at Ledger Live
 
-**Jira ticket:** QAA-615 — *[CLI] Add revoke-approval helper for the swap regression suite*
-**Parent epic:** QAA-919 — *Swap regression coverage automation*
-**Type:** Spike
-**Status:** In Progress (the senior's branch is the spike's draft deliverable)
-**Branch:** `support/qaa_add_revoke_token`
-**Commit:** `4fa4868a35` by Abdurrahman SASTIM, dated 2026-04-27
+Every piece of work you do on the mobile E2E suite starts in Jira and ends in an Xray traceability update. The lifecycle has **three ticket shapes** — learn to distinguish them on sight.
 
-The ticket asks one specific question:
+| Ticket type | Project | Example | Purpose |
+|---|---|---|---|
+| **QAA ticket** | `QAA` | `QAA-702` | A work item you pick up in your sprint — "automate X", "cover regression Y", "fix flake in Z". |
+| **Xray test case** | `B2CQA` | `B2CQA-604` | A test scenario in Xray — reusable across platforms (LLD, LLM, LLC). |
+| **Bug** | `LIVE` (tagged with `LLM` / `LLD` labels) | `LIVE-12345` | A product defect. Rarely your starting point, but you link it in `$BugLink(...)` when reproducing. |
 
-> Find the smallest, lowest-risk way to revoke an existing ERC-20 allowance from inside an E2E test, so that the broadcast-enabled regression suite can clean up provider allowances between iterations.
+The **QAA ticket tells you what to do**. The **B2CQA ticket tells you what to verify**. These are never the same ticket. A single QAA-XXX can cover one B2CQA, or it can bundle five. Read carefully.
 
-**What "spike" means in this team's vocabulary.** A spike is a time-boxed investigation whose deliverable is a written answer plus a code proof-of-concept. The PR that closes it does not need to be production-perfect — it needs to demonstrate that the chosen path works and document why the alternatives were rejected. The QAA-615 senior's commit is exactly that: a working PoC, not a final shape.
+```
+QAA-702  ─────linked to─────►  B2CQA-604  (Swap history export — ERC20 receive)
+ "meta: automate this test"      "scenario: after a swap, user clicks 'Export
+                                  history' and CSV contains ERC20 row"
+```
 
-**Pavlo's "2 flows" comment.** Pavlo OKHONKO commented on QAA-615 on 2026-03-12:
+The traceability chain below is the reason this distinction exists:
 
-> "Two flows to keep separate: nightly (broadcast off, no revoke needed) vs regression (broadcast on, revoke required between tests). Don't try to make one helper serve both."
+```
+QAA-702 (sprint ticket)
+   │
+   │ links to
+   ▼
+B2CQA-604 (Xray test case)          ◄── PM and QA leads see coverage here
+   │
+   │ automated in
+   ▼
+e2e/specs/swap/swapHistoryExport…spec.ts
+   │
+   │ runs in CI, uploads results
+   ▼
+Allure report + Xray execution update
+   │
+   │ stakeholders trace
+   ▼
+"Is B2CQA-604 passing on main?"  ◄── single source of truth
+```
 
-That comment is the architectural seed for the work. It tells the senior: the new helper is not a general-purpose utility; it exists to serve the broadcast-enabled regression flow specifically. The nightly suite already runs deterministically with `DISABLE_TRANSACTION_BROADCAST=1` and does not need cleanup, because the device signs but never sends — on-chain state never changes.
+If you skip the Xray link (`$TmsLink("B2CQA-604")`), your test runs but Xray sees nothing. It is **invisible coverage** — a cardinal sin of the onboarding guide's Part 3 (Allure & Xray) and still a cardinal sin here. The B2CQA ID must appear in the spec.
 
-**Why the parent epic matters.** QAA-919 *Swap regression coverage automation* is the umbrella for moving the swap suite from synthetic-fixture nightly runs to broadcast-enabled regression runs. Each child ticket addresses one infrastructure prerequisite: QAA-613 the test hooks, QAA-614 the seed-funding workflow, QAA-615 the revoke helper, and so on. The pieces are designed to land separately.
+### 5.9.2 Picking Up a Ticket
 
-### 5.8.2 Why This Matters
+You have been assigned `QAA-702`. Before touching code, do the **read-only pass**:
 
-The broadcast distinction (Chapter 5.6) is the core context. To recap:
+1. **Open the ticket in Jira.** Read the description end-to-end. Twice.
+2. **Acceptance Criteria (AC).** If the ticket has an AC block, copy it into your branch notes. If it does not, go back to your lead and ask — a ticket without AC is a ticket you cannot prove done.
+3. **Linked Xray tests.** Look at the "Tests" panel on the right. Click through each B2CQA. Note the `preconditions`, `steps`, and `expected result`. These become the `@Step` descriptions in your POM.
+4. **Feature area.** Map the ticket to a source tree:
+   - Portfolio, Market, Accounts → `apps/ledger-live-mobile/src/screens/Portfolio`, `.../Market`, `.../Accounts`
+   - Trade: Swap / Buy / Sell → `.../Swap`, `.../Exchange`
+   - Onboarding → `.../Onboarding`
+   - Live Apps (DApps, discover) → `.../Platform` and `live-apps` package
+   - Settings / Manager / Sync → `.../Settings`, `.../Manager`
+5. **CODEOWNERS.** Before you write a line, look up who must review your PR:
 
-- **Nightly suite** — `DISABLE_TRANSACTION_BROADCAST=1`. The CLI signs locally but never sends. On-chain allowance never changes. No revoke needed; no real money at risk; ~10 minutes of run time.
-- **Regression suite** — `DISABLE_TRANSACTION_BROADCAST=0`. The CLI signs and broadcasts. Allowances are real; the QAA test seed actually changes state on Sepolia/Holesky. Without a revoke hook, run #2 sees whatever allowance run #1 left behind.
+   ```bash
+   cat .github/CODEOWNERS | grep -E "e2e/mobile|src/screens/Swap"
+   # e2e/mobile/                                @ledgerhq/wallet-xp
+   # apps/ledger-live-mobile/src/screens/Swap/  @ledgerhq/ptx
+   ```
 
-**Without QAA-615**, the broadcast-enabled regression suite has a state-leak problem:
+   For a swap-area test you will end up with `@ledgerhq/wallet-xp` (owns the `e2e/mobile/` workspace) plus the relevant feature-team owner (here `@ledgerhq/ptx` for Swap) if you touch any React code.
 
-1. Test A approves spender X for 100 USDT to perform a swap.
-2. Test A passes; the test runner moves on without cleanup.
-3. Test B starts. Its `ensureTokenApproval` pre-check sees `currentAllowance >= minAmount` and skips the approve flow entirely.
-4. Test B passes for the wrong reason — it never exercised the device confirmation it was supposed to.
+6. **Estimate scope.** Most QAA tickets fit in 0.5–2 days of focused work. If your first estimate exceeds 3 days, the ticket is probably two tickets in a trench coat. Ask your lead to split it.
 
-In a worst case, the leak hides a real regression: the approve screen rendering changes, but Test B never asks for it because the leftover allowance is enough. Coverage looks green; the device-tap path silently rotted.
+### 5.9.3 Branching
 
-**Revoke restores determinism.** A `revoke` hook in `beforeEach` zeroes the allowance before every test. Test B's pre-check now correctly sees `currentAllowance == 0`, runs the approve flow, and exercises the screens it is supposed to.
+Branch names must describe the scope and reference the Jira ID. The global `git-workflow.md` rules apply verbatim:
 
-Cross-references:
-- Chapter 5.6 — broadcast discipline and the env-flip pattern
-- Chapter 5.5 — Speculos lifecycle and the snapshot/restore pattern
-- Chapter 5.4 — the 5-layer architecture that makes the wrapper trivial
+| Prefix | Use for |
+|---|---|
+| `feat/` | New feature coverage, new POM, new CI job. |
+| `bugfix/` | Fixing a real product-triggered flake, fixing a broken spec. |
+| `support/` | Refactor, renames, test-data updates, config tweaks. |
+| `chore/` | Dependency bumps, tooling config, lint rules. |
 
-### 5.8.3 The Senior's Branch
+Mobile-scope conventions:
+
+```bash
+# New coverage
+git checkout -b feat/llm-qaa-702-swap-history-erc20-export
+
+# Bug fix in an existing spec
+git checkout -b bugfix/llm-qaa-814-fix-send-ton-flake
+
+# Refactor shared POM
+git checkout -b support/llm-extract-modal-base-page
+```
+
+The `llm-` segment stands for **Ledger Live Mobile** — it tells the reviewer the platform without opening the diff. Desktop branches use `lld-`, live-common uses `llc-`.
+
+**Conventional Commits** for mobile:
+
+```
+test(mobile): add swap history ERC20 export test (QAA-702)
+feat(mobile): add SwapHistoryPage POM with @Step decorators
+fix(mobile): debounce swap history refresh to stabilize e2e
+refactor(mobile): extract bridge CSV listener into helper
+chore(mobile): bump detox to 20.x
+```
+
+One logical change per commit. A diff that adds a POM, adds userdata, adds a spec, and bumps Detox is four commits, not one. Rebase and polish before you open the PR — the global rules say "rebase before PR to keep history clean."
+
+### 5.9.4 Orientation Pass — Mapping the Terrain
+
+You now open your editor and **`cd e2e/mobile`** — that's where the vast majority of your day-to-day work happens. Before writing, you **recon the repo**. This pass alone catches 80 % of the "I wrote it twice" mistakes.
+
+```bash
+# 0. Land in the mobile E2E workspace
+cd e2e/mobile
+
+# 1. Is there already a spec for this feature?
+ls specs/swap/
+
+# 2. Is there an existing POM?
+ls page/trade/
+
+# 3. Which testIDs already exist on screen? (source still lives in the app)
+rg "testID=" ../../apps/ledger-live-mobile/src/screens/Swap/History/
+
+# 4. Which userdata fixtures look similar?
+ls userdata/ | rg -i "swap|exchange"
+
+# 5. Which Xray IDs already reference this feature?
+rg "B2CQA-6(0[0-9]|1[0-9])" .
+```
+
+The answers shape the rest of the day:
+
+- **Spec exists** → add an `it()` inside it, do not create a new file.
+- **POM exists** → add one or two `@Step` methods, do not create a parallel POM.
+- **testID missing on screen** → stop. Open a product ticket, tag `@ledgerhq/ptx`, ask them to add it. **Never** select by text or accessibility label as a substitute — it will break on the next i18n change.
+- **Userdata exists** → reuse it. Duplicated fixtures are a maintenance tax.
+
+Write the outcome of the recon in 5 bullets in the Jira ticket. Your reviewer will read those bullets and immediately know why your diff looks the way it does.
+
+### 5.9.5 Designing the Flow
+
+Before writing `it()`, sketch the user flow **top to bottom** as a sequence of POM method calls. Use a scratch file, a whiteboard, or the comment header of your future spec:
+
+```
+// QAA-702: swap history export with ERC20 receive
+// 1. Launch app with userdata = swapHistoryWithERC20
+// 2. PortfolioPage.openSwapTab()
+// 3. SwapPage.openHistoryTab()
+// 4. SwapHistoryPage.expectOperationRowVisible(swapId)
+// 5. SwapHistoryPage.expectERC20Received(swapId, "USDT")
+// 6. SwapHistoryPage.tapExportButton()
+// 7. Bridge: await sendFile event
+// 8. Assert CSV contains USDT row with correct "To account address"
+```
+
+Each bullet is one `@Step`. If you cannot express a bullet with an existing method, you have two choices:
+
+1. **Extend the existing POM** — preferred. Adds a `@Step` method to `swap.page.ts`.
+2. **Create a new POM** — only when the feature is a new screen with no POM yet (our case for `SwapHistoryPage`).
+
+**Rule of thumb.** If the screen has its own route and its own set of testIDs, it deserves its own POM. If it is a modal over an existing screen, extend the parent POM.
+
+### 5.9.6 Implementation Order
+
+Do not write the spec first. You will re-edit it six times. Instead:
+
+1. **Fixtures (`userdata/*.json`)** — what does the app state need to be at `beforeAll`?
+2. **POM methods (`page/*.page.ts`)** — `@Step` decorators, return types, no assertions on the caller's behalf unless the step name says "Expect".
+3. **Spec (`specs/**/*.spec.ts`)** — stitch the POM calls into an `it()`.
+4. **Dry-run locally** — `pnpm mobile e2e:test -t "<name>"`.
+5. **Fix** — the first run fails. That is normal. Read the failure, open Allure, patch the POM or spec.
+6. **Push** to a branch.
+7. **CI green** — wait for the full matrix. If flaky, rerun once; if flaky twice, treat as failure and investigate.
+8. **Allure check** — open the uploaded report, confirm `@Step` hierarchy and `$TmsLink`.
+9. **PR** — follow 39.10.
+
+Do not skip step 8. A green CI with a broken Allure report is a hidden regression — Xray will see "passed", reviewers will see no steps, and debugging when it breaks next month will be miserable.
+
+### 5.9.7 Running Locally
+
+The canonical scripts live in `e2e/mobile/package.json`. Run them from the repo root via `pnpm --filter e2e-mobile run <script>`, or `cd e2e/mobile` and run them directly.
+
+```bash
+# ONCE per working session — build the app bundle
+#   from repo root:
+pnpm --filter e2e-mobile run build:ios:debug
+#   or (release bundle, via Nx — same target as CI):
+nx run live-mobile:e2e:build -- --configuration ios.sim.release
+
+# TIGHT LOOP — run tests (from e2e/mobile/)
+cd e2e/mobile
+pnpm test:ios:debug        # ios.sim.debug
+pnpm test:ios              # ios.sim.release
+pnpm test:android:debug    # android.emu.debug
+pnpm test:android          # android.emu.release
+
+# Filter by test name (same -t as Jest)
+pnpm test:ios:debug -- -t "swap history containing an ERC20"
+```
+
+The Detox configuration is chosen by the script name (`test:ios` → `ios.sim.release`, etc.). See Chapter 5.6 on `detox.config.js` for the full list. Common values:
+
+| Configuration | Target |
+|---|---|
+| `ios.sim.debug` | iOS simulator with Metro debug bundle — fast reload. |
+| `ios.sim.release` | iOS simulator with production bundle — slower, closer to CI. |
+| `android.emu.debug` | Android emulator with Metro debug bundle. |
+| `android.emu.release` | Android emulator with production bundle — what CI runs. |
+
+`-t "<pattern>"` filters by the `it()` description. Detox passes it straight to Jest's `--testNamePattern`, so **use the exact string** that will appear in your `it()` title.
+
+Local Allure report: `cd e2e/mobile && pnpm allure` (runs `allure generate ./artifacts` then opens the report).
+
+If you work on Android, keep an emulator warm:
+
+```bash
+emulator -avd Pixel_7_API_34 -no-snapshot-save -no-audio &
+```
+
+iOS simulators auto-boot via `applesimutils` — you do not need to pre-launch them.
+
+### 5.9.8 Adding Allure Steps
+
+Every public POM method should be decorated:
+
+```typescript
+@Step("Tap the export history button")
+async tapExportButton() {
+  await this.exportButton().tap();
+}
+
+@Step("Verify ERC20 receive for swap $0 with ticker $1")
+async verifyERC20Received(swapId: string, tokenTicker: string) {
+  await expect(this.toAmount(swapId)).toHaveText(new RegExp(tokenTicker));
+}
+```
+
+The `@Step` decorator is imported from `jest-allure2-reporter/api`:
+
+```typescript
+import { Step } from "jest-allure2-reporter/api";
+```
+
+Behavior:
+
+- `@Step("text")` wraps the method in an Allure step with that name.
+- `$0`, `$1`, … are substituted with the method's arguments at call time — same semantics as Chapter 3.5.2's desktop `@step("Click on asset $0")`.
+- If the method throws, the step is marked `failed` and the screenshot is attached automatically by the global Jest retry handler (Chapter 5.4.6).
+
+**Do not** nest two `@Step` methods silently. If `verifyERC20Received()` internally calls `tapExportButton()`, you will get a two-level tree. That is usually fine, but if it produces a 40-line single-step trace in the report, flatten it.
+
+### 5.9.9 Xray Linkage
+
+The `$TmsLink` wrapper is how a mobile spec announces its B2CQA coverage. Two equivalent forms depending on your Jest-Allure version:
+
+```typescript
+// form 1 — title token
+it($TmsLink("B2CQA-604"), "exports swap history containing an ERC20 receive", async () => { … });
+
+// form 2 — programmatic API
+it("exports swap history containing an ERC20 receive", async () => {
+  allure.tms("B2CQA-604", "https://ledgerhq.atlassian.net/browse/B2CQA-604");
+  …
+});
+```
+
+The title-token form is preferred because Xray's importer reads the Allure test name and automatically extracts `B2CQA-XXX`. It also keeps the spec top clean.
+
+What `$TmsLink` emits in Allure:
+
+- A clickable link labelled `B2CQA-604` in the test's sidebar.
+- A `tms` entry in the JSON for the Xray custom reporter to consume.
+- Nothing in the spec runtime — the wrapper is a no-op at runtime, it only annotates.
+
+**Multiple Xray IDs per spec.** Wrap more than one:
+
+```typescript
+it($TmsLink("B2CQA-604", "B2CQA-605"), "exports swap history …", async () => { … });
+```
+
+### 5.9.10 PR Checklist
+
+The PR template lives in `.github/PULL_REQUEST_TEMPLATE.md` and the `/create-pr` Claude Code skill fills most of it in. But the human-readable checklist below is what your reviewer actually looks for:
+
+1. **Title** — `test(mobile): add swap history ERC20 export test (QAA-702)`. Conventional Commits, one line, references the Jira ticket in parens.
+2. **Jira link** — the QAA ticket URL at the top of the description.
+3. **Description** — acceptance criteria restated, a one-paragraph summary of the approach, a "testing notes" section listing the Detox configs you ran.
+4. **Test evidence** — a screenshot or screencast of the test passing locally (Allure step list or Detox console output), plus the CI run link once green.
+5. **CODEOWNERS** — GitHub auto-requests, but do a sanity check: swap-area touches should have `@ledgerhq/wallet-xp` and `@ledgerhq/ptx`.
+6. **Reviewers** — your lead plus one peer familiar with the area.
+7. **Semantic-release impact** — for a test-only PR, the `test(mobile): …` prefix means **no version bump**. For a `fix(mobile): …` inside `e2e/mobile/` only, still no bump — the publishable package is the app, not the e2e harness. For `fix(mobile-app): …` inside `apps/ledger-live-mobile/src/**`, a patch bump will trigger on `main`.
+8. **Changeset** — the monorepo uses Changesets. If your diff only touches `e2e/mobile/`, you do not need one. If you modify `apps/ledger-live-mobile/src/`, run `pnpm changeset` and pick "patch" or "none" as appropriate.
+
+Open the PR as **draft** first. Mark it ready only after CI is green.
+
+### 5.9.11 Review Etiquette
+
+The golden rules, applied to mobile:
+
+- **Small diffs per ticket.** A 1,500-line PR does not get a careful review — it gets a rubber stamp or a rejection. Split.
+- **Rebase, do not merge.** `git pull --rebase origin dev` before pushing. A spaghetti merge graph makes `git bisect` useless.
+- **Squash only for trivial branches.** `support/cleanup` branches squash cleanly. Feature branches with a thoughtful commit history should preserve that history on merge.
+- **Address review comments in new commits, not amends.** The reviewer wants to see *what changed since I last looked* — a force-push nukes that. Only squash at the very end, and only if the reviewer agrees.
+- **Block your own PR until CI is green.** A reviewer should never be the one who tells you CI is red.
+
+Reviewer-facing signals that you did the work:
+
+- The recon bullets from 39.4 in the PR description.
+- The Allure link in the PR comments (or a screenshot if the report has rolled off).
+- A note if any product change (testID addition, bridge extension) was required, with the linked product ticket.
+
+<div class="chapter-outro">
+<strong>Key takeaway.</strong> The workflow is: QAA ticket → B2CQA scenario → branch with <code>llm-</code> prefix → recon the repo → sketch the flow → write fixtures → write POM → write spec → dry-run loop → push → wait for CI → inspect Allure → open a small, well-scoped PR with CODEOWNERS auto-requested. The same dance, every ticket. Predictable is professional.
+</div>
+
+### 5.9.12 Quiz
+
+<div class="quiz-container" data-pass-threshold="80">
+<h3>Quiz — Daily Mobile Workflow</h3>
+<p class="quiz-subtitle">6 questions · 80% to pass</p>
+<div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q1.</strong> What is the difference between <code>QAA-702</code> and <code>B2CQA-604</code>?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) They are aliases for the same ticket</button>
+<button class="quiz-choice" data-value="B">B) <code>QAA-702</code> is the sprint work item; <code>B2CQA-604</code> is the Xray test scenario it is expected to automate</button>
+<button class="quiz-choice" data-value="C">C) <code>QAA-702</code> is mobile-only; <code>B2CQA-604</code> is desktop-only</button>
+<button class="quiz-choice" data-value="D">D) <code>B2CQA-604</code> is a bug report</button>
+</div>
+<p class="quiz-explanation">QAA tickets are sprint work items ("automate this"). B2CQA tickets live in Xray and describe a reusable test scenario that may be covered by LLD, LLM, or LLC.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q2.</strong> A testID you need is missing from a screen. What do you do?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Select by visible text until the testID is added</button>
+<button class="quiz-choice" data-value="B">B) Select by accessibility label</button>
+<button class="quiz-choice" data-value="C">C) Stop, open a product ticket with <code>@ledgerhq/ptx</code>, and wait for the testID to land before writing the test</button>
+<button class="quiz-choice" data-value="D">D) Ship the test with an XPath query</button>
+</div>
+<p class="quiz-explanation">Text and accessibility labels are i18n-fragile. The repo rule is: testIDs are the contract. If one is missing, product adds it first. Writing a test against a text selector is technical debt the next translator will silently break.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q3.</strong> Which branch name correctly follows the mobile conventions?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>QAA-702-swap-export</code></button>
+<button class="quiz-choice" data-value="B">B) <code>swap-history-erc20</code></button>
+<button class="quiz-choice" data-value="C">C) <code>feature/swap-history</code></button>
+<button class="quiz-choice" data-value="D">D) <code>feat/llm-qaa-702-swap-history-erc20-export</code></button>
+</div>
+<p class="quiz-explanation">Prefix (<code>feat/</code>) + platform (<code>llm-</code>) + Jira ID (<code>qaa-702</code>) + short scope. The kebab-case format is required by <code>git-workflow.md</code>.</p>
+</div>
+
+<div class="quiz-question" data-correct="A">
+<p><strong>Q4.</strong> What is the correct implementation order for a new mobile spec?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Userdata fixtures → POM methods → spec → dry-run → push</button>
+<button class="quiz-choice" data-value="B">B) Spec → POM methods → userdata</button>
+<button class="quiz-choice" data-value="C">C) POM methods → spec → userdata</button>
+<button class="quiz-choice" data-value="D">D) Dry-run first, then write</button>
+</div>
+<p class="quiz-explanation">You cannot write a useful spec until the POM methods exist, and POM methods are meaningless without a known starting state (userdata). Bottom-up is the only sane order.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> What does <code>$TmsLink("B2CQA-604")</code> at the start of an <code>it()</code> do?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Causes the test to fail if Xray is unreachable</button>
+<button class="quiz-choice" data-value="B">B) Annotates the Allure result with a clickable TMS link so Xray can match the spec to the scenario</button>
+<button class="quiz-choice" data-value="C">C) Fetches the ticket description at runtime</button>
+<button class="quiz-choice" data-value="D">D) Triggers a network request to Jira</button>
+</div>
+<p class="quiz-explanation">The wrapper is a no-op at runtime. It adds a <code>tms</code> annotation to the Allure result, which the Xray importer reads to update B2CQA-604's execution status.</p>
+</div>
+
+<div class="quiz-question" data-correct="D">
+<p><strong>Q6.</strong> Why do you open the PR as draft first?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Draft PRs run faster in CI</button>
+<button class="quiz-choice" data-value="B">B) GitHub requires it</button>
+<button class="quiz-choice" data-value="C">C) It exempts the PR from CODEOWNERS</button>
+<button class="quiz-choice" data-value="D">D) It lets you validate CI and Allure before burning reviewer attention — you mark ready only once the PR is actually reviewable</button>
+</div>
+<p class="quiz-explanation">A reviewer's time is the scarce resource. A red CI or a broken Allure report is something you find — not something your reviewer finds.</p>
+</div>
+
+<div class="quiz-score"></div>
+</div>
+
+---
+
+
+## Real Ticket Walkthrough: QAA-702 — Swap History ERC20 Export
+
+<div class="chapter-intro">
+Your mobile capstone. <strong>QAA-702</strong> — <em>[SWAP] [LLM] Improve 'History' test</em> — is a live, in-progress sprint ticket. The parent scenario <strong>B2CQA-604</strong> already has step 1 automated (native → native swap export); QAA-702 asks you to add step 2: the same export flow, but with an <strong>ERC20 token on the Receive side</strong>. This is not a recap. By the end of this chapter you will have a branch, a new spec file, an extended userdata fixture, a green Detox run, and an Allure report ready to paste into a PR.
+</div>
+
+### 5.10.1 Understanding the Ticket
+
+**Jira ticket:** QAA-702 · **Parent epic:** QAA-919 *"SWAP regression coverage automation"*
+**Xray test case:** B2CQA-604 *"[SWAP] User should be able to export all history operations"*
+**Linked bug:** LIVE-19533 *"[SWAP][LLM][iOS] Can't export Swap history"* (closed)
+**Status:** In Progress · not yet automated · labels `LLM`, `UI`
+
+The ticket text, verbatim:
+
+> Only LLM related.
+>
+> Base test B2CQA-604 should be improved if possible, as we faced the bug of exporting History fail.
+>
+> So, need to add the step of History export, when there is a tx with ERC20 token in Receive field.
+
+**What "step 2" means.** `B2CQA-604` is not a single-step test case. Inside Xray it contains multiple numbered steps; each step is a distinct export scenario that the automation suite must cover. Step 1 — a SOL → ETH swap where the Receive side is **native ETH** — is already automated (you will see it in a moment). Step 2 — adding coverage where the Receive side is an **ERC20 token on Ethereum** (e.g., USDT) — is what `QAA-702` asks for.
+
+**Why it matters historically.** Ledger's own swap team filed `LIVE-19533` last cycle: on iOS, exporting the swap history failed whenever the history contained an ERC20 receive. The bug was fixed, but no regression test was added for that specific shape. `QAA-702` closes that regression hole.
+
+**Why the test case ID does not change.** Pavlo OKHONKO left a comment on B2CQA-604 on 2025-07-21:
+
+> "Keep this test in current suite till step2 to be automated: QAA-702"
+
+So our new spec will reuse `tmsLinks: ["B2CQA-604"]`. In Xray, both steps map to the same B2CQA card; in the repo, they live in two sibling spec files sharing the same driver.
+
+### 5.10.2 Why This Matters
+
+ERC20 receive is by far the most common swap shape on Ethereum. A user who swaps BTC or SOL into "a dollar on Ethereum" almost always lands in USDT or USDC, not native ETH. Without this coverage:
+
+- **Export regressions are invisible.** A change in how the CSV serialises a `TokenAccount` row would pass CI even if it corrupted every non-native receive.
+- **Bug LIVE-19533 can resurface.** The original failure was specific to how ERC20 operations were iterated on iOS. Nothing prevents a similar regression tomorrow.
+- **Xray dashboards lie.** Coverage looks green at the B2CQA level even though only half the scenario is exercised.
+
+Adding step 2 is a small, high-leverage fix: one spec file, one fixture append, reuse of an already-battle-tested driver.
+
+### 5.10.3 Analyzing Existing Coverage
+
+Before writing anything, read what is already there.
+
+**The step 1 spec** — `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperations.spec.ts`, verbatim:
+
+```typescript
+import { Account } from "@ledgerhq/live-common/e2e/enum/Account";
+import { Provider } from "@ledgerhq/live-common/e2e/enum/Provider";
+import { Addresses } from "@ledgerhq/live-common/e2e/enum/Addresses";
+import { runExportSwapHistoryOperationsTest } from "./swap.other";
+
+const swapHistoryTestConfig = {
+  swap: new Swap(Account.SOL_1, Account.ETH_1, "0.07"),
+  provider: Provider.EXODUS,
+  swapId: "wQ90NrWdvJz5dA4",
+  addressFrom: Addresses.SWAP_HISTORY_SOL_FROM,
+  addressTo: Addresses.SWAP_HISTORY_ETH_TO,
+  tmsLinks: ["B2CQA-604"],
+  tags: [
+    "@NanoSP",
+    "@LNS",
+    "@NanoX",
+    "@Stax",
+    "@Flex",
+    "@NanoGen5",
+    "@solana",
+    "@family-solana",
+    "@ethereum",
+    "@family-evm",
+  ],
+};
+
+runExportSwapHistoryOperationsTest(
+  swapHistoryTestConfig.swap,
+  swapHistoryTestConfig.provider,
+  swapHistoryTestConfig.swapId,
+  swapHistoryTestConfig.addressFrom,
+  swapHistoryTestConfig.addressTo,
+  swapHistoryTestConfig.tmsLinks,
+  swapHistoryTestConfig.tags,
+);
+```
+
+**The driver** — `e2e/mobile/specs/swap/otherTestCases/swap.other.ts`, the function we will reuse:
+
+```typescript
+export function runExportSwapHistoryOperationsTest(
+  swap: SwapType,
+  provider: Provider,
+  swapId: string,
+  addressFrom: string,
+  addressTo: string,
+  tmsLinks: string[],
+  tags: string[],
+) {
+  describe("Swap history", () => {
+    beforeAll(async () => {
+      await app.speculos.setExchangeDependencies(swap);
+      await beforeAllFunctionSwap({
+        userdata: "swap-history",
+        speculosApp: AppInfos.EXCHANGE,
+      });
+    });
+
+    tmsLinks.forEach(tmsLink => $TmsLink(tmsLink));
+    tags.forEach(tag => $Tag(tag));
+    it(`Export swap history operations - ${swap.accountToDebit.currency.name} to ${swap.accountToCredit.currency.name}`, async () => {
+      swap.accountToDebit.address = addressFrom;
+      swap.accountToCredit.address = addressTo;
+      await app.swap.goToSwapHistory();
+      await app.swap.clickExportOperations();
+      await app.swap.checkExportedFileContents(swap, provider, swapId);
+    });
+  });
+}
+```
+
+**The assertion** — `e2e/mobile/page/trade/swap.page.ts`, the method the driver calls at the end:
+
+```typescript
+@Step("Check contents of exported operations file")
+async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) {
+  const targetFilePath = path.resolve(__dirname, "../../artifacts/ledgerwallet-swap-history.csv");
+  const fileContents = await fs.readFile(targetFilePath, "utf-8");
+
+  jestExpect(fileContents).toContain(provider.name);
+  jestExpect(fileContents).toContain(id);
+  jestExpect(fileContents).toContain(swap.accountToDebit.currency.ticker);
+  jestExpect(fileContents).toContain(swap.accountToCredit.currency.ticker);
+  jestExpect(fileContents).toContain(swap.amount);
+  jestExpect(fileContents).toContain(swap.accountToDebit.accountName);
+  jestExpect(fileContents).toContain(swap.accountToDebit.address);
+  jestExpect(fileContents).toContain(swap.accountToCredit.accountName);
+  jestExpect(fileContents).toContain(swap.accountToCredit.address);
+}
+```
+
+**Conclusion.** The driver is fully parameter-safe. It takes any `SwapType`, any `Provider`, any `swapId`, and any two addresses. Nothing about it is hard-wired to native-receive. The assertion only reads `currency.ticker`, `accountName`, and `address` from each side of the swap — all of which a `TokenAccount` exposes correctly (more on that in 4.10.4). **The gap is pure data coverage: we need a second spec, targeting the same driver, with an ERC20 receive account and a matching fixture entry.**
+
+### 5.10.4 Picking the Representative Case
+
+**Choice: SOL → USDT (ERC-20 on Ethereum).** Reasons:
+
+- **Matches the bug.** LIVE-19533 was triggered by an ERC20 receive; USDT is the archetype.
+- **USDT is the highest-volume ERC20 Ledger Live users receive from swaps.** USDC is a close second, covered in 4.10.13 as the obvious follow-up.
+- **The enum entry already exists.** `TokenAccount.ETH_USDT_1` is defined at `libs/ledger-live-common/src/e2e/enum/Account.ts:319` with `accountName: "Tether USD 1"`, `Currency.ETH_USDT` (ticker `"USDT"`), and `parentAccount: Account.ETH_1`.
+- **Reuses the step-1 spec shape exactly.** Only three fields change in the spec: the receive-side account (`TokenAccount.ETH_USDT_1` instead of `Account.ETH_1`), the `swapId`, and the two address constants (because the swap we capture in Phase 2 will be executed on a different SOL/ETH holder pair from step 1 — we will add two new entries to `Addresses.ts`).
+
+**Alternative considered: SOL → USDC.** Equally valid; `TokenAccount.ETH_USDC_1` exists at `Account.ts:310`. If the Swap team prefers USDC as the first ERC20 scenario, the only changes are the enum name and the captured `swapId`. Either choice discharges the ticket. We pick USDT and mention USDC in the reference section.
+
+**Why not ETH → USDT?** A native-to-ERC20 swap would cover the scenario too, but the step-1 precedent (`SOL_1` as debit) and the fixture shape (SOL history on the sending side) make **keeping the debit side as SOL** the lowest-churn change. One data axis moves — the Receive side — which is what the ticket asks for.
+
+### 5.10.5 Create a Branch
+
+Following the repo convention for new E2E coverage — `test/` prefix, ticket slug:
 
 ```bash
 cd /path/to/ledger-live
-git fetch origin support/qaa_add_revoke_token
-git checkout -b support/qaa_add_revoke_token origin/support/qaa_add_revoke_token
-git show 4fa4868a35
+git checkout develop
+git pull
+pnpm i
+
+git checkout -b test/qaa-702-swap-history-erc20-export
 ```
 
-Three files, 37 lines added, 1 line edited (commented out).
+Why `test/` and not `feat/`: the change lives entirely under `e2e/mobile/`, `e2e/mobile/userdata/`, and `libs/ledger-live-common/src/e2e/enum/`. We are shipping test coverage, not product behaviour. This matches the commit type we will use below (`test(mobile): ...`) — check recent PRs landing swap specs to confirm the team's current preference; `feat(mobile):` is also tolerated.
 
-| File | Lines | Purpose |
-|---|---|---|
-| `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | +20 | New `revokeTokenCommand` typed wrapper (Layer 3) |
-| `e2e/desktop/tests/page/swap.page.ts` | +15 | New `revokeTokenApproval` POM method (Layer 5) |
-| `e2e/desktop/tests/specs/provider.swap.spec.ts` | +1 / -1 | Dev-loop swap: comment out `ensureTokenApproval`, call `revokeTokenApproval` instead |
+### 5.10.6 Run the Baseline in Isolation
 
-The commit message is one line:
+Never judge your own change against a broken baseline. Confirm step 1 is green **before** touching anything.
 
+**One-time build** (required after a fresh clone or any native-code change):
+
+```bash
+# iOS — needs macOS + Xcode
+pnpm --filter ledger-live-mobile-e2e-tests run build:ios:debug
+
+# Android — needs Android SDK + a running emulator
+pnpm --filter ledger-live-mobile-e2e-tests run build:android:debug
 ```
-test: add token approval command in e2E
+
+**Run step 1 alone:**
+
+```bash
+cd e2e/mobile
+pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperations"
 ```
 
-That message is *deliberately understated* — the senior is signalling "this is the spike PoC; the polished commit message will land with the final PR". Don't echo the same message when you ship; rewrite it for the final PR.
+Expected output: **1 test passing**, the SOL → native-ETH export. The test takes about 45–90 seconds end-to-end (Speculos boot, app launch, userdata hydration, navigation, CSV write, CSV read, teardown).
 
-**One thing the commit does not contain:** mobile parity, the spike report, the corrected `@step` description, the proper hook ordering. Those four items are your work.
+If this run is red, **stop**. It means either your environment is broken (Speculos not running, wrong Detox build, stale metro cache) or the step 1 spec has started failing for unrelated reasons. Chapters 4.4 (Toolchain) and 4.8 (Running & Debugging) walk through the recovery paths. Fix the environment first; resume QAA-702 once the baseline is green.
 
-### 5.8.4 File 1 — `cliCommandsUtils.ts` Line by Line
+### 5.10.7 Phase 1 — Check if the Pair Exists in the Current Fixture
 
-The new function lives next to its existing twin `approveTokenCommand`. Read it as a unit:
+The driver hardcodes `userdata: "swap-history"` → `e2e/mobile/userdata/swap-history.json`. We need to know whether it already contains a SOL → USDT swap operation. Rather than grepping through 5,000 lines of dense JSON, load the fixture into Ledger Live Desktop and browse the swap history in the product UI — faster, and it lets you see the entries as a user would.
+
+**On macOS the LLD state file is** `~/Library/Application Support/Ledger Live/app.json` (Linux: `~/.config/Ledger Live/app.json`; Windows: `%AppData%/Ledger Live/app.json`). The fixture file has the same shape as that app state, by design.
+
+Steps:
+
+1. **Quit Ledger Live Desktop** completely (Cmd-Q on macOS). A running instance will overwrite any change you make on disk when it exits.
+2. **Back up your personal state** so you can restore it after:
+
+   ```bash
+   cd "$HOME/Library/Application Support/Ledger Live"
+   mv app.json app2.json
+   ```
+3. **Copy the fixture in:**
+
+   ```bash
+   cp /path/to/ledger-live/e2e/mobile/userdata/swap-history.json \
+      "$HOME/Library/Application Support/Ledger Live/app.json"
+   ```
+4. **Relaunch Ledger Live Desktop.** It will hydrate with the fixture's accounts and swap history.
+5. **Navigate to Swap → History.** Scan for any SOL → USDT entries.
+
+You will find **two SOL → native-ETH** operations (both `wQ90NrWdvJz5dA4`) and **no ERC20 receive entry**. That is the gap QAA-702 asks us to close — so we need to produce a real ERC20-receive swap and fold it into the fixture.
+
+> **Restore your personal state when you're done experimenting:** quit LLD, rename `app2.json` back to `app.json`. Don't forget this — running your personal account list through a dev build of LLD is not the mistake we want to debug.
+
+### 5.10.8 Phase 2 — Create the Pair on a Real Device
+
+To produce a genuine swap operation we execute it for real, then scrape the result off the exported CSV.
+
+1. **Start from the fixture state** (Phase 1 step 3 already put the fixture in `app.json`). Launch LLD.
+2. **Plug in a Ledger device** loaded with the **QAA test seed**. That seed owns the Solana account (`Solana 1`) already present in the fixture — otherwise the swap won't sign.
+3. **Open Swap.** Choose **SOL** as the *from* asset (pick your existing Solana 1 account), **USDT** on Ethereum as the *to* asset.
+4. **Enter the minimum amount — `0.07` SOL** (on French locale, LLD renders this as `0,07` — the comma form is what the Swap class stores, and what you'll pass back in the spec below).
+5. **Select a quote.** Today only **NEAR Intents** quotes this pair; take it. Quote availability drifts over time, so note whatever you use.
+6. **Confirm the swap on the device.** Let it execute to completion.
+7. **Go to Swap → History.** Confirm the new entry shows up.
+8. **Click "Export operations"** to generate the CSV, then open the file.
+9. **Capture three values from the CSV** — you will need them verbatim for Phase 3 and Phase 4:
+   - The **swap ID** (UUID, e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`).
+   - The **Solana sender address** — the SOL holder that paid for the swap.
+   - The **Ethereum recipient address** — the ETH holder that received the USDT.
+
+Because the swap was executed on the QAA seed (not the synthetic fixture seed from step 1), both addresses will be new — they do NOT match `SWAP_HISTORY_SOL_FROM` or `SWAP_HISTORY_ETH_TO`. That's why we will add two new `Addresses.ts` constants in Phase 4.
+
+### 5.10.9 Phase 3 — Import the New Operation into the Test Fixture
+
+After Phase 2 the new swap lives in your local `app.json` at `~/Library/Application Support/Ledger Live/app.json`. It needs to be copied into the test fixture `e2e/mobile/userdata/swap-history.json` so the spec has something to assert against.
+
+The scale mismatch: `app.json` is roughly **25,000 lines** (full LLD state — every account, every operation, every cached balance, every feature-flag override), while `swap-history.json` is closer to **5,000 lines** (trimmed to what the swap suite actually needs). You do **not** want to wholesale replace the fixture with your personal dump. Instead, extract just the Solana account block containing the new swap and graft it in.
+
+Steps:
+
+1. **Open `app.json` in an editor** that can handle a 25k-line file (VS Code is fine). Format it (`jq '.' app.json > app.formatted.json` or run your editor's Prettier-on-save) so the indentation matches the fixture.
+2. **Search for the swap ID** you captured in Phase 2 — e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`. You will land inside the Solana account's `data.swapHistory` array. Scroll out to the enclosing *accounts[i]* wrapper — the `{ "data": { ... }, "version": 1 }` object.
+3. **Copy the entire accounts[i] wrapper** — from the opening `{` (immediately before `"data": {`) through the matching closing `}` after `"version": 1`. Example shape (abbreviated):
+
+   ```json
+   {
+     "data": {
+       "id": "js:2:solana:FDaDTiZbkXh5H5mdfsW3UHVME15qgMPAcKE7JowzU61Z:solanaSub",
+       "freshAddress": "FDaDTiZbkXh5H5mdfsW3UHVME15qgMPAcKE7JowzU61Z",
+       "operationsCount": 3,
+       "operations": [ /* … */ ],
+       "currencyId": "solana",
+       "balance": "77232851",
+       "swapHistory": [
+         {
+           "status": "finished",
+           "provider": "nearintents",
+           "operationId": "js:2:solana:…-OUT",
+           "swapId": "1172570f-5a02-43b9-83fc-cad47bfd12f3",
+           "receiverAccountId": "js:2:ethereum:0x70AAEEe70118a065ddF84dF6669b496A447C8CcC:",
+           "tokenId": "ethereum/erc20/usd_tether__erc20_",
+           "fromAmount": "69637880",
+           "toAmount": "5623953.000000000000000000000000000000000106324",
+           "finalAmount": "5.611443"
+         },
+         {
+           "status": "finished",
+           "provider": "nearintents",
+           "operationId": "js:2:solana:…-OUT",
+           "swapId": "1172570f-5a02-43b9-83fc-cad47bfd12f3",
+           "receiverAccountId": "js:2:ethereum:0x70AAEEe70118a065ddF84dF6669b496A447C8CcC:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
+           "tokenId": "js:2:ethereum:0x70AAEEe70118a065ddF84dF6669b496A447C8CcC:+ethereum%2Ferc20%2Fusd~!underscore!~tether~!underscore!~~!underscore!~erc20~!underscore!~",
+           "fromAmount": "69637880",
+           "toAmount": "5622578",
+           "finalAmount": "5.611443"
+         }
+       ],
+       "name": "Solana 1",
+       "starred": false
+     },
+     "version": 1
+   }
+   ```
+
+   Notice the pattern: LLD stores **two** entries per ERC20 swap — one addressed to the parent ETH account (native form) and one to the ETH+token sub-account (the `+ethereum%2Ferc20%2F...` suffix). Keep both; the driver's CSV export assertion reads whichever the UI hands it.
+4. **Open `e2e/mobile/userdata/swap-history.json`.** Search for the existing step-1 swap ID, `wQ90NrWdvJz5dA4`. You'll find it inside the existing SOL account block.
+5. **Paste your copied accounts[i] wrapper immediately after** the existing SOL account block's closing `}`. Fix the commas: the previous block must end with `,`, and yours is followed by whatever separator (`,` or `]`) was there already.
+6. **Validate the JSON:**
+
+   ```bash
+   jq '.' e2e/mobile/userdata/swap-history.json > /dev/null
+   ```
+
+   A syntax error here will kill every spec in `specs/swap/otherTestCases/`, so validate before moving on.
+7. **(Optional) Trim noise.** LLD may have filled your account block with additional fields the fixture does not use (per-session feature-flag overrides, analytics breadcrumbs). Nothing forces you to trim them — but if the fixture grows past what feels reasonable, compare against neighbouring accounts already in the file and delete the fields they don't include.
+
+### 5.10.10 Phase 4 — Extend the Addresses Enum, Teach the Driver about ERC20 Names, and Implement the Spec
+
+Three files change: `Addresses.ts` gets two new constants, `swap.page.ts`'s CSV assertion gains an ERC20 parent-name fallback, and the new spec file wires everything together.
+
+**Step 1 — Extend `libs/ledger-live-common/src/e2e/enum/Addresses.ts`:**
 
 ```ts
-// libs/ledger-live-common/src/e2e/cliCommandsUtils.ts
-export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
-  const original = setDisableTransactionBroadcastEnv("0");
+export enum Addresses {
+  BTC_NATIVE_SEGWIT_1 = "bc1q2dh3p38d3pavjkvvk7wr25dcdnclvjnll9kta9",
+  SANCTIONED_ETHEREUM = "0x04DBA1194ee10112fE6C3207C0687DEf0e78baCf",
+  ETH_2 = "0xc79c7a29c40Ce8F5746af2c956F93F27e2820307",
+  ETH_OTHER_SEED = "0xce12D0A5cFf4A88ECab96ff8923215Dff366127b",
+  SOL_OTHER_SEED = "DLVArScX1BQEr7gZSSpHMGMq7HKKFKdFF82Cs6PvEKVC",
+  SOL_GIGA_1_ATA_ADDRESS = "4h9zusLsPZsZVajWH1Dtgd4ccopL4fvNAE7T8LxX4H1g",
+  SOL_GIGA_2_ATA_ADDRESS = "FWS3ZK9E4vc6Wz29vWzPpY7CLNebBRYe1FaxY7EdQDGf",
+  SOL_WIF_2_ATA_ADDRESS = "FDFqWGGg9mP1JBVLS4UXDhs4y5mHnHNDXQxCGUHr81Vz",
+  SWAP_HISTORY_SOL_FROM = "21kh76PRK8k6UFgd7uwpmkCq1V5q9B8WNKHvwYNgTNub",
+  SWAP_HISTORY_ETH_TO = "0x8526F50A2FA870B1B7b91cc054aa06799dAc0110",
+  SWAP_HISTORY_ERC20_SOL_FROM = "FDaDTiZbkXh5H5mdfsW3UHVME15qgMPAcKE7JowzU61Z",
+  SWAP_HISTORY_ERC20_ETH_USDT_TO = "0x70AAEEe70118a065ddF84dF6669b496A447C8CcC",
+}
+```
 
-  const result = runCliTokenApproval({
-    currency: account.currency.speculosApp.name,
-    index: account.index,
-    spender,
-    token: account.currency.id,
-    mode: "revokeApproval",
-    waitConfirmation: true,
-  });
+The last two entries are the `from` and `to` addresses you captured from the CSV in Phase 2. Keep the existing `SWAP_HISTORY_*` constants untouched — step 1 still consumes them.
 
-  try {
-    await approveToken();
-  } finally {
-    setDisableTransactionBroadcastEnv(original);
+**Step 2 — Teach `swap.page.ts` that ERC20 rows export the parent account's name, not the token account's name.** Ledger Live's CSV exporter writes the *parent* Ethereum account's `accountName` (e.g., `"Ethereum 1"`) when the row involves an ERC20 TokenAccount — not the token-side name (`"Tether USD 1"`). The existing `checkExportedFileContents` asserted on `swap.accountToCredit.accountName`, which works for native-ETH step 1 but breaks on any ERC20 pair. Update the driver helper to fall back to the parent when the account is an ERC20 TokenAccount.
+
+Open `e2e/mobile/page/trade/swap.page.ts` and replace the existing `checkExportedFileContents` method with:
+
+```typescript
+@Step("Check contents of exported operations file")
+async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) {
+  const targetFilePath = path.resolve(__dirname, "../../artifacts/ledgerwallet-swap-history.csv");
+  const fileContents = await fs.readFile(targetFilePath, "utf-8");
+
+  // If sender or receiver is a ERC20 token, the csv export takes the parent name
+  let accountToDebitNameInCsv: string;
+  let accountToCreditNameInCsv: string;
+
+  if (swap.accountToDebit.tokenType === TokenType.ERC20 && swap.accountToDebit.parentAccount) {
+    accountToDebitNameInCsv = swap.accountToDebit.parentAccount.accountName;
+  } else {
+    accountToDebitNameInCsv = swap.accountToDebit.accountName;
   }
-  return await result;
+  if (swap.accountToCredit.tokenType === TokenType.ERC20 && swap.accountToCredit.parentAccount) {
+    accountToCreditNameInCsv = swap.accountToCredit.parentAccount.accountName;
+  } else {
+    accountToCreditNameInCsv = swap.accountToCredit.accountName;
+  }
+
+  jestExpect(fileContents).toContain(provider.name);
+  jestExpect(fileContents).toContain(id);
+  jestExpect(fileContents).toContain(swap.accountToDebit.currency.ticker);
+  jestExpect(fileContents).toContain(swap.accountToCredit.currency.ticker);
+  jestExpect(fileContents).toContain(swap.amount);
+  jestExpect(fileContents).toContain(accountToDebitNameInCsv);
+  jestExpect(fileContents).toContain(swap.accountToDebit.address);
+  jestExpect(fileContents).toContain(accountToCreditNameInCsv);
+  jestExpect(fileContents).toContain(swap.accountToCredit.address);
+}
+```
+
+What changed, line-by-line:
+
+- Two new locals `accountToDebitNameInCsv` / `accountToCreditNameInCsv` resolve the correct account name to assert against.
+- Each local is set to the **parent** `accountName` when the side is an ERC20 TokenAccount (guarded on both `tokenType === TokenType.ERC20` and the presence of `parentAccount`, so a malformed enum entry can't trigger a null dereference), and falls back to the account's own `accountName` otherwise.
+- The `toContain(swap.accountToDebit.accountName)` and `toContain(swap.accountToCredit.accountName)` assertions are replaced with the resolved locals.
+- Ticker, address, amount, provider, and `swapId` assertions are unchanged — those already read the right source.
+- `TokenType` must be in scope. If it is not already imported at the top of the file, add it alongside the existing enum imports, e.g. `import { TokenType } from "@ledgerhq/live-common/e2e/enum/Account"` (verify the exact export path against the file — it lives alongside `TokenAccount`).
+
+This change is backward-compatible: step 1 (SOL → native ETH) takes neither `if` branch, so `accountToCreditNameInCsv` still resolves to `"Ethereum 1"` (the step-1 expectation). No adjustment to step 1 is required — but your rerun matrix must still include it, because a driver change always has to clear the existing green before you trust it on the new case.
+
+**Step 3 — Create the spec** at `e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts`:
+
+```ts
+import { Account, TokenAccount } from "@ledgerhq/live-common/e2e/enum/Account";
+import { Provider } from "@ledgerhq/live-common/e2e/enum/Provider";
+import { Addresses } from "@ledgerhq/live-common/e2e/enum/Addresses";
+import { runExportSwapHistoryOperationsTest } from "./swap.other";
+
+const solMinAmount = "0,07";
+const swapId = "1172570f-5a02-43b9-83fc-cad47bfd12f3";
+
+const swapHistoryERC20TestConfig = {
+  swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, solMinAmount),
+  provider: Provider.NEAR_INTENTS,
+  swapId,
+  addressFrom: Addresses.SWAP_HISTORY_ERC20_SOL_FROM,
+  addressTo: Addresses.SWAP_HISTORY_ERC20_ETH_USDT_TO,
+  tmsLinks: ["B2CQA-604"],
+  tags: [
+    "@NanoSP",
+    "@LNS",
+    "@NanoX",
+    "@Stax",
+    "@Flex",
+    "@NanoGen5",
+    "@solana",
+    "@family-solana",
+    "@ethereum",
+    "@family-evm",
+  ],
 };
+
+runExportSwapHistoryOperationsTest(
+  swapHistoryERC20TestConfig.swap,
+  swapHistoryERC20TestConfig.provider,
+  swapHistoryERC20TestConfig.swapId,
+  swapHistoryERC20TestConfig.addressFrom,
+  swapHistoryERC20TestConfig.addressTo,
+  swapHistoryERC20TestConfig.tmsLinks,
+  swapHistoryERC20TestConfig.tags,
+);
 ```
 
-Walk it line by line.
+Field-by-field justification:
 
-#### Line 1 — the signature
+- **`swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, solMinAmount)`** — debit is `Account.SOL_1`, credit is the ERC20 token account `TokenAccount.ETH_USDT_1`. Note the `TokenAccount` import is added to the same `@ledgerhq/live-common/e2e/enum/Account` module as the base `Account` enum. The amount is passed as the string `"0,07"` (comma form — that's what the fixture stores under the French locale). `Swap` is a global injected by the Jest environment — do not `import` it.
+- **`solMinAmount = "0,07"`** hoisted to a named constant so the magic number doesn't get lost in the object.
+- **`provider: Provider.NEAR_INTENTS`** — must match the `"provider": "nearintents"` field in the fixture entry you just pasted.
+- **`swapId`** hoisted and set to the UUID you copied from the CSV; the driver uses it verbatim to locate the CSV row.
+- **`addressFrom: Addresses.SWAP_HISTORY_ERC20_SOL_FROM`** — the Solana holder the swap was executed from (captured in Phase 2, added to the enum in Step 1 above).
+- **`addressTo: Addresses.SWAP_HISTORY_ERC20_ETH_USDT_TO`** — the Ethereum holder that received the USDT. Two new constants, not a reuse of step 1's — different seed, different addresses.
+- **`tmsLinks: ["B2CQA-604"]`** — reuse of the same Xray case ID per Pavlo's step-2 comment on the ticket. In the Allure output this spec will display a `B2CQA-604` badge alongside step 1's identical badge; Xray is fine with two automated executions mapping to one test case.
+- **`tags`** — same set as step 1. The pair is cross-family (SOL → USDT on Ethereum) so both `@family-solana` and `@family-evm` apply; a CI filter on either will pick this spec up.
 
-```ts
-export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
+### 5.10.11 Rerun the Tests
+
+With the spec and fixture in place, run only the new file:
+
+```bash
+cd e2e/mobile
+pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperationsERC20"
 ```
 
-- `TokenAccount` (not `Account`) — by type, only token sub-accounts can be revoked. A native Account (ETH, BTC) has no allowance to clear; the type system prevents calling this with a wrong shape.
-- `spender: string` — the contract address that holds the allowance. In swap tests that is `provider.contractAddress` (e.g., 1inch's router on Ethereum, OKX's router, etc.).
-- No `approveAmount` argument. Compare to its twin:
+**On the first run, expect RED.** Typical first-fail causes, in order of likelihood:
 
-  ```ts
-  export const approveTokenCommand = async (
-    account: TokenAccount, spender: string, approveAmount: string,
-  ) => { ... };
-  ```
+1. **Fixture JSON is malformed** — most common. `jq .` on the file catches this in one command. Fix the comma/brace that went missing when you pasted the accounts block in Phase 3.
+2. **`swapId` mismatch** between spec and fixture. The UUID you captured from the CSV (e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`) must appear verbatim in both files; the driver compares byte-for-byte.
+3. **`toContain` miss on `swap.amount`.** The amount string you pass to the `Swap` constructor must appear *as written* in the CSV. Here it is `"0,07"` (comma — the locale form Ledger Live writes to the CSV). If you see a `toContain("0,07")` failure, open the CSV and confirm what character the app actually used; on an English-locale build it may write `0.07` instead, in which case align the spec's `solMinAmount` with the CSV.
+4. **`provider` mismatch.** `Provider.NEAR_INTENTS` resolves to the string `"nearintents"` in the enum; the fixture entry must use the same key. If you took the swap through a different provider, update both.
+5. **`toContain` miss on `swap.accountToCredit.accountName`** — the driver asserts that `"Tether USD 1"` appears in the exported CSV. If the product has recently renamed the default USDT account label, you will need to align `TokenAccount.ETH_USDT_1.accountName` with reality (a live-common change — separate concern, cover it in a follow-up PR).
 
-  The revoke is **always to zero**. The senior didn't add an `approveAmount: "0"` parameter because that would be a footgun — callers could pass `"100"` and turn revoke into a partial approve.
+Walk failures by opening the Detox console output, then the Allure report (next section), then iterating. Do **not** change the driver to "work around" a fixture problem. The driver is shared; it is correct for step 1 and for every sibling in `swap.other.ts`.
 
-#### Line 2 — flip the broadcast env
+Once green, run three times in a row for stability (mobile E2E is flakier than desktop by an order of magnitude):
 
-```ts
-const original = setDisableTransactionBroadcastEnv("0");
+```bash
+for i in 1 2 3; do
+  pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperationsERC20" || break
+done
 ```
 
-- `"0"` means `DISABLE_TRANSACTION_BROADCAST` is now falsy → the CLI **will** broadcast.
-- `original` captures whatever the env was before the flip. Could be `"1"`, `"0"`, or `undefined`. We must restore it later, regardless.
-- Why "0" and not unset? Because the function explicitly opts into broadcast. The whole reason to revoke is to change on-chain state; signing without sending would defeat the purpose.
+All three passes is the acceptance bar.
 
-This is the same flip `approveTokenCommand` does. The pattern is documented in Chapter 5.6.7.
+### 5.10.12 Verify with Allure
 
-#### Lines 4-11 — build and start the CLI subprocess
+From `e2e/mobile/`:
 
-```ts
-const result = runCliTokenApproval({
-  currency: account.currency.speculosApp.name,
-  index: account.index,
-  spender,
-  token: account.currency.id,
-  mode: "revokeApproval",
-  waitConfirmation: true,
-});
+```bash
+pnpm allure
 ```
 
-- `runCliTokenApproval` is the Layer-2 spawn wrapper (Chapter 5.4). It returns a `Promise<string>` that resolves with the CLI's stdout when the subprocess exits cleanly.
-- `currency: account.currency.speculosApp.name` — the *speculos app* name, not the parent chain ID. For an ERC-20 USDT account, `account.currency.speculosApp.name` is `"Ethereum"` (the app that signs ERC-20s). This is what gets passed to `--currency` and is also what `launchSpeculos` uses (you'll see it again in File 2).
-- `index: account.index` — the account index in the seed's derivation tree. The senior is reading this off the `TokenAccount` directly.
-- `spender` — passed straight through to `--spender`. The CLI bakes it into the calldata.
-- `token: account.currency.id` — the live-common currency ID, e.g., `"ethereum/erc20/usd_coin"`. The CLI resolves this to a contract address internally.
-- `mode: "revokeApproval"` — the magic flag. This is parsed by `inferTransactionsOpts` in `apps/cli/src/transaction.ts` and dispatched to `libs/coin-modules/coin-evm/src/cli-transaction.ts:inferTransactions`, where the EVM mode is converted into the transaction shape (`recipient = token contract`, `amount = 0`, `data = getErc20ApproveData(spender, 0n)`). See Chapter 5.4 for the trace.
-- `waitConfirmation: true` — adds `--wait-confirmation` to argv. The CLI will keep its subprocess alive until the device signs *and* broadcasts *and* the tx is confirmed in a block. Without this flag, the CLI exits immediately after broadcast and your test moves on before the chain has settled — leading to flaky pre-checks on the next iteration.
+This runs `allure generate ./artifacts` then `allure open`. In the report:
 
-**Note the assignment**, not `await`. The function fires the CLI subprocess and stores the still-pending promise in `result`. Awaiting it now would block the device-tap helper from running in parallel — and the device tap is what *unblocks* the CLI.
+- Navigate **Suites → Swap history → Export swap history operations - Solana to Tether USD**
+- Check the **Links** panel — a `B2CQA-604` badge must be present (injected by `tmsLinks.forEach($TmsLink)` in the driver)
+- Expand **Steps** — you should see:
+  1. *Go to swap history* (from `goToSwapHistory()`)
+  2. *Click on export operations* (from `clickExportOperations()`)
+  3. *Check contents of exported operations file* (from `checkExportedFileContents()`)
+- The step list must match step 1's shape exactly. If your tree diverges (extra step, missing step), the driver contract has broken.
+- **Tags** — confirm the 10 tags you set appear as Allure labels. CI's `test_filter` matches against these.
 
-#### Lines 13-17 — the device-tap dance
+Paste a screenshot of the step tree into the PR body when you open the review.
 
-```ts
-try {
-  await approveToken();
-} finally {
-  setDisableTransactionBroadcastEnv(original);
-}
+### 5.10.13 Commit the Change
+
+Four concerns, four commits is cleanest:
+
+```bash
+git add libs/ledger-live-common/src/e2e/enum/Addresses.ts
+git commit -m "test(mobile): add SWAP_HISTORY_ERC20_* addresses to Addresses enum"
+
+git add e2e/mobile/page/trade/swap.page.ts
+git commit -m "test(mobile): handle ERC20 parent-name fallback in swap CSV assertion"
+
+git add e2e/mobile/userdata/swap-history.json
+git commit -m "test(mobile): add ERC20 (USDT) swap history entry to swap-history userdata"
+
+git add e2e/mobile/specs/swap/otherTestCases/swapExportHistoryOperationsERC20.spec.ts
+git commit -m "test(mobile): add ERC20 receive scenario to swap history export (QAA-702)"
 ```
 
-- `approveToken()` is the Layer-4 helper from `libs/ledger-live-common/src/e2e/families/evm.ts` (Chapter 5.4 §6). It drives the Speculos REST API to walk through the approval screens — `waitFor(REVIEW_TRANSACTION_TO)`, `pressUntilTextFound(SIGN_TRANSACTION)`, then both buttons (or hold-to-sign on touch devices).
-- The function name is a misnomer for this context — `approveToken` *means "tap through the approve-or-revoke confirmation screens"*. Both transactions render the same `ERC20.APPROVE` selector to the device; the only difference is the on-screen amount (zero for revoke, N for approve). The device flow is identical, so the helper is reused.
-- `try/finally` around it is the safety net. If `approveToken()` throws (label timeout, button-press error), we still hit the `finally` block and restore the env. Without that, the env would be left at `"0"` for the rest of the test run, silently flipping broadcast on for every subsequent CLI call. Chapter 5.6.7 covers this in detail.
+Why four commits: each concern is independently reversible and reviewable. The `Addresses` enum change touches live-common and may want isolated review by that module's owners; the `swap.page.ts` change is a driver-level contract that affects every swap spec that ever runs `checkExportedFileContents`, so reviewers will want to inspect it alone; the fixture change is reusable for future SPL/BSC scenarios; the spec is the coverage delivery. If the team's norm is one commit per PR (check recent merged PRs under `e2e/mobile/`), squash on merge.
 
-The CLI subprocess and `approveToken()` run in parallel. While the CLI is blocked at `bridge.signOperation` waiting for the device, `approveToken()` *is* the user — driving the simulator to sign.
+Conventional-Commit shape is per `.claude/rules/git-workflow.md`: `<type>(scope): <imperative description>`. Scope is `mobile` (matching the `e2e/mobile/` root). Type is `test` — we are strictly adding coverage; no product behaviour moves.
 
-#### Line 18 — return the CLI stdout
+### 5.10.14 Open the PR with `/create-pr`
 
-```ts
-return await result;
+From the repo root:
+
+```
+/create-pr
 ```
 
-- This is the await we deferred earlier. By the time we hit it, the device has signed (because `approveToken()` resolved), the CLI has broadcast (because the env was `"0"`), and the chain has confirmed (because `waitConfirmation: true`).
-- The returned string is the CLI's stdout. With default formatting, it's a human-readable log; with `--format json`, it's a structured envelope. The POM method (File 2) attaches this string to the Allure report so reviewers can see what landed.
+Answer the prompts:
 
-**What this function does NOT do:**
-- It does not check if there's anything to revoke. Calling revoke on a zero allowance is a no-op gas-wise but still costs a tx fee and a confirmation. If you wanted to skip the device dance when allowance is already zero, you'd add an `isTokenAllowanceSufficientCommand(account, spender, 0)`-style pre-check — the senior chose not to, probably because in regression context the revoke runs in `beforeEach` regardless and the no-op check would add complexity for marginal savings.
+1. **Ticket URL** — `https://ledgerhq.atlassian.net/browse/QAA-702`
+2. **Ticket description** — "Add step 2 of B2CQA-604: swap history export with ERC20 (USDT) on Receive side. Closes LIVE-19533 regression hole."
+3. **Change type** — `test`
+4. **Change scope** — `e2e/mobile`
+5. **Test coverage** — `yes`
+6. **QA focus areas** — "Swap history export, ERC20 receive, CSV artifact assertion on `TokenAccount.accountName` / `currency.ticker`"
+7. **UI changes** — `no`
 
-### 5.8.5 File 2 — `swap.page.ts` Line by Line
+Reviewers to request (CODEOWNERS will add `@ledgerhq/wallet-xp` automatically; add the PTX/Swap owner by hand):
 
-```ts
-// e2e/desktop/tests/page/swap.page.ts
-@step("Ensure token approval")
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-  if (!provider.contractAddress || !fromAccount.parentAccount) return;
+- `@ledgerhq/wallet-xp` — `e2e/mobile/` owners
+- `@ledgerhq/ptx` or the Swap automation sub-team — fixture owners (surface the `swap-history.json` diff in the PR description so they review it deliberately)
 
-  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-  try {
-    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
-  } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
-  }
-}
-```
+After CI is green and approvals land:
 
-#### Line 1 — `@step("Ensure token approval")` — **THE COPY-PASTE BUG**
+1. Click **Ready for review** on the draft
+2. Merge into `develop`
+3. Move `QAA-702` to **Done** and comment "Step 2 of B2CQA-604 automated in PR #XXXX, spec `swapExportHistoryOperationsERC20.spec.ts`"
+4. In Xray, **B2CQA-604 already reads as Automated** (step 1 did that). If there is a "scenario steps covered" tracking field, mark step 2 as covered. Otherwise no Xray field changes — both steps share the same card.
 
-The senior copied this from `ensureTokenApproval` and forgot to update the description. In Allure reports, every test step rendered from this method will be labelled *"Ensure token approval"* — wrong on its face, and especially confusing when both methods run in the same test.
+### 5.10.15 Reference — Extending to Other ERC20 Receive Currencies
 
-**Fix before merge:**
+Once this template is green, adding USDC, DAI, or LINK is mechanical. Each new scenario requires **the same four-phase loop**: check fixture (Phase 1) → execute real swap on device (Phase 2) → import JSON block (Phase 3) → spec + `Addresses` entry (Phase 4).
 
-```ts
-@step("Revoke token approval")
-async revokeTokenApproval(...) { ... }
-```
+- **USDC.** Replace `TokenAccount.ETH_USDT_1` with `TokenAccount.ETH_USDC_1` (Account.ts:310, accountName `"USD Coin 1"`, `Currency.ETH_USDC`). Execute a fresh SOL → USDC swap on the QAA seed, capture the new `swapId` + addresses, append two new `Addresses` entries (`SWAP_HISTORY_ERC20_USDC_SOL_FROM`, `SWAP_HISTORY_ERC20_ETH_USDC_TO`), add the account block to `swap-history.json`, and name the spec `swapExportHistoryOperationsERC20_USDC.spec.ts`.
+- **DAI, LINK, MATIC-on-mainnet.** Same pattern. If the `TokenAccount` enum does not have the entry you need, add it to `libs/ledger-live-common/src/e2e/enum/Account.ts` in a **separate PR** first — the enum file is shared with desktop and wants to be reviewed in isolation.
+- **SPL / Solana tokens (e.g. ETH → GIGA).** Different family, but the driver does not care. The constraint is fixture content: SPL ops have `tokenId` in a different namespace and the `receiverAccountId` suffix is Solana-specific. Phases 1-3 stay identical; Phase 4 uses `TokenAccount.SOL_GIGA_1` (or equivalent) and Solana-side `Addresses` constants.
 
-This is the smallest, most obvious item on your do-list. Don't ship without it.
+If the team later asks for a dedicated B2CQA per currency (e.g. `B2CQA-9999 — Swap history export, USDC receive`), flip `tmsLinks` to the new ID. Until then, reuse `B2CQA-604` — that is the commitment recorded in Pavlo's comment.
 
-#### Line 2 — the signature
+### 5.10.16 Reference — Why `checkExportedFileContents` Needed the ERC20 Branch
 
-```ts
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-```
+Phase 4 Step 2 changed a driver shared by every swap export spec. The change deserves a short memo so future readers understand why step 1 did not need it.
 
-- Note `Account | TokenAccount`. The POM accepts a wider type than the Layer-3 helper (`TokenAccount` only). Why? Because callers in the swap spec already type their `fromAccount` as `Account | TokenAccount` (a swap can be from a native or a token account), and the POM wants to be a drop-in replacement at those call sites. The early-return guard on the next line catches the native-account case.
-- `provider: Provider` — the swap provider enum (1inch, OKX, etc.). Carries `contractAddress`, `uiName`, `app`, etc.
+**What Ledger Live's CSV exporter actually writes.** When you export swap history, the CSV's "From account" / "To account" columns render the **account display label as shown in the wallet UI**. For a native account (ETH, SOL, BTC), that label is the account's own `accountName` — `"Ethereum 1"`, `"Solana 1"`. For an ERC20 TokenAccount (`Account.ETH_USDT_1`, `Account.ETH_USDC_1`), the wallet UI shows the **parent** ETH account's name because the token sub-account is mounted under it — "Ethereum 1" holds both the native ETH balance and every ERC20 balance at that address. The CSV preserves that hierarchy: ERC20 rows export `"Ethereum 1"`, not `"Tether USD 1"`.
 
-#### Line 3 — the early-return guard
+**Why step 1 passed without the branch.** Step 1 swaps SOL → native ETH. `swap.accountToCredit` is `Account.ETH_1`, not a TokenAccount. Its `accountName` is already `"Ethereum 1"`. `tokenType` is absent (falsy), so the new `if` branch is skipped and the assertion runs unchanged on `swap.accountToCredit.accountName`. Backward compatibility is free.
 
-```ts
-if (!provider.contractAddress || !fromAccount.parentAccount) return;
-```
+**Why QAA-702 would fail without the branch.** In the ERC20 case, `swap.accountToCredit` is `TokenAccount.ETH_USDT_1` with `accountName = "Tether USD 1"`. The CSV never contains that string — it contains `"Ethereum 1"`. Without the parent-name fallback, `toContain("Tether USD 1")` fails on the very first assertion; the driver cannot even describe what the CSV actually says.
 
-- `!provider.contractAddress` — some providers don't need an allowance (CEX flows, native-to-native). For those, revoke is meaningless; skip.
-- `!fromAccount.parentAccount` — only a `TokenAccount` carries `parentAccount` (its EVM parent). A native `Account` returns `undefined` here. The guard catches the `Account | TokenAccount` widening from line 2.
+**Two guards, not one.** The condition is `tokenType === TokenType.ERC20 && parentAccount`. Both checks matter:
 
-**A subtle gap.** If a caller passed a native `Account` *with* a `parentAccount` (impossible by current types, but the type system doesn't enforce that the discriminant matches the flag), the guard would let it through and the helper would crash inside `revokeTokenCommand` because `account.currency.speculosApp.name` would not match the `TokenAccount` shape the CLI wrapper expects. Tightening this is on your do-list (5.8.7 #4).
+- `tokenType === TokenType.ERC20` narrows to the CSV-formatting case. If Ledger Live ever exports SPL (Solana) or other token families with a different CSV rule, this branch must be extended, not reused.
+- `parentAccount` is a defensive null-check. A malformed enum entry (`tokenType` set, `parentAccount` missing) would otherwise throw on `parentAccount.accountName`.
 
-#### Line 5 — snapshot the current Speculos port
+**What it does not cover.** The symmetric case — a swap where the DEBIT side is an ERC20 — is also handled by Step 2's code (the `accountToDebit` branch). No ERC20-debit spec exists yet in the mobile suite; when one lands (e.g., QAA-715: "USDT → BTC from-ERC20 swap history"), this branch is the reason it will not need a second driver change.
 
-```ts
-const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-```
+**What it does not patch.** `currency.ticker`, `currency.address`, `provider.name`, `swapId`, and `swap.amount` were already correct for every account type. Those assertions are untouched.
 
-- The fixture has already started a Speculos for the *swap* itself, on the Exchange app. That instance's port lives in `SPECULOS_API_PORT`.
-- We're about to replace it with a fresh Speculos running the *Ethereum* app (because revoke is an EVM tx, not a swap-sig request). When we're done, we must restore the original port, so the rest of the test continues to talk to the Exchange Speculos.
-- This is the snapshot/restore pattern from Chapter 5.5.
+> **If a future CSV format change breaks this assumption,** revisit the branch. The truth is what the CSV writes, not what our enum holds — always read the artifact first (`e2e/mobile/artifacts/ledgerwallet-swap-history.csv`) before blaming the spec.
 
-#### Line 6 — launch a fresh Speculos for the source coin's app
+### 5.10.17 PR Checklist
 
-```ts
-const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-```
+- [ ] New spec file compiles and runs in isolation
+- [ ] `swap-history.json` validates under `jq .`
+- [ ] Three consecutive green runs on iOS (and Android if your matrix covers it)
+- [ ] Allure report shows `B2CQA-604` link and three `@Step` entries
+- [ ] Commit messages follow `test(mobile): ...` convention
+- [ ] PR body includes the Allure step-tree screenshot and the fixture-diff highlight
+- [ ] Reviewers: `@ledgerhq/wallet-xp` + Swap-automation owner
+- [ ] QAA-702 linked in the PR description
+- [ ] `libs/ledger-live-common/src/e2e/enum/Addresses.ts` has the two new `SWAP_HISTORY_ERC20_*` constants and nothing else was moved
+- [ ] `e2e/mobile/page/trade/swap.page.ts` `checkExportedFileContents` has the ERC20 parent-name fallback (Phase 4 Step 2) and the step-1 spec still passes after the driver change
+- [ ] No changes to `swap.other.ts`
 
-- For a USDT→ETH swap with `fromAccount = TokenAccount.ETH_USDT_1`, `fromAccount.currency.speculosApp.name` is `"Ethereum"`. We launch a Speculos running the Ethereum app — the one that knows how to render ERC20.APPROVE clear-sign screens.
-- `launchSpeculos` registers the Speculos transport, sets `SPECULOS_API_PORT` to the new port, and returns a `SpeculosDevice`. See Chapter 5.5.
+<div class="chapter-outro">
+<strong>Key takeaway.</strong> QAA-702 is a surgical coverage addition, not a rewrite. The driver is already ERC20-safe; the page object's assertions already read ticker/accountName/address from any <code>Account | TokenAccount</code>; only two things were genuinely missing — a spec file declaring the USDT receive scenario, and a matching entry in the <code>swap-history</code> userdata fixture. The work that carries weight is the <em>diligence</em>: reading the driver first, inspecting the fixture to know whether you are adding or reusing, matching the <code>swapId</code> and <code>provider</code> fields byte-for-byte, and running three times before opening the PR. That is the loop every real QAA ticket rewards.
+</div>
 
-#### Lines 7-9 — call the Layer-3 helper, attach to Allure
-
-```ts
-try {
-  const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-  await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
-```
-
-- `revokeTokenCommand` does the broadcast-flip + spawn + device-tap + restore (you just walked it in 5.8.4).
-- `allure.description(...)` attaches the CLI stdout to the test's Allure entry. Reviewers see the actual transaction hash, gas used, and confirmation status without having to dig through CI logs.
-- The string includes `${provider.uiName}` so reviewers can tell *which* provider's revoke this was — useful when the spec iterates over multiple providers in one run.
-
-#### Line 11 — restore the previous Speculos
-
-```ts
-} finally {
-  await cleanSpeculos(speculos, previousSpeculosPort);
-}
-```
-
-- `cleanSpeculos` stops the Speculos process, unregisters its transport, and restores `SPECULOS_API_PORT` to `previousSpeculosPort`.
-- The `finally` ensures it runs even if the revoke threw — without it, the next test would inherit a stale port and a leaked Speculos container.
-- After this line, the world is back to the swap's Exchange Speculos, exactly as it was before `revokeTokenApproval` was called.
-
-### 5.8.6 File 3 — `provider.swap.spec.ts` Line by Line
-
-The diff is two lines:
-
-```diff
-  const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
-- await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
-+ //await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
-+ await app.swap.revokeTokenApproval(fromAccount, provider);
-  const swap = new Swap(fromAccount, toAccount, minAmount, provider);
-```
-
-#### What was removed
-
-`await app.swap.ensureTokenApproval(fromAccount, provider, minAmount)` ran the approve flow with a 1.2x slippage buffer (see Chapter 5.6's twin walkthrough). It set the allowance high enough that the swap that followed could pull tokens.
-
-#### What was added
-
-`//await app.swap.ensureTokenApproval(...)` — same line, commented out. The senior left the original code in as a marker; this is a common signal of "I'll un-comment this once the new line is proven".
-
-`await app.swap.revokeTokenApproval(fromAccount, provider)` — the new method from File 2. It clears whatever allowance is on-chain and returns.
-
-#### What this means
-
-**This is dev-loop code, not the final shape.** The senior wanted to test the revoke path *in isolation*. With both calls in place, a failure would be ambiguous (revoke or approve?). With only the revoke, a failure is unambiguously a revoke problem.
-
-The senior was iterating. The final PR must restore the approve and add the revoke as a `beforeEach` cleanup that runs *before* the per-test approve. The proposed shape is in 5.8.8.
-
-If you ship the senior's commit as-is, every swap test will revoke (good for state hygiene) but never approve (the swap then fails because allowance is zero — unrelated to the spike's intent). That's why this can't be the final shape.
-
-### 5.8.7 What's Still TODO Before Merge
-
-The senior left you six items. Work them in this order:
-
-#### 1. Fix the `@step` copy-paste bug
-
-```ts
-// e2e/desktop/tests/page/swap.page.ts:589 (approximately)
-- @step("Ensure token approval")
-+ @step("Revoke token approval")
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-```
-
-5-second fix. Smallest commit you'll write all sprint. Do it first; it changes Allure rendering for every subsequent test run you do.
-
-#### 2. Restore proper hook ordering in `provider.swap.spec.ts`
-
-The dev-loop swap (5.8.6) replaces approve with revoke. The final shape keeps both: revoke as a `beforeEach` cleanup, approve as the per-test setup. Proposed diff:
-
-```diff
-  for (const { fromAccount, toAccount, provider, xrayTicket } of providerFlowTests) {
-    test.describe(`Swap - ${provider.uiName} flow`, () => {
-      setupEnv(true);
-      test.use({ /* ... */ });
-
-+     test.beforeEach(async ({ app }) => {
-+       await app.swap.revokeTokenApproval(fromAccount, provider);
-+     });
-
-      test(
-        `Swap - ${provider.uiName} flow`,
-        { /* tag/annotation */ },
-        async ({ app }) => {
-          await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-
-          const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
--         //await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
--         await app.swap.revokeTokenApproval(fromAccount, provider);
-+         await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
-          const swap = new Swap(fromAccount, toAccount, minAmount, provider);
-
-          await performSwapUntilQuoteSelectionStep(app, swap, minAmount);
-          // ... rest unchanged ...
-        },
-      );
-    });
-  }
-```
-
-Why `beforeEach` and not the test body: the cleanup is a fixture concern, not a logic step. Putting it in `beforeEach` makes it run on retries too (Playwright retries reuse the same `beforeEach`) and surfaces revoke failures separately from the swap failure in Allure.
-
-#### 3. Mobile parity
-
-`e2e/mobile/page/trade/swap.page.ts` already imports `approveTokenCommand` (consolidated briefing §10). Add a parallel `revokeTokenApproval` method, mirroring the desktop shape. The mobile global injection (`Object.assign(this.global, cliCommandsUtils)` at `e2e/mobile/jest.environment.ts:138`) makes `revokeTokenCommand` available on `global` automatically; only the POM method needs adding. Code in 5.8.10.
-
-#### 4. Tighten the type guard
-
-`revokeTokenCommand`'s signature is `(account: TokenAccount, spender: string)`. The POM accepts `Account | TokenAccount` (correct, for ergonomics) and guards on `!fromAccount.parentAccount`. But the guard only checks one of the two discriminants of `TokenAccount`. Tighten the call site so TypeScript can narrow:
-
-```ts
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-  if (!provider.contractAddress) return;
-  if (!("parentAccount" in fromAccount) || !fromAccount.parentAccount) return;
-  // fromAccount is now TokenAccount within the rest of the body
-  ...
-  const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-  ...
-}
-```
-
-Optional but cheap. Do it if review pushes back; ship without it otherwise.
-
-#### 5. Spike report
-
-QAA-615 is a spike. The deliverable is **not** just code — it's a written answer. Outline in 5.8.16.
-
-#### 6. Test against a real device
-
-Speculos is canonical for CI but a real Nano S Plus or Stax run on Sepolia confirms the clear-sign content matches expectations. Quick validation:
-
-- Plug a Nano S Plus seeded with the QAA test seed
-- Switch to Sepolia (or the testnet your team uses for swap regression)
-- Run the spec with `MOCK=0 SPECULOS=0` (whatever your local convention is for "use the real device")
-- Tap through the revoke screens manually
-- Verify the device displays "Type: Approve / Amount: 0 USDT / Spender: 0xRouter"
-
-Pass that test once before declaring done.
-
-### 5.8.8 The Proposed Final Spec Shape
-
-Putting items #2 and #1 together, the final `provider.swap.spec.ts` body looks like:
-
-```ts
-for (const { fromAccount, toAccount, provider, xrayTicket } of providerFlowTests) {
-  test.describe(`Swap - ${provider.uiName} flow`, () => {
-    setupEnv(true);
-
-    test.use({
-      teamOwner: Team.SWAP,
-      userdata: "skip-onboarding-with-last-seen-device",
-      speculosApp: provider.app,
-      cliCommandsOnApp: [
-        [
-          { app: fromAccount.currency.speculosApp, cmd: liveDataWithAddressCommand(fromAccount) },
-          { app: toAccount.currency.speculosApp,   cmd: liveDataWithAddressCommand(toAccount)   },
-        ],
-        { scope: "test" },
-      ],
-    });
-
-    test.beforeEach(async ({ app }) => {
-      // Clean state before each iteration. No-op if already zero.
-      await app.swap.revokeTokenApproval(fromAccount, provider);
-    });
-
-    test(
-      `Swap - ${provider.uiName} flow`,
-      {
-        tag: ["@NanoSP", "@LNS", "@NanoX", "@Stax", "@Flex", "@NanoGen5", "@ethereum", "@family-evm"],
-        annotation: [{ type: "TMS", description: xrayTicket }],
-      },
-      async ({ app }) => {
-        await addTmsLink(getDescription(test.info().annotations, "TMS").split(", "));
-
-        const minAmount = await app.swap.getMinimumAmount(fromAccount, toAccount);
-        await app.swap.ensureTokenApproval(fromAccount, provider, minAmount);
-        const swap = new Swap(fromAccount, toAccount, minAmount, provider);
-
-        await performSwapUntilQuoteSelectionStep(app, swap, minAmount);
-        await app.swap.selectSpecificProvider(provider);
-
-        await app.swap.clickExchangeButton();
-        await app.swap.checkElementsPresenceOnSwapApprovalStep();
-        await app.swap.clickExecuteSwapButton();
-        await app.swap.clickContinueButton();
-        await app.speculos.verifyAmountsAndAcceptSwap(swap, minAmount);
-        await app.swap.expectTransactionSentToasterToBeVisible();
-      },
-    );
-  });
-}
-```
-
-Read the order:
-1. `beforeEach` revokes — state goes to zero.
-2. `ensureTokenApproval` runs the pre-check (`isTokenAllowanceSufficientCommand` returns 0 because we just revoked), so it always runs the approve flow.
-3. The swap runs against a freshly-approved allowance every time.
-
-### 5.8.9 Speculos Coordination
-
-The final spec spawns Speculos **three times** per test:
-
-1. `revokeTokenApproval` — Ethereum app (revoke calldata)
-2. `ensureTokenApproval` — Ethereum app (approve calldata)
-3. The fixture's swap Speculos — Exchange app (swap signing)
-
-Each `launchSpeculos` / `cleanSpeculos` pair takes ~10–30 seconds depending on local Docker vs remote Speculos pool. Three pairs is 30–90 seconds of overhead per test. The swap suite has ~10 tests today; that's 5–15 minutes of pure Speculos boot time per run.
-
-**Possible optimisation: share the Ethereum Speculos between revoke and approve.**
-
-Both run on the same app. You could refactor:
-
-```ts
-// pseudo-code, not the final API
-test.beforeEach(async ({ app }) => {
-  await app.speculos.withApp("Ethereum", async () => {
-    await revokeTokenCommand(fromAccount, provider.contractAddress);
-    if (currentAllowanceIsBelowMin) {
-      await approveTokenCommand(fromAccount, provider.contractAddress, minAmount * 1.2);
-    }
-  });
-});
-```
-
-That would halve the boot overhead. **It is out of scope for QAA-615.** File it as a follow-up; mention it in the spike report's "recommended next steps" section. Do not slip it into the spike PR — review-scope creep is the canonical way for spike PRs to die.
-
-For now, accept the three-launch shape. Sub-30-second-per-test Speculos overhead is the team's current baseline.
-
-### 5.8.10 Mobile Implementation
-
-Mobile parity is item #3 on your do-list. The proposed addition:
-
-```ts
-// e2e/mobile/page/trade/swap.page.ts
-// (somewhere near the existing approve/swap methods)
-
-async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provider) {
-  if (!provider.contractAddress || !("parentAccount" in fromAccount) || !fromAccount.parentAccount) return;
-
-  const previousSpeculosPort = getEnv("SPECULOS_API_PORT");
-  const speculos = await launchSpeculos(fromAccount.currency.speculosApp.name);
-  try {
-    // revokeTokenCommand is already global on mobile via jest.environment.ts:138
-    const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-    // Mobile uses jest-allure-circus differently; use the team's standard attachment helper
-    await allure.attachment(
-      `revoke-${provider.uiName}.txt`,
-      Buffer.from(result, "utf-8"),
-      "text/plain",
-    );
-  } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
-  }
-}
-```
-
-Differences from desktop:
-- Type-guarded narrowing (item #4 applied here too).
-- Allure API differs slightly between Playwright and jest-allure-circus. Match whatever the existing mobile POM methods do for attachments.
-- No `@step` decorator on mobile (the mobile POM uses `@Step` capitalised — confirm the file's existing convention before adding; copy from `approveTokenApproval` if it exists, or from a neighbouring `@Step` method).
-
-The `revokeTokenCommand` import is automatic via the global injection — no `import` statement needed in the mobile POM file. That said, do add it explicitly if your team's lint rules require it; the global is for spec files, not POM files.
-
-Wire it into the mobile spec the same way as desktop: `beforeEach` cleanup, then per-test approve. The mobile equivalent of `provider.swap.spec.ts` lives at `e2e/mobile/specs/swap/`.
-
-### 5.8.11 Verifying Revoke Worked
-
-Three ways to confirm the revoke landed, ranked by effort:
-
-#### Option A — CLI read-back (canonical)
-
-```ts
-// after the revoke, in a debug spec or one-off script
-import { runCliGetTokenAllowance, isTokenAllowanceSufficientCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";
-
-const allowance = await isTokenAllowanceSufficientCommand(fromAccount, provider.contractAddress, "1");
-console.log("Allowance after revoke:", allowance);  // expect "0" or false
-```
-
-This uses the existing reader (Chapter 5.4 §5). Zero return means the revoke landed.
-
-#### Option B — revoke.cash (Chapter 5.3)
-
-Open `https://revoke.cash`, paste the QAA test address (read-only, no wallet connection needed), select Sepolia, find the token + spender pair. After a successful revoke, the entry should disappear from the list.
-
-#### Option C — Etherscan read tab
-
-`https://sepolia.etherscan.io/token/<contract>#readContract`, scroll to `allowance(owner, spender)`, paste the test wallet address as `owner` and the provider router as `spender`. Returns 0 in raw smallest units after a successful revoke.
-
-Use Option A in the spec itself if you ever want a hard assertion. Use Options B/C for one-off audits and during the spike's manual verification step.
-
-### 5.8.12 The PR Shape
-
-Slice the spike PR into four small, reviewable commits plus a non-code deliverable:
-
-| # | Type | Files | Rationale |
-|---|---|---|---|
-| 1 | `test(common)` | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | The senior's existing commit, possibly with the `@step` description fix folded in (it's small enough that a separate commit feels heavy). |
-| 2 | `test(desktop)` | `e2e/desktop/tests/page/swap.page.ts`, `e2e/desktop/tests/specs/provider.swap.spec.ts` | The POM method (with corrected `@step`) and the `beforeEach` wiring. |
-| 3 | `test(mobile)` | `e2e/mobile/page/trade/swap.page.ts`, mobile spec | Mobile parity. |
-| 4 | `refactor(common)` | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | (Optional) Tightened type guard, if review asked for it. |
-| — | (no commit) | Confluence or Jira | Spike report. Lives outside the repo. |
-
-Why four commits and not one squash:
-
-- Reviewers can land #1 independently (it's a pure live-common change with no spec wiring, and other teams can already use `revokeTokenCommand` once it's merged).
-- Mobile parity (#3) might be reviewed by a different team owner than desktop (#2). Splitting them lets each owner review their own surface.
-- The optional refactor (#4) is a "nice to have" — keeping it separate means you can drop it if review pushes back without unwinding the spike.
-
-### 5.8.13 Reviewer Routing
-
-Code-owners on each surface:
-
-| File | Likely owner |
-|---|---|
-| `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | live-common owner + wallet-xp |
-| `e2e/desktop/tests/page/swap.page.ts`, `provider.swap.spec.ts` | wallet-xp + Swap (PTX) team |
-| `e2e/mobile/page/trade/swap.page.ts`, mobile spec | wallet-xp mobile + Swap (PTX) |
-
-Tag the reviewers in your PR description, not just via CODEOWNERS auto-routing. The Swap team specifically wants visibility on anything that changes their regression flow — they own the contract that `revokeTokenApproval` is implementing.
-
-### 5.8.14 Common First-Run Failures
-
-Things that will go wrong on your first end-to-end run, and how to debug:
-
-#### "CLI subprocess hung at confirmation"
-
-Symptom: the test sits at `await app.swap.revokeTokenApproval(...)` for 60+ seconds, then Playwright times out.
-
-Cause: `approveToken()` couldn't find the expected screen labels. Either the device class doesn't match the labels in `families/evm.ts`, or the Speculos firmware version renders the screen differently.
-
-Debug:
-- `console.log(await fetchCurrentScreenTexts(device.port))` — see what's actually on screen
-- Check `families/evm.ts` for the `DeviceLabels` constants vs. what Speculos shows
-- Confirm `SPECULOS_DEVICE` matches your `--currency` (Nano S Plus vs Stax render different labels)
-
-#### "DISABLE_TRANSACTION_BROADCAST not honoured"
-
-Symptom: revoke completes but allowance on-chain doesn't change.
-
-Cause: env not propagated to the subprocess, or the flip-and-restore logic ran out of order.
-
-Debug:
-- Add `console.log("ENV:", process.env.DISABLE_TRANSACTION_BROADCAST)` inside `revokeTokenCommand` after the flip
-- Confirm `setDisableTransactionBroadcastEnv` actually mutates `process.env` (it should — the helper at the bottom of `cliCommandsUtils.ts` does both `setEnv` and `process.env`)
-- Check there's no upstream test setting `DISABLE_TRANSACTION_BROADCAST=1` after `revokeTokenCommand` flipped it but before the CLI started
-
-#### "Speculos port collision"
-
-Symptom: `launchSpeculos` errors with "port in use" or the test inherits the wrong device.
-
-Cause: previous test's `cleanSpeculos` was skipped — usually because a `try/finally` was missing somewhere.
-
-Debug:
-- `docker ps` — see if old Speculos containers are still up
-- `lsof -i :<port>` — see what's holding the port
-- Confirm every `launchSpeculos` in your codebase has a paired `cleanSpeculos` inside a `finally`
-- Kill the strays: `docker kill $(docker ps -q --filter ancestor=ghcr.io/ledgerhq/speculos:master)`
-
-#### "Allure shows wrong description"
-
-Symptom: every step in the Allure report says "Ensure token approval" twice.
-
-Cause: the `@step` copy-paste bug from 5.8.7 #1.
-
-Fix: change the decorator to `@step("Revoke token approval")`. You knew this was coming.
-
-#### "Test passes locally, fails in CI"
-
-Symptom: green on your machine, red on CI.
-
-Causes (in decreasing order of likelihood):
-- `REMOTE_SPECULOS=true` on CI — the remote pool has different latency. Add `await waitForSpeculosReady(device.id)` (already in `launchSpeculos` for remote; check the path is hit)
-- CI's QAA seed has different account state than yours — the on-chain allowance differs at run-start
-- CI is on a different testnet than your local — confirm `DEFAULT_NETWORK` env
-
-#### "Allowance is zero before revoke even runs"
-
-Not a failure, but worth noting: if a previous CI run's `afterEach` (or a previous test's natural cleanup) zeroed the allowance, your `beforeEach` revoke is a no-op. The test is still correct. Don't add a "did anything happen?" assertion — revoke from zero is valid.
-
-### 5.8.15 What's NOT in Scope for QAA-615
-
-The spike has a finite boundary. Things you *do not* need to ship:
-
-- **Symmetric `runCliApprove` standalone command.** `approveTokenCommand` already exists; nothing new needed there.
-- **Token registry expansion.** Adding new ERC-20s to the test fixture is QAA-919's overall scope but a separate ticket. Don't pull it in.
-- **Multi-spender batch revoke.** A single-call helper that revokes from N spenders at once would be useful but is a future optimisation. File as follow-up.
-- **Migration of every test to use revoke as `beforeEach`.** Only `provider.swap.spec.ts` is in scope for QAA-615. Other specs (e.g., `validation.swap.spec.ts`) might benefit, but each is a separate PR.
-- **EIP-2612 permit support.** Some newer tokens (USDC v2, DAI) support gasless permit signatures, which would be a much faster cleanup mechanism than on-chain revoke. Out of scope; would need a different CLI command and a different device flow.
-- **Speculos sharing optimisation.** 5.8.9 — file as follow-up, do not bundle into spike PR.
-- **Spike report → Confluence migration.** If your team writes spike reports in Jira comments, keep them in Jira. Don't promote a comment to a Confluence page as part of the same PR.
-
-The senior already drew this boundary by writing 37 lines instead of 200. Honour it.
-
-### 5.8.16 The Spike Report
-
-The spike report is a non-code deliverable. Post it as a Jira comment on QAA-615 (or a Confluence page, depending on your team's convention). Outline:
-
-#### Section 1 — Question
-
-Restate verbatim what the ticket asked. One paragraph.
-
-> QAA-615 asked: find the smallest, lowest-risk way to revoke an existing ERC-20 allowance from inside an E2E test, so that the broadcast-enabled regression suite can clean up provider allowances between iterations.
-
-#### Section 2 — Answer
-
-Yes, here's what shipped. Link the PR. One paragraph.
-
-> Shipped: a thin `revokeTokenCommand` typed wrapper in `cliCommandsUtils.ts`, plus a `revokeTokenApproval` POM method on both desktop and mobile swap pages, plus a `beforeEach` cleanup hook in `provider.swap.spec.ts`. Total ~50 LOC of new code (mobile parity adds 20 to the senior's 37). PR: <link>.
-
-#### Section 3 — Path chosen
-
-State the path and why.
-
-> **Path C — thin wrapper following the existing `approveTokenCommand` pattern.** Reuses the legacy CLI's existing `--mode revokeApproval` flag (already in `apps/cli/src/commands/blockchain/send.ts`); reuses the existing `runCliTokenApproval` Layer-2 spawn helper; reuses the existing `approveToken()` Layer-4 device-tap helper. No changes to the CLI binary, no new Speculos plumbing, no new device labels. The whole spike is symmetry with the existing approve flow.
-
-#### Section 4 — Alternatives rejected
-
-Two paragraphs each, max.
-
-- **Path A — wallet-cli new `revoke` subcommand.** Rejected. wallet-cli is out of QAA scope (per Chapter 5.1). Building parallel infra in a CLI we don't own would create maintenance debt for two teams.
-- **Path B — manual `revoke.cash` script.** Rejected for automation. Useful for one-off cleanup (Chapter 5.3) but not deterministic enough for CI.
-- **Path D — bypass the device entirely with EIP-2612 permits.** Rejected for scope. Would require token-by-token `permit()` support audit and a different signing path. File as a future optimisation.
-
-#### Section 5 — LOC actually shipped
-
-Show the numbers. Reviewers love numbers.
-
-> - `cliCommandsUtils.ts`: +20
-> - `swap.page.ts` (desktop): +15
-> - `swap.page.ts` (mobile): +20
-> - `provider.swap.spec.ts`: +3 / -1
-> - **Total: ~57 LOC of new code, 0 LOC of CLI changes.**
-
-#### Section 6 — Recommended next steps
-
-Bulleted list. Each one a candidate follow-up ticket.
-
-- Speculos-app sharing between revoke and approve (5.8.9)
-- Multi-spender batch revoke helper (5.8.15)
-- Migrate other broadcast-enabled specs to use revoke as `beforeEach`
-- EIP-2612 permit support investigation (separate spike)
-
-#### Section 7 — Evidence
-
-Links and screenshots.
-
-- PR link
-- Allure run link with the new step visible (after fixing `@step`)
-- Manual real-device run screenshot (5.8.7 #6)
-- Etherscan link showing allowance went from non-zero to zero on the test seed
-
-A 7-section, ~1-page spike report is the right size. Do not write 4 pages. The deliverable is "the question is answered"; not "every neuron I had during the investigation".
-
-### 5.8.17 Quiz
+### 5.10.18 Quiz
 
 <div class="quiz-container" data-pass-threshold="80">
-<h3>Quiz — QAA-615 Walkthrough</h3>
+<h3>Quiz — QAA-702 Walkthrough</h3>
 <p class="quiz-subtitle">6 questions · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q1.</strong> The senior's <code>revokeTokenApproval</code> POM method is decorated with <code>@step("Ensure token approval")</code>. Why is this wrong, and what is the fix?</p>
+<p><strong>Q1.</strong> Why does the new spec for QAA-702 reuse <code>tmsLinks: ["B2CQA-604"]</code> instead of opening a new B2CQA case?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The decorator should be <code>@Step</code> with a capital S; rename the import</button>
-<button class="quiz-choice" data-value="B">B) The decorator should be removed; revoke does not need an Allure step</button>
-<button class="quiz-choice" data-value="C">C) Copy-paste from <code>ensureTokenApproval</code>: every Allure entry rendered from this method will be mislabelled. Change to <code>@step("Revoke token approval")</code></button>
-<button class="quiz-choice" data-value="D">D) The decorator's argument must include the test ticket: <code>@step("QAA-615 — Revoke token approval")</code></button>
+<button class="quiz-choice" data-value="A">A) Xray forbids creating new B2CQA cases from the mobile repo</button>
+<button class="quiz-choice" data-value="B">B) The driver hard-codes that ID</button>
+<button class="quiz-choice" data-value="C">C) Pavlo OKHONKO's comment on B2CQA-604 explicitly says step 2 (the ERC20 receive) remains inside the same test case until QAA-702 automates it; both steps map to one card</button>
+<button class="quiz-choice" data-value="D">D) Because step 1 failed and is being retired</button>
 </div>
-<p class="quiz-explanation">The senior left a copy-paste residue from the twin <code>ensureTokenApproval</code> method. Allure step descriptions are user-visible — when both methods run in the same test, the Allure report would show "Ensure token approval" twice, confusing reviewers. Fix is a one-word change in the decorator argument. This is item #1 on the do-list.</p>
-</div>
-
-<div class="quiz-question" data-correct="B">
-<p><strong>Q2.</strong> Inside <code>revokeTokenCommand</code>, the senior writes <code>const original = setDisableTransactionBroadcastEnv("0")</code>. What does this do and why?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Disables broadcast for the next CLI call so the revoke is signed but not sent</button>
-<button class="quiz-choice" data-value="B">B) Sets <code>DISABLE_TRANSACTION_BROADCAST</code> to a falsy <code>"0"</code> (i.e., enables broadcast), and captures the previous value so the <code>finally</code> block can restore it. Required because revoke must actually change on-chain state to be useful</button>
-<button class="quiz-choice" data-value="C">C) Sets a timeout of 0 ms on the broadcast pipeline</button>
-<button class="quiz-choice" data-value="D">D) Caches the original env so it can be passed to <code>runCliTokenApproval</code></button>
-</div>
-<p class="quiz-explanation">The <code>"0"</code> string makes the env flag falsy in the CLI's check (<code>opts["disable-broadcast"] || getEnv("DISABLE_TRANSACTION_BROADCAST")</code>). Capturing <code>original</code> is the safety net: the <code>finally</code> block restores whatever the env was before, ensuring the test doesn't leak a flipped broadcast state into subsequent CLI calls. See Chapter 5.6.7.</p>
-</div>
-
-<div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> The POM method does <code>const previousSpeculosPort = getEnv("SPECULOS_API_PORT")</code> before <code>launchSpeculos</code>, and <code>cleanSpeculos(speculos, previousSpeculosPort)</code> in the <code>finally</code>. Why?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The fixture has already started a Speculos for the swap itself (Exchange app). The revoke needs a different app (Ethereum app), so we save the port, swap to the Ethereum-app Speculos for the revoke, then restore the swap's Speculos port so the rest of the test continues to talk to the Exchange Speculos</button>
-<button class="quiz-choice" data-value="B">B) Speculos crashes if launched twice in the same process; the snapshot is a workaround</button>
-<button class="quiz-choice" data-value="C">C) <code>previousSpeculosPort</code> is logged to Allure for debugging</button>
-<button class="quiz-choice" data-value="D">D) The port number is used as a randomness seed for transaction nonces</button>
-</div>
-<p class="quiz-explanation">The snapshot/restore pattern (Chapter 5.5) is how a single test coordinates multiple Speculos instances on different apps. The swap fixture starts the Exchange-app Speculos; the revoke runs against the Ethereum-app Speculos; cleanup restores the Exchange-app port so the rest of the swap test continues normally. Without the snapshot, the rest of the test would inherit the (now-stopped) Ethereum-app Speculos's port and break.</p>
+<p class="quiz-explanation">The test case ID is the contract between Xray and the suite. Pavlo's comment is the single source of truth that the ERC20 scenario belongs under <code>B2CQA-604</code> as step 2 — both specs will carry the same <code>tmsLinks</code> entry.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q4.</strong> The senior's <code>provider.swap.spec.ts</code> diff comments out <code>ensureTokenApproval</code> and replaces it with <code>revokeTokenApproval</code>. Is this the final shape that should ship in the PR?</p>
+<p><strong>Q2.</strong> Why do we add <code>SWAP_HISTORY_ERC20_SOL_FROM</code> and <code>SWAP_HISTORY_ERC20_ETH_USDT_TO</code> to <code>Addresses.ts</code> instead of reusing the existing <code>SWAP_HISTORY_SOL_FROM</code> / <code>SWAP_HISTORY_ETH_TO</code> constants?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Yes — revoke now serves the same purpose as ensureTokenApproval did</button>
-<button class="quiz-choice" data-value="B">B) Yes — the swap suite no longer needs allowance setup once revoke is wired in</button>
-<button class="quiz-choice" data-value="C">C) No — this is dev-loop code. The senior commented out the approve to test revoke in isolation. The final shape uses revoke as a <code>beforeEach</code> cleanup AND keeps <code>ensureTokenApproval</code> as the per-test setup, so each iteration starts at zero and ends with a fresh allowance</button>
-<button class="quiz-choice" data-value="D">D) No — revoke should run in <code>afterEach</code>, not as a replacement for approve</button>
+<button class="quiz-choice" data-value="A">A) The existing constants are frozen</button>
+<button class="quiz-choice" data-value="B">B) ERC20 tokens require a dedicated non-parent address</button>
+<button class="quiz-choice" data-value="C">C) The Phase-2 swap was executed on the QAA device seed, which has different Solana and Ethereum holders than the step-1 synthetic fixture seed. The new spec's <code>addressFrom</code> / <code>addressTo</code> must match the holders that actually produced the CSV row the spec asserts against</button>
+<button class="quiz-choice" data-value="D">D) Detox forbids reusing enum members across specs</button>
 </div>
-<p class="quiz-explanation">Without <code>ensureTokenApproval</code>, the swap step has no allowance to spend and will fail. Revoke and approve are complementary: revoke clears stale state, approve sets the allowance the swap needs. Final shape: revoke in <code>beforeEach</code>, approve in the test body (5.8.8). <em>Either</em> <code>beforeEach</code> <em>or</em> <code>afterEach</code> would work for the cleanup; <code>beforeEach</code> is preferred because it survives test retries cleanly.</p>
+<p class="quiz-explanation">The driver writes <code>swap.accountToDebit.address = addressFrom</code> / <code>accountToCredit.address = addressTo</code> before calling <code>checkExportedFileContents</code>, which asserts those addresses appear in the exported CSV. If we reused step 1's constants the assertion would fail — the CSV was produced by a different seed and therefore contains different holder addresses. New capture → new constants.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q5.</strong> What does <code>fromAccount.parentAccount.address</code> represent for a <code>TokenAccount</code>, and why does the POM check <code>!fromAccount.parentAccount</code> in its early-return guard?</p>
+<p><strong>Q3.</strong> You load <code>swap-history.json</code> into Ledger Live Desktop (Phase 1) and the Swap → History screen shows only two SOL → native-ETH entries, no ERC20 receive. What is the correct next step?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The parent's address is the spender to revoke; the guard skips empty parents</button>
-<button class="quiz-choice" data-value="B">B) <code>parentAccount</code> is the EVM (or other native) account that holds the token sub-account. Its <code>address</code> is the EOA on chain — the <em>owner</em> of any allowance. The guard skips native <code>Account</code>s (which have no <code>parentAccount</code>) because they have no allowance to revoke</button>
-<button class="quiz-choice" data-value="C">C) <code>parentAccount.address</code> is the device's master public key</button>
-<button class="quiz-choice" data-value="D">D) It's the previous account in iteration order; used for log breadcrumbs</button>
+<button class="quiz-choice" data-value="A">A) Hand-craft a synthetic ERC20 entry in the JSON using dummy values</button>
+<button class="quiz-choice" data-value="B">B) Execute a real SOL → USDT swap on the QAA device (Phase 2), export the CSV, extract <code>swapId</code>/<code>addressFrom</code>/<code>addressTo</code>, then graft the new account block from your local <code>app.json</code> into the fixture (Phase 3)</button>
+<button class="quiz-choice" data-value="C">C) Write the spec anyway; the fixture will catch up</button>
+<button class="quiz-choice" data-value="D">D) Skip the ticket — the fixture is not ready</button>
 </div>
-<p class="quiz-explanation">In live-common's account model, a TokenAccount (e.g., USDT on Ethereum) has a <code>parentAccount</code> pointer to its native parent (the Ethereum account). The parent's <code>address</code> is the EOA that owns the allowance on chain — what would be passed as <code>owner</code> to <code>allowance(owner, spender)</code>. Native accounts have no parent and no allowance to clear; the guard skips them.</p>
+<p class="quiz-explanation">Fixture entries must describe real, verifiable swaps. Synthesising fake <code>swapId</code>/<code>operationId</code> values leads to drift between the fixture and live-common's account-ID encoding. The 4-phase workflow produces an authentic entry and guarantees all three identifiers (swap ID, from address, to address) come from the same observation.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q6.</strong> The CLI is invoked with <code>waitConfirmation: true</code> and the broadcast env flipped to <code>"0"</code>. What is the actual behaviour, end-to-end?</p>
+<p><strong>Q4.</strong> The driver calls <code>jestExpect(fileContents).toContain(swap.amount)</code>. You pass <code>"0,07"</code> (comma) to the <code>Swap</code> constructor via <code>solMinAmount</code>. The fixture's <code>fromAmount</code> is <code>"69637880"</code>. Why is the assertion still correct?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The CLI signs the revoke tx, broadcasts it (because broadcast is enabled), then blocks until the tx is confirmed in a block before exiting. The wrapping promise resolves only after on-chain confirmation, so the next test step sees the new allowance state</button>
-<button class="quiz-choice" data-value="B">B) The CLI signs only — the env disables broadcast — and waits for a fake "confirmation" emitted by Speculos</button>
-<button class="quiz-choice" data-value="C">C) The CLI broadcasts but exits immediately; <code>waitConfirmation</code> is a no-op when broadcast is enabled</button>
-<button class="quiz-choice" data-value="D">D) <code>waitConfirmation</code> sets a timeout on the device-tap helper, not the broadcast pipeline</button>
+<button class="quiz-choice" data-value="A">A) The CSV export is human-readable in display units (SOL) using the running app's locale — the French locale renders <code>0,07 SOL</code>. <code>fromAmount</code>'s integer lamports are live-common's internal storage. The assertion reads the CSV, not the fixture</button>
+<button class="quiz-choice" data-value="B">B) <code>toContain</code> silently coerces numeric types</button>
+<button class="quiz-choice" data-value="C">C) The driver divides by 10^9 before asserting</button>
+<button class="quiz-choice" data-value="D">D) The assertion is known-broken but nobody has fixed it</button>
 </div>
-<p class="quiz-explanation">The CLI's rxjs pipe (Chapter 5.4 §3.1) only takes the broadcast branch when <code>DISABLE_TRANSACTION_BROADCAST</code> is falsy <em>and</em> <code>--disable-broadcast</code> is not passed. With env <code>"0"</code>, broadcast happens. The <code>--wait-confirmation</code> flag (set by <code>waitConfirmation: true</code>) keeps the subprocess alive until <code>waitForTransactionConfirmation</code> resolves — i.e., the tx is in a block. This is what makes the revoke deterministic for the next test: when the wrapper returns, the chain has settled.</p>
+<p class="quiz-explanation">Internal units (lamports) and display units (SOL) are different representations of the same amount. The CSV shows display units with the locale's decimal separator; that is what <code>"0,07"</code> matches on a French-locale build. The fixture's <code>fromAmount: "69637880"</code> is 0.069637880 SOL at 9 decimals — within rounding of the 0,07 the user typed, and stored separately from what the CSV shows.</p>
+</div>
+
+<div class="quiz-question" data-correct="B">
+<p><strong>Q5.</strong> Your first run is red: <code>toContain("Tether USD 1")</code> fails on the exported CSV. What is the correct first investigation?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Patch the driver to use <code>currency.name</code> instead of <code>accountName</code></button>
+<button class="quiz-choice" data-value="B">B) Open the CSV in <code>e2e/mobile/artifacts/ledgerwallet-swap-history.csv</code> and read what the app actually wrote; reconcile with <code>TokenAccount.ETH_USDT_1.accountName</code> — the mismatch is data, not code</button>
+<button class="quiz-choice" data-value="C">C) Delete the fixture entry</button>
+<button class="quiz-choice" data-value="D">D) Change <code>Swap</code>'s constructor</button>
+</div>
+<p class="quiz-explanation">A red assertion is evidence, not a verdict. Read the artifact; compare it to the expected substring. In QAA-702 the CSV turns out to contain <code>"Ethereum 1"</code> (the parent account's name) rather than <code>"Tether USD 1"</code> — a CSV-formatting behaviour the driver did not yet account for, which is exactly why Phase 4 Step 2 adds the ERC20 parent-name fallback to <code>checkExportedFileContents</code>. Sometimes the mismatch is a fixture field, sometimes it is a driver contract the product has changed under you. The investigation rule is the same either way: read the artifact first, decide second.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> A reviewer asks: "why not modify step 1's spec to iterate over both native and ERC20 receive, instead of creating a second file?" What is the best defense?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) Jest forbids parameterised <code>it</code> blocks</button>
+<button class="quiz-choice" data-value="B">B) The driver is read-only</button>
+<button class="quiz-choice" data-value="C">C) The thin-spec + shared-driver pattern keeps each spec a flat data bundle; one spec = one scenario = one Allure test case. Folding two receive types into one file would hide failures behind a shared <code>beforeAll</code>, collapse two Allure cases into one, and break the one-file-per-pair convention established by the existing sibling specs</button>
+<button class="quiz-choice" data-value="D">D) The driver's <code>describe</code> block does not accept loops</button>
+</div>
+<p class="quiz-explanation">The repo's swap specs are deliberately one-scenario-per-file. Two separate specs means two independent Detox runs, two Allure cases, two CI artifacts, two failure signals. Iteration inside the spec would save two lines of code and cost every one of those benefits.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
-<div class="chapter-outro">
-You now own the whole shape of QAA-615. The senior's commit was a runway, not a destination — 37 lines that prove the path works, with four obvious do-list items waiting on top: the <code>@step</code> rename, the proper hook ordering, mobile parity, and a tightened type guard. Plus the spike report. None of those is hard; all of them are necessary. Ship them. Chapter 5.9 turns the page from this guided walkthrough to your own hands: a set of CLI exercises and challenges that exercise every layer of what you just read, with grading rubrics so you can self-assess before bringing your work to a reviewer.
-</div>
-## CLI Exercises and Challenges
+---
 
-<a id="cli-exercises-and-challenges"></a>
+
+## Mobile Exercises & Challenges
 
 <div class="chapter-intro">
-Reading the previous eight chapters gives you the map. These exercises put you on the trail. They progress from a single CLI invocation typed by hand to a paper-sketch of mobile parity for the senior's revoke method. Every exercise has an explicit verification step; if you can't verify it yourself, grab a reviewer before moving on. Do them in order — each builds on the muscle memory of the one before. The first three are warm-ups (hand-run, paper read, trace memo); 4 and 5 force you to think about local-only debugging hygiene and Speculos lifecycle leaks; 6 is an audit pattern you'll repeat throughout your career; 7 maps directly onto the QAA-615 follow-up work that may land on your desk.
+Reading and watching are not enough. The exercises below move from minor POM additions to CI-level changes and end with a simulator-warming wrapper that will speed up your daily loop. Do them in order — each one builds a skill you will need in the next. Every exercise has a verification step; if you cannot verify it yourself, grab a reviewer before moving on.
 </div>
 
-### 5.9.1 Exercise 1: Read your first allowance (15 min)
+### 5.11.1 Exercise 1: Add a `@Step` for the Empty State (15 min)
 
-**Objective.** Run the legacy `apps/cli` directly, with no test wrapping, to read an ERC-20 allowance for an arbitrary owner/spender pair on Sepolia. This grounds every later abstraction (`runCliGetTokenAllowance`, `isTokenAllowanceSufficientCommand`, `ensureTokenApproval`) in a single thing you've already typed.
-
-**Instructions.**
-1. From the monorepo root, run:
-   ```bash
-   node apps/cli/bin/index.js tokenAllowance \
-     --currency ethereum \
-     --token ethereum/erc20/usd_coin \
-     --spender 0x1111111254EEB25477B68fb85Ed929f73A960582 \
-     --ownerAddress 0xYOUR_TEST_ADDRESS \
-     --format json
-   ```
-2. Replace `0xYOUR_TEST_ADDRESS` with any address you control on Sepolia (or any mainnet address you want to inspect — read-only, no signing involved).
-3. Read the JSON output line by line. Identify the `allowanceStr` value and the `unitMagnitude`.
-
-**Verification.** Stdout is valid JSON. The `allowanceStr` is a string of digits in the token's smallest unit (for USDC: 6 decimals, so `1000000` = 1 USDC). If you used a fresh address, the value will be `"0"`.
-
-**Hints.**
-- The CLI prebuild step (`zx ./scripts/gen.mjs`) must have run at least once. If you get "command not found" inside the CLI, run `pnpm --filter @ledgerhq/live-cli prebuild` first.
-- `--format json` is what makes the output machine-parseable. Without it you'll get a human-readable line that the typed wrapper can't parse.
-- The spender `0x1111...0582` is 1inch v5 router; any contract that ever called `approve()` against your address will surface here.
-
-**Stretch goal.** Pipe the output through Node and call `parseTokenAllowanceCliOutput` (from `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`) on the raw stdout. Confirm it returns `{ allowanceStr, unitMagnitude }` and matches what your eye saw in the JSON.
-
-**Why this is the first exercise.** Every later abstraction — the typed wrapper, the curried fixture helper, the POM method that orchestrates Speculos — collapses to *this exact subprocess invocation* under the hood. If you can't run the CLI by hand, you can't reason about what the harness is doing on your behalf when something fails. Spending fifteen minutes here saves you hours later when a CI failure surfaces a stack trace pointing at `runCliCommand`.
-
-**Common mistake.** Skipping `--format json` because the human-readable output looks "clearer". The typed wrappers parse JSON; the human-readable shape is for engineers reading their terminal. If you only ever call the CLI in human-readable mode, you'll be surprised when `parseTokenAllowanceCliOutput` throws on stdout you produced by hand. Always pass `--format json` when you intend to feed the output back into TypeScript — even ad hoc.
-
-### 5.9.2 Exercise 2: Wrap an allowance read in a typed helper (20 min)
-
-**Objective.** Read the existing `isTokenAllowanceSufficientCommand` and sketch a hypothetical sibling helper. This is a paper exercise — you are not shipping code, you are training your eye on the wrapper pattern.
+**Objective.** Practice adding a decorated assertion to an existing POM.
 
 **Instructions.**
-1. Open `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`.
-2. Read `isTokenAllowanceSufficientCommand(account, spender, minAmount)` end to end. Note: it builds CLI args, calls `runCliGetTokenAllowance`, parses with `parseTokenAllowanceCliOutput`, compares against `minAmount`, and returns a string (the allowance) when sufficient or `"0"` otherwise.
-3. On paper (or in a scratch file you don't commit), sketch a `getCurrentAllowanceCommand(account, spender)` that returns the raw `allowanceStr` always — no comparison, no boolean coercion. Signature: `(account: TokenAccount, spender: string) => Promise<string>`.
-4. Decide: would you curry it? Would the curry buy you anything?
+1. Open `apps/ledger-live-mobile/e2e/page/trade/swapHistory.page.ts` (the POM you wrote in Chapter 5.10 — or a draft of it).
+2. Add a selector for the history empty-state title: `swap-history-empty-title`.
+3. Add a method `expectEmptyState()` decorated with `@Step("Expect swap history to be empty")` that asserts the empty-state title is visible.
+4. Make sure the method is `public async`.
 
-**Verification.** Your sketch lists three things explicitly: (a) the CLI args you'd build, (b) which engine helper you'd call (`runCliGetTokenAllowance`), (c) which parser you'd use (`parseTokenAllowanceCliOutput`). You can articulate why this isn't a fixture-shaped curried helper.
+**Verification.** Run `pnpm mobile tsc --noEmit`. No type errors. Open the POM side by side with `swap.page.ts`; the signature should match the other `expect*` methods.
 
 **Hints.**
-- Re-read briefing §5 (the Layer 3 wrapper table) before sketching.
-- The curried-function pattern (`(account) => (userdataPath) => Promise<void>`) exists because the desktop fixture engine threads `userdataPath` in at the right lifecycle moment. A one-shot read needs no such threading — a plain async function is the right shape.
-- `getEvmTokenAllowance` (in `libs/ledger-live-common/src/families/evm/getTokenAllowance.ts`) is what `tokenAllowance.ts` calls under the hood. Your wrapper would still go through the CLI, not directly through this function — that's the point of the five-layer separation.
+- Copy the shape of `expectOperationRowVisible(swapId)`, drop the parameter.
+- The empty-state subcomponent is `apps/ledger-live-mobile/src/screens/Swap/History/EmptyState.tsx`; open it to confirm the testID before adding it to the POM.
 
-**Stretch goal.** Write 50 words explaining why a typed wrapper around an allowance read is more valuable than calling `getEvmTokenAllowance` directly from a test. (Answer involves: subprocess isolation, the same code path as the broadcast-enabled write, and the Speculos transport registration that the CLI already handles.)
+**Stretch goal.** Add a second `@Step("Expect export button to be hidden")` that uses `toBeNotVisible()` on `export-swap-operations-link`.
 
-**Why this exercise is paper-only.** Adding real helpers to `cliCommandsUtils.ts` requires CODEOWNERS review and a JIRA ticket. The point here is to internalize the *shape* of a Layer-3 wrapper so that, when QAA-XXX one day asks for "a way to read the allowance without the boolean coercion", you've already drawn the picture and you don't waste the first half-hour staring at a blank file.
+### 5.11.2 Exercise 2: A Modal Close Spec (30 min)
 
-### 5.9.3 Exercise 3: Trace a `cliCommands` fixture in a real test (30 min)
-
-**Objective.** Walk a single line of test metadata down through five layers and back up. By the end you should be able to draw the lifecycle on a whiteboard.
+**Objective.** Write a minimal end-to-end spec that re-uses an existing POM.
 
 **Instructions.**
-1. Open `e2e/desktop/tests/specs/earn.v2.spec.ts` and jump to line 86 (or any of the lines listed in briefing §10: 132, 195, 220, 254, 298, 327 — they all use the same pattern).
-2. Find the `cliCommands: [liveDataCommand(account)]` field.
-3. Walk the chain in order:
-   - **Layer 5 (the spec):** what helper is in the array? Note: `liveDataCommand(account)` is a *call* — it returns a curried function. The array holds the curried result.
-   - **Fixture engine:** open `e2e/desktop/tests/fixtures/common.ts` and find where the `cliCommands` field is consumed. Each curried function is invoked with the `userdataPath` for the test.
-   - **Layer 3 (`cliCommandsUtils.ts`):** read `liveDataCommand` itself. It builds a CLI command string and calls `runCliLiveData`.
-   - **Layer 2 (`runCli.ts`):** `runCliLiveData` formats the args (with the `+` separator quirk), then calls `runCliCommand` which spawns `node apps/cli/bin/index.js …` as a subprocess.
-   - **Layer 1 (`apps/cli`):** the `liveData` command (in `apps/cli/src/commands/live/`) reads the args, runs an account scan, and writes the resulting account JSON into the userdataPath's `app.json`.
-   - **Back up to the spec:** Live boots with that `app.json` already populated. The test asserts on UI state that depends on the seeded account.
-4. Write a 200-word memo titled "Lifecycle of a single cliCommands entry" describing what you just traced.
+1. Locate `apps/ledger-live-mobile/e2e/page/common/passwordEntry.page.ts` (or its equivalent — search with `rg "passwordEntry"`).
+2. Write a spec `e2e/specs/common/passwordEntryClose.spec.ts` with a single `it()`:
+   - `beforeAll` → `app.init({ userdata: "skipOnboardingWithPasswordLock" })` — if this fixture does not exist, use the closest one that boots the app at the lock screen.
+   - Assert the password-entry modal is visible.
+   - Tap the existing Close button via the POM's `tapCloseButton()`.
+   - Assert the modal is gone.
+3. Tag the spec with an arbitrary `$TmsLink("B2CQA-DUMMY")` — the point is the wiring, not the Xray link.
 
-**Verification.** Show the memo to a peer. They should be able to identify, from your text alone, (a) where the curry is unwrapped, (b) where the subprocess is spawned, (c) what file gets mutated on disk, and (d) what the test ultimately asserts on.
+**Verification.** Run `pnpm mobile e2e:test -c ios.sim.debug -t "password entry close"`. Three runs, all green.
 
 **Hints.**
-- The `+` separator (briefing §4) is easy to miss. The engine joins args with `+`, then splits them back to argv before `spawn` — this avoids shell-escaping pain.
-- `liveData` is an `apps/cli/src/commands/live/` command, not a `blockchain/` command. The blockchain subdir is for tx-shaped commands (send, broadcast, getAddress, tokenAllowance).
-- If your memo skips the "what gets mutated on disk" step, re-read it. That's the load-bearing part.
+- If `skipOnboardingWithPasswordLock` does not exist, check `userdata/` for a "locked" variant; if none, discuss with your lead before inventing one.
+- The Close button may raise a confirmation. Use the POM's confirm method if so.
 
-**Stretch goal.** Repeat the trace for `liveDataWithAddressCommand` (used by `validation.swap.spec.ts`, `accounts.swap.spec.ts`, etc.). Identify the one extra thing it does compared to `liveDataCommand` (hint: it caches the device address on the account object after seeding).
+**Stretch goal.** Add a second `it()` that, instead of tapping Close, types the wrong password three times and asserts the lockout message appears.
 
-**Calibration check.** A clean trace memo should make the reader say "ah, of course" at every transition. If a peer reads it and asks "wait, when does the curry get called?" your memo missed the fixture-engine link. If they ask "where does the JSON go?" your memo missed the userdataPath mutation. Iterate until the memo answers both questions on first read.
+### 5.11.3 Exercise 3: Android API-Level Matrix Entry (45 min)
 
-**Common mistake.** Treating `liveDataCommand(account)` as a function call that does the work. It is *not*. It returns a curried function. The work happens later, when the fixture engine invokes that curried function with `userdataPath`. A new joiner who reads `cliCommands: [liveDataCommand(account)]` and assumes the seeding has already happened by the time the array is built will be confused when they try to assert on `account.address` immediately after — the address isn't populated until the engine actually runs the curried call.
-
-### 5.9.4 Exercise 4: Sketch a revoke.cash verification helper (45 min)
-
-**Objective.** Design — on paper — a debugging-only helper that bridges manual revoke.cash workflow with programmatic allowance polling. This helper will *never* go into a CI test. It exists to make local debugging less awful.
+**Objective.** Add a second Android configuration to `detox.config.js` and invoke it locally.
 
 **Instructions.**
-1. Sketch the API of `manualRevokeAndVerify(account: TokenAccount, spender: string): Promise<void>`.
-2. The helper does two things in order:
-   - **(a) Print the revoke.cash URL** for the account's address: `https://revoke.cash/address/<account.address>?chainId=11155111` (Sepolia). Print it big, with newlines around it, so the engineer running the script can't miss it. Optionally `console.log` instructions: "Open this URL, connect MetaMask, click Revoke for the spender at address X, sign in MetaMask. This script will detect the on-chain change and exit."
-   - **(b) Poll `getEvmTokenAllowance`** every 10 seconds. Time out at 5 minutes. Exit cleanly when the allowance drops to `0`. Print elapsed time on each tick so the engineer can see progress.
-3. Document the use case explicitly: when Speculos is acting up, when a CI revoke failed and you want to clean state by hand without restarting the harness, when auditing what a real seed has approved.
-4. Document why this never goes into a CI test: it requires human input. CI is non-interactive. There is no MetaMask in CI. The whole point of the typed wrappers (Ch 5.4) is to drive Speculos so this kind of human-in-the-loop helper is unnecessary in CI.
+1. Open `apps/ledger-live-mobile/detox.config.js`.
+2. Duplicate the existing `android.emu.debug` block into a new config `android.emu.api34.debug` that targets an AVD named `Pixel_7_API_34`.
+3. Create the AVD if it does not exist (`avdmanager create avd …` or via Android Studio).
+4. Build with `pnpm mobile e2e:build -c android.emu.api34.debug`.
+5. Run one of the small specs you wrote in exercises 1–2 under the new config.
 
-**Verification.** Your sketch is one TypeScript file's worth of pseudocode (not real code). It has: function signature, a clear `console.log` block for the URL, a polling loop with a timeout, a clear comment block stating "DEBUGGING ONLY — DO NOT USE IN CI". A peer reading it should immediately understand the flow.
+**Verification.** The spec boots on an API-34 emulator. Visible in `emulator -list-avds`.
 
 **Hints.**
-- `getEvmTokenAllowance` is the read-only function from `libs/ledger-live-common/src/families/evm/getTokenAllowance.ts`. You can call it directly from a debugging helper — no subprocess needed because no signing is involved.
-- The 5-minute timeout is generous; revoking on Sepolia usually confirms in 15-60 seconds. The timeout exists to avoid an infinite hang if the engineer wandered off.
-- For mainnet debugging (very rare for QAA), swap the `chainId=11155111` to `chainId=1` and adjust the network in the polling call.
+- The existing `android.emu.debug` block is your template; change only `device.avdName`.
+- API 34 introduces stricter foreground-service policy — if the app fails to boot, you likely need to adjust `device.headless` or `device.utilBinaryPaths`.
 
-**Stretch goal.** Add a third option to your sketch: an "auto-paste" mode that, on macOS, runs `pbcopy` with the revoke.cash URL so the engineer can `Cmd+V` into a browser. Document that this is shell-out and is therefore platform-specific (Linux has `xclip`, Windows has `clip`).
+**Stretch goal.** Add the new config to a nightly CI job by appending it to the matrix in `.github/workflows/test-mobile-e2e.yml`. Do not merge without your lead's sign-off — nightly minutes are not free.
 
-**The line you must not cross.** A debugging helper that lives in a developer's local scratch folder is fine. The same helper, copied into the test harness "in case it's useful", becomes a footgun: a non-deterministic test that requires human input cannot run in CI, will be skipped, and skipped tests rot. Codify the rule for yourself now: human-in-the-loop helpers stay outside `e2e/` directories. If you find one that snuck in, that's a CF-XXX ticket.
+### 5.11.4 Exercise 4: Multi-Account Userdata + Accounts List Spec (60 min)
 
-### 5.9.5 Exercise 5: Speculos snapshot/restore manual test (45 min)
-
-**Objective.** Demonstrate, on your own machine, the failure mode that the Speculos snapshot/restore pattern exists to prevent. Forewarned is forearmed.
+**Objective.** Build a non-trivial userdata fixture and assert that the app renders it correctly.
 
 **Instructions.**
-1. Create a scratch script `scripts/leak-speculos-port.ts` (do not commit). It should do, in order:
-   - (a) Launch Speculos with the Ethereum app on a port — call it `portA`. Save `portA` to a variable. Set `SPECULOS_API_PORT=portA`.
-   - (b) Run `node apps/cli/bin/index.js getAddress --currency ethereum --path "44'/60'/0'/0/0"` and confirm it succeeds.
-   - (c) Launch a *second* Speculos with the Bitcoin app on `portB`. Set `SPECULOS_API_PORT=portB`. Do **not** save the original `portA`.
-   - (d) Run `node apps/cli/bin/index.js getAddress --currency bitcoin --path "44'/0'/0'/0/0"` and confirm it succeeds.
-   - (e) Stop both Speculos processes (`stopSpeculos` for each). Crucially, **do not restore `SPECULOS_API_PORT` to anything** — leak it.
-2. Now, in the same Node process or shell session, run a third `getAddress` against currency `ethereum`. The env var still points at `portB` (or — depending on order — at a stopped Speculos). Observe what happens.
+1. Create `e2e/userdata/twoEthTwoUsdt.json` — two Ethereum parent accounts (`Ethereum 1`, `Ethereum 2`), each with a USDT TokenAccount child (balances: `100 USDT`, `250 USDT`).
+2. Write `e2e/specs/accounts/listTwoEthTwoUsdt.spec.ts` that:
+   - Boots with the new userdata.
+   - Opens the Accounts tab via `app.accounts.openAccountsTab()`.
+   - Asserts four rows are visible: `Ethereum 1`, `Ethereum 2`, and the two USDT child rows.
+3. Tag with `$TmsLink("B2CQA-DUMMY2")`.
 
-**Verification.** The third command fails. The exact failure mode depends on whether `portB` is reused, in TIME_WAIT, or vanished entirely. Most common: a connection-refused error from `hw-transport-node-speculos-http`. Document the failure in three sentences: what you expected, what happened, why.
+**Verification.** Three green runs. Open Allure and confirm each assertion is a separate `@Step`.
 
 **Hints.**
-- The pattern in `e2e/desktop/tests/utils/speculosUtils.ts` (briefing §8) is what `cleanSpeculos(speculos, previousPort?)` exists to handle. When `previousPort` is passed, it restores the env var. When omitted, the env var is left at its current (now-stopped) value.
-- This is exactly why two-app tests in `swap.page.ts` save the previous port: `const previousSpeculosPort = getEnv("SPECULOS_API_PORT")` *before* launching, then pass it to `cleanSpeculos(speculos, previousSpeculosPort)` in `finally`.
-- If the third command happens to succeed, you may have hit a port-reuse coincidence. Run a fourth, fifth, sixth — eventually one will fail. The failure is non-deterministic, which is exactly why the pattern is mandatory rather than "add it if you remember".
+- Use distinct, collision-free account IDs — copy the ID pattern from an existing userdata fixture.
+- The Accounts list uses `accounts-account-row-$accountId` as its testID pattern (confirm by grepping `src/screens/Accounts/`).
 
-**Stretch goal.** Now fix your scratch script: save `previousPort` before the second launch, restore it in a `finally` block. Run the third `getAddress` again. Confirm it succeeds. You have now reproduced — by hand — the discipline that the desktop POM enforces.
+**Stretch goal.** Extend with a third Ethereum account that has an ERC721 NFT sub-account, and assert the NFT row renders distinctly.
 
-**Why a manual repro matters.** You could read the snapshot/restore pattern in `swap.page.ts` a dozen times and still forget to apply it the first time you write a two-app test. Reproducing the failure mode by hand burns the muscle memory in. The first time you reach for a POM method that needs to swap Speculos apps, you'll *feel* the urge to save the previous port — which is exactly the goal of this exercise.
+### 5.11.5 Exercise 5: Feature-Flag Override via Bridge (90 min)
 
-### 5.9.6 Exercise 6: Find a CLI helper that's missing a `try/finally` env restore (60 min)
-
-**Objective.** Audit the codebase for the `setDisableTransactionBroadcastEnv` discipline. Either you find a bug, or you confirm the pattern is held everywhere — both outcomes are valuable.
+**Objective.** Use the bridge's `setFeatureFlag` (or equivalent) to flip a flag in `beforeAll` and assert the UI changes.
 
 **Instructions.**
-1. Grep the monorepo:
-   ```bash
-   rg "setDisableTransactionBroadcastEnv" --type ts -n
-   ```
-2. For every call site, check:
-   - (a) Is the return value (the original env value) captured into a variable?
-   - (b) Is there a corresponding `setDisableTransactionBroadcastEnv(original)` call that restores it?
-   - (c) Is the restore inside a `finally` block, so it runs even on throw between flip and restore?
-3. Flag any call site that fails (a), (b), or (c). Write a short audit memo: which file, which line, what's missing, what the fix would be.
-4. If you find no bugs, write the memo anyway: "Audit clean. Pattern held in N call sites. Sites: [list]." This is a real engineering deliverable; "we checked and nothing's wrong" is not the same as "we didn't check".
+1. Locate the bridge message responsible for setting a feature flag in `e2e/bridge/types.ts`.
+2. In a new spec `swapLiveAppFlagOn.spec.ts`, in `beforeAll`, send `setFeatureFlag("ptxSwapLiveApp", { enabled: true })` to the app before it navigates.
+3. In the `it()`, open the swap tab and assert the Live App route is mounted (look for a testID like `swap-live-app-root` — if it does not exist, add the product ticket and stop; do not hack around it).
 
-**Verification.** Your memo identifies every call site by file:line. Each site has a one-line verdict: `clean`, `missing-finally`, `missing-restore`, or `unrestored-by-design`. (The mobile module-load `setEnv("DISABLE_TRANSACTION_BROADCAST", true)` in `e2e/mobile/specs/swap/otherTestCases/swap.other.ts` is intentionally unrestored — the whole spec file runs broadcast-off; that's fine and you should annotate it as such.)
+**Verification.** Three green runs. Flip the flag to `false` and rerun; the test should fail as expected.
 
 **Hints.**
-- Briefing §9 lists every read site and set site. Use it as your ground truth.
-- The canonical clean pattern is `approveTokenCommand` and `revokeTokenCommand` in `cliCommandsUtils.ts`. They flip to `"0"`, run the CLI command, then in `finally` restore `original`. Compare every other site to this template.
-- Don't conflate "no `finally`" with "no restore". A function that restores at the end (after the CLI promise resolves) but not in `finally` is buggy: any throw between flip and restore leaks the env mutation to the rest of the test run.
+- The bridge `setFeatureFlag` contract is documented in Chapter 5.6. If the payload shape is wrong, the app ignores the message silently — attach a `onerror` logger while iterating.
+- Not every flag propagates at runtime without an app restart. Check `FeatureFlagsProvider` in `apps/ledger-live-mobile/src/components/FeatureFlags/`.
 
-**Stretch goal.** If you find a bug, open a JIRA ticket (QAA-XXX) describing it with a reproducer. If you don't, propose a lint rule (`eslint-plugin-local`) that flags `setDisableTransactionBroadcastEnv("0")` calls not followed by a `try { ... } finally { setDisableTransactionBroadcastEnv(...) }` block within the same function. Discuss tradeoffs.
+**Stretch goal.** Write a helper `withFeatureFlags(flags) { ... }` that accepts an object and sends one bridge message per flag. Use it in your `beforeAll`.
 
-**The audit pattern, generalized.** Replace `setDisableTransactionBroadcastEnv` with any function whose name starts with `set`, mutates global state (env, registry, in-memory cache), and returns a "previous value" handle. Every such function deserves the same audit. The QAA codebase has a handful: `setEnv`, `setDisableTransactionBroadcastEnv`, the Speculos port mutations in `launchSpeculos`/`cleanSpeculos`. Carry this audit reflex into Part 6 and beyond.
+### 5.11.6 Exercise 6: Nightly Swap-Only CI Matrix (90 min)
 
-### 5.9.7 Exercise 7: Mobile parity for the senior's revoke (90 min)
-
-**Objective.** Sketch the mobile-side equivalent of the desktop `revokeTokenApproval` POM method. This is the exercise that maps directly to the QAA-615 follow-up work outlined in Ch 5.8.10.
+**Objective.** Add a scheduled CI entry that runs only swap-tagged specs.
 
 **Instructions.**
-1. Open `e2e/mobile/page/trade/swap.page.ts`. Find the existing `approveTokenCommand` usage (briefing §10 names it; it's near the top of the file in a method shaped like `ensureTokenApproval`).
-2. Compare with the desktop `swap.page.ts` `ensureTokenApproval` (briefing §7). They're structural twins, modulo:
-   - **Allure attachment shape.** Mobile uses a slightly different Allure helper — find the existing `await allure...` calls in the mobile POM and copy that idiom.
-   - **Mobile globals.** Mobile injects `cliCommandsUtils` as globals via `e2e/mobile/jest.environment.ts:138`. So `revokeTokenCommand` will already be a global in mobile specs. Check `e2e/mobile/types/global.d.ts:104-111` to confirm it's typed, or note that you'd need to add it.
-   - **Mobile-specific guards.** The mobile POM may have additional early-return guards (platform branches via `isAndroid()`/`isIos()`, network reachability checks). Audit the existing `ensureTokenApproval` for these and mirror them in your sketch.
-3. Sketch — on paper or in a scratch file you don't commit — a `revokeTokenApproval(fromAccount, provider)` mobile method. Same shape as desktop's: save previous Speculos port, launch Speculos for the account's currency, call `revokeTokenCommand` (the global), Allure-describe the result, clean Speculos in `finally`.
-4. List the exact diffs between your mobile sketch and the desktop method. There should be 3-5 of them.
-5. Sanity-check your sketch against the senior's commit (briefing §1, the desktop `revokeTokenApproval`). For every line of the desktop method, your sketch has either (a) an identical line, or (b) a justified mobile-specific deviation. There should be no orphan lines on either side.
+1. Open `.github/workflows/test-mobile-e2e-reusable.yml` and its caller (likely `test-mobile-e2e.yml`).
+2. Add a `schedule` trigger firing at `0 2 * * *` (02:00 UTC).
+3. Add a matrix entry that passes `-t "SWAP|Swap|swap"` to `pnpm mobile e2e:test` — this filters by test-name pattern.
+4. Limit to one shard (swap-only run — no need to parallelize across 10 shards for a dozen tests).
 
-**Verification.** Your sketch reads, structurally, like a one-to-one translation of the desktop method. Your diff list is honest: every difference is justified, none are arbitrary. A peer should be able to take your sketch, point at any line, and tell you *why* it differs from the desktop equivalent.
+**Verification.** Run `act` locally or push to a throwaway branch and wait for the scheduled run. Confirm only swap specs execute.
 
 **Hints.**
-- Mobile specs do not import `cliCommandsUtils`; the helpers are globals. So your sketch may have *no* import statement for `revokeTokenCommand` — instead, the global type definition in `global.d.ts` makes TypeScript happy.
-- The mobile equivalent of `launchSpeculos` and `cleanSpeculos` may live in a different util file (search `e2e/mobile/` for `speculos`). The shape is the same, the path differs.
-- If `revokeTokenCommand` is not yet typed in `global.d.ts`, that's part of the work — note it in your diff list.
-- Do not merge this. The exercise terminates at "sketch and diff". Real merge work goes through QAA review and a QAA-615 follow-up ticket.
+- Use a `if: github.event_name == 'schedule'` guard so the matrix entry does not run on every PR.
+- The sharding algorithm (Chapter 8.3) is irrelevant here — you are opting out of sharding by setting shard count to 1.
 
-**Stretch goal.** Estimate the work breakdown for shipping this for real: types update (small), POM sketch (medium), spec wiring (medium), CI green-light requirements (depends on whether the CI runner has Speculos on the mobile path). Compare with how the senior shipped the desktop side in 37 lines across 3 files (briefing §1). Are the mobile changes likely to be larger or smaller? Why?
+**Stretch goal.** Add a Slack notification step that posts the Allure link to `#qa-mobile` on failure.
 
-**Capstone purpose.** The previous six exercises trained individual reflexes (read the CLI, trace a fixture, audit env discipline, reproduce a port leak). This one binds them together: the mobile parity work touches every layer. You'll add a global type (Layer 3 mobile-injection surface), call `revokeTokenCommand` (Layer 3 wrapper, already shared), launch and clean Speculos with port restore (Layer 5 lifecycle), trust the broadcast-env discipline inside `revokeTokenCommand` itself (Layer 3 again), and produce an Allure attachment for observability. If you can sketch this method without re-reading the briefing, you've internalized Part 5.
+### 5.11.7 Exercise 7: Extend QAA-702 with an Empty-State Path (120 min)
 
-**Common mistake.** Copy-pasting the desktop `@step("Revoke token approval")` decorator into the mobile sketch. Mobile uses the `@Step` decorator from a different module path (check the existing mobile POM imports). The decorator name is the same in spirit but the import path differs. While you're at it, check that you don't replicate the senior's copy-paste bug from QAA-615 — your mobile sketch should say "Revoke token approval", not "Ensure token approval".
+**Objective.** Add a second `it()` to `swapHistoryExportERC20.spec.ts` that covers the no-history case.
 
-### 5.9.8 Self-check checklist
+**Instructions.**
+1. Create a userdata fixture `swapHistoryEmpty.json` with at least one Ethereum account but **no** entries in `swap.history`.
+2. Add a new `describe("Swap History — Empty")` block with a single `it($TmsLink("B2CQA-604-empty"), "hides the export button when no swaps exist")`.
+3. Use the `expectEmptyState()` method from Exercise 1.
+4. Assert the export button is not visible.
 
-Before you call Part 5 done, walk this checklist. Each item maps to one of the seven exercises plus a couple of integrative checks. If any answer is "no" or "not sure", the chapter reference next to it is your next read.
+**Verification.** Both specs — the ERC20 export spec and the empty-state spec — pass on three consecutive runs.
 
-- [ ] I can run `node apps/cli/bin/index.js tokenAllowance` from memory with the right flags. (Ex 1, Ch 5.1)
-- [ ] I can explain why typed wrappers go through the CLI subprocess instead of calling `getEvmTokenAllowance` directly. (Ex 2, Ch 5.4)
-- [ ] I can trace a `cliCommands: [liveDataCommand(account)]` line down five layers and back. (Ex 3, Ch 5.4)
-- [ ] I know which helpers stay out of CI and why (human-in-the-loop = local-only). (Ex 4, Ch 5.3)
-- [ ] I have personally observed the failure mode of a leaked `SPECULOS_API_PORT`. (Ex 5, Ch 5.5)
-- [ ] I have audited every `setDisableTransactionBroadcastEnv` call site for `try/finally` discipline. (Ex 6, Ch 5.6)
-- [ ] I can sketch a mobile parity method for `revokeTokenApproval` without re-reading the desktop POM. (Ex 7, Ch 5.8)
-- [ ] I know which CLI is canonical for QAA work and when (rarely) `wallet-cli` is justified. (Ch 5.1, Ch 5.7)
-- [ ] I can recognize the `@step` copy-paste bug in QAA-615 and explain why it's an observability bug, not a correctness bug. (Ch 5.8)
-- [ ] I can explain in one sentence why `0x095ea7b3` is the same selector for both an approve and a revoke. (Ch 5.2)
-- [ ] I know the difference between the Etherscan Read tab (free, no wallet) and the Etherscan Write tab (gas, MetaMask) and when each is the right manual tool. (Ch 5.3)
-- [ ] I can explain why broadcast-enabled regression tests need a revoke hook between iterations even when the test itself doesn't care about allowance state. (Ch 5.2, Ch 5.6)
+**Hints.**
+- `beforeAll` in the new `describe` re-inits the app with the new userdata.
+- Detox's `toBeNotVisible()` is different from `toBeHidden()`. Check which one exists in your Detox major version.
 
-### 5.9.9 Diagnostic playbook for common CLI failures
+**Stretch goal.** Write a helper `seededSwapHistory(opts: { count: number; erc20: boolean })` that generates the JSON in-memory and hands it to `app.init()`. This removes two userdata files in favor of one generator.
 
-When an exercise (or a real test) fails, work through this short playbook before reaching for help. Most failures map to one of five symptoms.
+### 5.11.8 Challenge: Warm-Simulator Detox Wrapper (120 min, stretch)
 
-| Symptom | First check | Likely cause | Reference |
-|---|---|---|---|
-| `MODULE_NOT_FOUND` from `apps/cli/bin/index.js` | Did the prebuild run? `pnpm --filter @ledgerhq/live-cli prebuild` | Generated commands index missing | Ch 5.1 |
-| `ECONNREFUSED` to a Speculos port | `echo $SPECULOS_API_PORT`; is the process still running? | Leaked port from prior cleanup; missing snapshot/restore | Ch 5.5, Ex 5 |
-| Test broadcasts a real transaction unexpectedly | `echo $DISABLE_TRANSACTION_BROADCAST` | Earlier `try/finally` was missing; env mutation leaked | Ch 5.6, Ex 6 |
-| `parseTokenAllowanceCliOutput` throws on stdout | Did you pass `--format json` to the CLI? | Human-readable output, not JSON | Ch 5.4, Ex 1 |
-| `getAddress` returns the wrong address | Which Speculos port is the env var pointing at? | Speculos for the wrong app (ETH vs BTC) | Ch 5.5, Ex 5 |
+**Objective.** Cut local iteration time in half by keeping the simulator booted between runs.
 
-If the symptom isn't on this list, the next read is the `runCliCommand` error block in `runCli.ts` — the `❌ Failed to execute CLI command` template includes currency, index, exit code, and CLI stderr. Nine times out of ten the answer is in those four lines.
+**Task.** Write a small Node or shell wrapper — `scripts/e2e-warm.sh` or `scripts/e2e-warm.ts` — that:
 
-**Worked example.** Imagine a flaky test that broadcasts a transaction every third run. First check: does any `setDisableTransactionBroadcastEnv("0")` call lack a `finally`-wrapped restore? Run the audit from Exercise 6. If clean, second check: does any helper in the test setup call `setDisableTransactionBroadcastEnv` and exit on a path that bypasses the restore (e.g., an early `return`)? An early-return after the flip is almost the same bug as a missing `finally`, just spelled differently. The remedy is the same: pair every flip with a guaranteed restore, and prefer `try/finally` to manual restoration even on the happy path.
+1. Checks whether the iOS simulator UUID is already booted (`xcrun simctl list | rg Booted`).
+2. If not, boots it.
+3. Runs `detox test --reuse -c ios.sim.debug -t "$@"` — the `--reuse` flag reuses an already-installed app binary.
+4. Does **not** shut down the simulator on exit.
+5. Accepts the same `-t` pattern and `-c` config as `pnpm mobile e2e:test`.
 
-### 5.9.10 Where to go from here
+The existing pnpm command rebuilds and rebooks every time; `--reuse` is up to 30 s faster per run.
 
-If you've checked every box and finished all seven exercises, the natural next steps are:
+**Verification.** Three consecutive runs of a small spec (Exercise 2's password-entry close) should each start the test in under 10 s of wall time after the first.
 
-- **Pair with the senior who wrote QAA-615** (briefing §1) on the final-shape PR. The dev-loop commit is on `support/qaa_add_revoke_token`; the final PR will likely keep both `revokeTokenApproval` (as `beforeEach`) and `ensureTokenApproval` (as per-test setup). Volunteering to review that PR is the cleanest way to confirm your model matches reality.
-- **Pick up a follow-up ticket** that touches `cliCommandsUtils.ts`. Anything in the QAA backlog tagged "CLI" or "test-data hooks" is fair game. You're now able to read those tickets without translation.
-- **Move to Part 6** (Swap Live App). The same allowance state, Speculos transport, and broadcast discipline you just learned reappear there, wrapped in a Live App iframe. Most of what you learned in Part 5 transfers; the new content is the postMessage protocol and the Live App sandboxing model.
-- **Volunteer for the QAA-615 mobile parity work** sketched in Exercise 7. The desktop ships first; the mobile follow-up is concrete, scoped, and a perfect first cross-platform contribution.
-- **Read one CLI command source file end to end** (e.g., `apps/cli/src/commands/blockchain/send.ts`). You don't need to memorize it; you need the muscle memory of having traced the rxjs pipe from sign to broadcast at least once.
-- **Sit in on a QAA review** of a `swap.page.ts` change. Watching how seniors challenge POM additions (does it duplicate an existing helper? does it leak env state? does the `@step` decorator string match the action?) is faster than reading any style guide.
-- **Run the full QAA-615 spec locally** end to end on Sepolia, with broadcast on, against the QAA test seed. Watch a real revoke land on-chain via Etherscan. Confirm the on-chain allowance dropped to zero. This grounds every abstraction you've learned in a verifiable on-chain effect.
-- **Write a small internal post-mortem** on the QAA-615 dev-loop commit, framed as: "what makes this not the final shape, and what would final-shape review look for?" Share it with one peer for feedback. The exercise of articulating the distinction in writing solidifies it more than any number of re-reads.
+**Hints.**
+- `detox test --reuse` is documented in the Detox CLI reference. If the binary isn't installed, `--reuse` falls back gracefully.
+- `xcrun simctl boot <UDID>` is the lowest-level way to boot a sim; `applesimutils --booted` lets you query the currently booted sim without parsing.
+- Print the elapsed time at the end of the wrapper so you can track your speedup.
+
+**Stretch.** Add an Android branch that checks `adb devices` and only boots an emulator if none is running.
 
 <div class="chapter-outro">
-<strong>Key takeaway.</strong> The exercises ramp from a single CLI invocation to a paper-sketched mobile parity for a method you watched a senior write. Exercises 1-3 are warm-ups: hand-run, paper trace, fixture lifecycle memo. 4 and 5 force you to think about what stays out of CI (debugging helpers) and why disciplined env-restoration matters (port-leak failure modes). 6 is an audit pattern you'll repeat throughout your career — every codebase has env-mutating helpers, every one of them needs `try/finally` discipline, every team has at least one missing it. 7 is the capstone: take the senior's commit and translate it to a sister platform, the way real QA tickets evolve. The self-check checklist is the bar: if you can tick every box, you are past the Part 5 onboarding line.
-
-The diagnostic playbook in 5.9.9 is the artifact you'll reach for most often in your first months — keep it open in a tab. The "Where to go from here" list in 5.9.10 turns the onboarding momentum you've built into concrete next contributions instead of a stalled "now what?" gap. Both belong in your bookmarks.
+<strong>Key takeaway.</strong> The exercises ramp from touching a POM to rewriting your local loop. Exercises 1–2 are warm-ups; 3–4 build the fixture and config intuition; 5–6 move into infrastructure; 7 extends your capstone; 8 is the quality-of-life payoff. If you finish all eight without peeking at solutions, you are past the onboarding bar and into steady-state contribution territory.
 </div>
 
 ---
@@ -4308,154 +6266,128 @@ The diagnostic playbook in 5.9.9 is the artifact you'll reach for most often in 
 
 ## Part 5 Final Assessment
 
-You have walked the full QAA CLI stack: the `apps/cli` binary that is the canonical CLI for QA work, the blockchain primer that makes ERC-20 allowances less mysterious, the manual revoke tools (revoke.cash, Etherscan) that fill the gaps when the harness isn't available, the five-layer integration that turns one Bash command into a typed POM method that drives Speculos in parallel, the Speculos lifecycle and snapshot/restore pattern that keeps two-app tests honest, the broadcast-env discipline with its non-negotiable `try/finally`, the daily workflow with its `wallet-cli` escalation rules, and one real ticket (QAA-615) walked line by line. This assessment samples the load-bearing ideas across Chapters 5.1-5.8. Eighty percent to pass. If you miss a question, jump back to the referenced chapter — the answer is always grounded in a concrete file, command, or commit, not general knowledge.
+You have walked the full mobile E2E stack: React Native primitives, the iOS/Android toolchain, Detox's matcher-action-expectation DSL, the WebSocket bridge that layers Redux and device-event control on top of Detox, the POM hub, the sharding algorithm, and one real ticket (QAA-702) shipped end to end. This assessment samples the load-bearing ideas across Chapters 4.1-4.11. Eighty percent to pass. If you miss a question, jump back to the referenced chapter — the answer is always grounded in a concrete file or command, not general knowledge.
 
-The questions are weighted toward the patterns you'll repeat in daily work: which CLI to pick (Q1), how on-chain state behaves (Q2), when to reach for manual tools (Q3), the architecture that ties layers together (Q4-Q5), the discipline that keeps tests deterministic (Q6-Q7), the workflow rules that prevent hour-long detours (Q8), and the close-reading skills that catch dev-loop artifacts before they ship (Q9-Q10). If your weak spots cluster around one chapter, that's your re-read; if they're scattered, do a slow pass of the whole part with the briefing open in a second pane.
-
-**Quick reference card (consult after the quiz, not during).**
-
-| Concept | Anchor |
-|---|---|
-| Canonical QAA CLI | `apps/cli/bin/index.js` (legacy `@ledgerhq/live-cli`) |
-| Approve/revoke selector | `0x095ea7b3` = `keccak256("approve(address,uint256)")[0:4]` |
-| Layer 2 spawn engine | `libs/ledger-live-common/src/e2e/runCli.ts` |
-| Layer 3 typed wrappers | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` |
-| Layer 4 device-tap | `libs/ledger-live-common/src/e2e/families/evm.ts` |
-| Layer 5 desktop POM | `e2e/desktop/tests/page/swap.page.ts` |
-| Speculos lifecycle utils | `e2e/desktop/tests/utils/speculosUtils.ts` |
-| Broadcast env helper | `setDisableTransactionBroadcastEnv` in `cliCommandsUtils.ts` |
-
-<a id="part-5-final-assessment"></a>
+<a id="part-4-final-assessment"></a>
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 5 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions · 80% to pass · Covers Chapters 5.1-5.8</p>
+<p class="quiz-subtitle">10 questions · 80% to pass · Covers Chapters 4.1-4.11</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
-<div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> Which CLI is the canonical tool for QAA test data hooks?</p>
+<div class="quiz-question" data-correct="C">
+<p><strong>Q1.</strong> In React Native, what does the <code>testID</code> prop become at runtime on each native platform?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>libs/wallet-cli</code> (the Bun + Bunli + DMK CLI)</button>
-<button class="quiz-choice" data-value="B">B) <code>apps/cli</code> (the legacy <code>@ledgerhq/live-cli</code>, invoked as <code>node apps/cli/bin/index.js</code>)</button>
-<button class="quiz-choice" data-value="C">C) The Speculos REST API directly, with no CLI in front</button>
-<button class="quiz-choice" data-value="D">D) <code>ledger-cli</code> from the published npm package</button>
+<button class="quiz-choice" data-value="A">A) A CSS class on iOS and an XML id on Android</button>
+<button class="quiz-choice" data-value="B">B) The visible text label on both platforms</button>
+<button class="quiz-choice" data-value="C">C) <code>accessibilityIdentifier</code> on the backing <code>UIView</code> on iOS, and <code>resource-id</code> on the <code>View</code> on Android — which is what <code>by.id()</code> resolves against</button>
+<button class="quiz-choice" data-value="D">D) A React key used only by the reconciler</button>
 </div>
-<p class="quiz-explanation"><code>apps/cli</code> is what every spec under <code>e2e/desktop/tests/specs/</code> and every <code>cliCommands: [...]</code> fixture call resolves to via <code>runCliCommand</code>. The path resolution is hard-coded in <code>libs/ledger-live-common/src/e2e/runCli.ts</code>: <code>LEDGER_LIVE_CLI_BIN = path.resolve(__dirname, "../../../../apps/cli/bin/index.js")</code>. <code>wallet-cli</code> is a separate workspace, used for non-QAA work; treating it as the QAA tool is the most common new-joiner mistake and produces a confusing 30-minute detour every time.</p>
+<p class="quiz-explanation">RN translates <code>testID</code> to the platform's accessibility identifier. Detox's <code>by.id("export-swap-operations-link")</code> matches <code>accessibilityIdentifier</code> on iOS and <code>resource-id</code> on Android. This is why <code>testID</code> is stable across i18n and copy changes — the value never appears on screen.</p>
 </div>
 
-<div class="quiz-question" data-correct="C">
-<p><strong>Q2.</strong> What does the calldata <code>0x095ea7b3</code> represent on an ERC-20 token contract?</p>
+<div class="quiz-question" data-correct="B">
+<p><strong>Q2.</strong> Why do E2E tests in Ledger Live Mobile often branch on <code>device.getPlatform()</code> (exposed via <code>isIos()</code>/<code>isAndroid()</code> helpers) rather than on <code>Platform.OS</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The contract's bytecode prelude</button>
-<button class="quiz-choice" data-value="B">B) The function selector for <code>transfer(address,uint256)</code></button>
-<button class="quiz-choice" data-value="C">C) The function selector for <code>approve(address,uint256)</code> — i.e. <code>keccak256("approve(address,uint256)")[0:4]</code> — followed in calldata by the spender address (32 bytes) and the allowance amount (32 bytes)</button>
-<button class="quiz-choice" data-value="D">D) The selector for <code>balanceOf(address)</code></button>
+<button class="quiz-choice" data-value="A">A) <code>Platform.OS</code> is deprecated</button>
+<button class="quiz-choice" data-value="B">B) <code>Platform.OS</code> runs inside the app bundle, but the Detox test code runs in the Jest worker (Node) — it has no <code>Platform</code>, so it asks the device driver instead</button>
+<button class="quiz-choice" data-value="C">C) Detox forbids importing from <code>react-native</code></button>
+<button class="quiz-choice" data-value="D">D) Both helpers are aliases for the same thing</button>
 </div>
-<p class="quiz-explanation"><code>0x095ea7b3</code> is the four-byte function selector for <code>approve</code>. Both an "approve N" and a "revoke" share the same selector — the difference is whether the trailing 32-byte amount is non-zero (approve) or zero (revoke). Ledger's clear-sign decoder recognizes this selector and renders human-readable approve/revoke screens. The infinite-approval footgun (calldata <code>...</code> with amount <code>2^256 - 1</code>) was the vector in major DeFi drains (BadgerDAO 2021, multiple 2022 phishing campaigns) — which is why revoke.cash and EIP-2612 permit exist.</p>
+<p class="quiz-explanation"><code>Platform</code> is a React Native module — only defined inside the RN runtime. Test code runs in Node, so it queries the Detox <code>device</code> global. <code>device.getPlatform()</code> returns <code>"ios"</code> or <code>"android"</code> and is the only reliable way to branch from the test side.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q3.</strong> When is revoke.cash the right manual tool, and when is Etherscan's Write tab the right tool?</p>
+<p><strong>Q3.</strong> The repo pins Node, pnpm, npm, bun, and CocoaPods via <code>mise.toml</code> (and a minimal <code>.prototools</code>). What does running <code>mise install</code> at the repo root accomplish?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) revoke.cash when you need a one-click UI to enumerate every active allowance on an address and revoke any of them; Etherscan's Write tab when revoke.cash doesn't list a specific token (rare edge cases) and you need to call <code>approve(spender, 0)</code> directly via Connect+MetaMask</button>
-<button class="quiz-choice" data-value="B">B) revoke.cash for mainnet, Etherscan only for testnets</button>
-<button class="quiz-choice" data-value="C">C) They are interchangeable; pick whichever loads faster</button>
-<button class="quiz-choice" data-value="D">D) Etherscan first, revoke.cash only as a fallback when Etherscan is down</button>
+<button class="quiz-choice" data-value="A">A) Reads the pinned versions, pulls them down, and places shims on <code>PATH</code> so every tool auto-switches when you <code>cd</code> into the repo</button>
+<button class="quiz-choice" data-value="B">B) Installs the Ledger Live mobile APK onto an attached Android device</button>
+<button class="quiz-choice" data-value="C">C) Runs <code>pod install</code> for the iOS project</button>
+<button class="quiz-choice" data-value="D">D) Boots an iOS simulator and an Android emulator</button>
 </div>
-<p class="quiz-explanation">revoke.cash's value is its enumeration UI — it scans the address and surfaces every active allowance per token+spender. Etherscan's Write tab is a generic contract-write surface for the rare case revoke.cash doesn't index a token (obscure tokens, fresh deployments). Both connect via the same WalletConnect/MetaMask flow; both broadcast a real transaction and cost gas.</p>
+<p class="quiz-explanation"><code>mise</code> (successor to <code>proto</code>) is the single source of truth for pinned tool versions. You never touch <code>nvm use</code> or <code>rbenv global</code> — shims on <code>PATH</code> resolve to the exact versions declared in <code>mise.toml</code> as soon as you enter the directory.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q4.</strong> In the five-layer integration, which layer does device-tap automation (driving Speculos's REST API to walk through the on-device approval screens)?</p>
+<p><strong>Q4.</strong> You run an E2E build and the app crashes on launch with "Firebase config missing." What is the most likely cause?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Layer 1 — <code>apps/cli/bin/index.js</code></button>
-<button class="quiz-choice" data-value="B">B) Layer 2 — <code>libs/ledger-live-common/src/e2e/runCli.ts</code></button>
-<button class="quiz-choice" data-value="C">C) Layer 3 — <code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code></button>
-<button class="quiz-choice" data-value="D">D) Layer 4 — <code>libs/ledger-live-common/src/e2e/families/evm.ts</code> (with <code>approveToken()</code>, <code>approveTokenButtonDevice</code>, <code>approveTokenTouchDevices</code>)</button>
+<button class="quiz-choice" data-value="A">A) CocoaPods is out of date — run <code>bundle exec pod install</code></button>
+<button class="quiz-choice" data-value="B">B) Metro is not running on port 8081</button>
+<button class="quiz-choice" data-value="C">C) The iOS simulator was cold-booted without <code>-no-snapshot</code></button>
+<button class="quiz-choice" data-value="D">D) <code>ENVFILE</code> was not set, so the build did not inject <code>.env.mock</code> (staging Firebase) or <code>.env.mock.prerelease</code> (production Firebase)</button>
 </div>
-<p class="quiz-explanation">Layer 4 is the device-tap layer. While the CLI subprocess (Layer 1, spawned by Layer 2) is blocked waiting for a hardware confirmation, <code>approveToken()</code> in <code>families/evm.ts</code> drives Speculos's REST API to navigate menus, press buttons, hold-to-sign on touch devices. The CLI and the device-tap helper run in parallel — that's the trick. <code>approveToken()</code> branches on <code>isTouchDevice()</code>: button devices (Nano S/X/S+) get <code>pressUntilTextFound</code> + <code>buttonsController.both()</code>; touch devices (Stax/Flex) get <code>longPressAndRelease(HOLD_TO_SIGN, 3)</code>. Same logical labels via <code>DeviceLabels.*</code>, different physical interactions.</p>
-</div>
-
-<div class="quiz-question" data-correct="C">
-<p><strong>Q5.</strong> Why are several Layer-3 helpers (<code>liveDataCommand</code>, <code>liveDataWithAddressCommand</code>, <code>liveDataWithRecipientAddressCommand</code>) curried — i.e. <code>(account) =&gt; (userdataPath) =&gt; Promise&lt;void&gt;</code> — instead of plain async functions?</p>
-<div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) For functional-programming style points</button>
-<button class="quiz-choice" data-value="B">B) To support partial application across spec files</button>
-<button class="quiz-choice" data-value="C">C) Because the desktop fixture engine (in <code>e2e/desktop/tests/fixtures/common.ts</code>) consumes a <code>cliCommands: [...]</code> array and threads in the userdataPath at the right point in the test lifecycle. Currying lets specs declare <code>cliCommands: [liveDataCommand(account)]</code> at metadata-time and have the engine call <code>(curried)(userdataPath)</code> at setup-time</button>
-<button class="quiz-choice" data-value="D">D) To avoid TypeScript inference issues</button>
-</div>
-<p class="quiz-explanation">The curry is fixture-shaped: the spec author binds <code>account</code> when writing the test; the engine binds <code>userdataPath</code> when setting up. One-shot reads (like <code>isTokenAllowanceSufficientCommand</code>) don't need this pattern — they're plain async functions because there's no second-stage binding to thread.</p>
+<p class="quiz-explanation">The build scripts read <code>ENVFILE</code> and inject it into the native build so JS and native code see the same values. Without it, Firebase keys are absent and the app crashes immediately. Default for local E2E and CI is <code>ENVFILE=.env.mock pnpm mobile e2e:build -c ios.sim.debug</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> Why does a swap test that needs to revoke a token approval before the test runs save the previous Speculos port and restore it in a <code>finally</code> block?</p>
+<p><strong>Q5.</strong> Why does Detox's <code>setup.ts</code> call <code>await device.reverseTcpPort(8081)</code> and <code>await device.reverseTcpPort(wsPort)</code>?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) For Allure attachment hygiene</button>
-<button class="quiz-choice" data-value="B">B) Because two-app tests run a second Speculos (e.g., the Ethereum app for the revoke) on a different port, which mutates <code>SPECULOS_API_PORT</code>. Without saving and restoring, the rest of the test run — including the main Exchange-app Speculos that drove the swap — would point at a now-stopped port, causing connection-refused failures on every subsequent CLI call</button>
-<button class="quiz-choice" data-value="C">C) Because Speculos randomizes its port and the previous port is unreachable after restart</button>
-<button class="quiz-choice" data-value="D">D) Because Allure requires the original port to render device screenshots</button>
+<button class="quiz-choice" data-value="A">A) To harden the Metro bundler against MITM attacks</button>
+<button class="quiz-choice" data-value="B">B) Because Android emulators run in an isolated network namespace — without <code>adb reverse tcp:p tcp:p</code>, <code>localhost:p</code> inside the emulator does not reach the host Mac where Metro and the bridge server run</button>
+<button class="quiz-choice" data-value="C">C) Detox requires reverse-port-forwarding on both iOS and Android to boot the simulator</button>
+<button class="quiz-choice" data-value="D">D) It is a Jest configuration step unrelated to the app</button>
 </div>
-<p class="quiz-explanation">The <code>SPECULOS_API_PORT</code> env var is process-global. Mutating it for a sub-step (revoke on Ethereum app) and forgetting to restore leaks the change to every later CLI invocation. The pattern in <code>cleanSpeculos(speculos, previousPort?)</code> exists exactly to make this restoration idiomatic.</p>
+<p class="quiz-explanation">iOS simulator shares the Mac's network stack, so <code>localhost</code> already works and <code>reverseTcpPort</code> is a harmless no-op. Android emulator has its own kernel and network — <code>adb reverse</code> is the magic that routes <code>localhost:8081</code> (Metro) and the dynamic bridge port to the host.</p>
+</div>
+
+<div class="quiz-question" data-correct="C">
+<p><strong>Q6.</strong> In Detox, which line correctly expresses the matcher-action-expectation triad for "tap the Send button by testID, then assert the amount field is visible"?</p>
+<div class="quiz-choices">
+<button class="quiz-choice" data-value="A">A) <code>element.click("send-button"); expect.visible("amount-input")</code></button>
+<button class="quiz-choice" data-value="B">B) <code>await by.id("send-button").tap(); await by.id("amount-input").toBeVisible()</code></button>
+<button class="quiz-choice" data-value="C">C) <code>await element(by.id("send-button")).tap(); await expect(element(by.id("amount-input"))).toBeVisible()</code></button>
+<button class="quiz-choice" data-value="D">D) <code>device.tap("send-button"); device.assertVisible("amount-input")</code></button>
+</div>
+<p class="quiz-explanation">Every Detox statement composes a matcher (<code>by.*</code>) through <code>element()</code> with either an action (<code>.tap()</code>) or an expectation (<code>expect(...).toBeVisible()</code>). Matchers are pure descriptions — they do not find anything until <code>element()</code> resolves them.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q7.</strong> What does the <code>try/finally</code> block in <code>approveTokenCommand</code> and <code>revokeTokenCommand</code> guard against?</p>
+<p><strong>Q7.</strong> The Ledger Live Mobile WebSocket bridge server (Node, Jest worker) and client (inside the RN app) every message round-trips with an <code>ACK</code>. Why?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) An unhandled throw between the env flip (<code>setDisableTransactionBroadcastEnv("0")</code>) and the env restore would leak the broadcast-on state to every subsequent CLI call in the run, silently flipping broadcast for tests that expected it to stay off. The <code>finally</code> ensures restoration runs even on throw</button>
-<button class="quiz-choice" data-value="B">B) Speculos crashes — the <code>finally</code> kills the simulator</button>
-<button class="quiz-choice" data-value="C">C) The CLI subprocess hanging — the <code>finally</code> sends SIGKILL</button>
-<button class="quiz-choice" data-value="D">D) Allure attachment failures — the <code>finally</code> writes a fallback record</button>
+<button class="quiz-choice" data-value="A">A) Without ACKs, <code>await setFeatureFlag(...)</code> would resolve as soon as the bytes left the socket — before the RN client ran the Redux dispatch. The next test line would race the state change. The client only sends <code>{ type: "ACK", id }</code> after running the handler, so the server's promise resolves only once the side effect is live</button>
+<button class="quiz-choice" data-value="B">B) WebSockets require application-level ACKs by the protocol specification</button>
+<button class="quiz-choice" data-value="C">C) ACKs are used to measure round-trip latency for Allure reports</button>
+<button class="quiz-choice" data-value="D">D) They allow Detox to synchronize with Metro during reloads</button>
 </div>
-<p class="quiz-explanation">Env mutations are process-global and persist across awaits. A throw between flip and restore leaves <code>DISABLE_TRANSACTION_BROADCAST</code> set to <code>"0"</code> for the rest of the run; later tests assuming broadcast-off would silently broadcast real transactions. <code>finally</code> turns "we restore on the happy path" into "we always restore" — non-negotiable. The same pattern applies to any other env-mutating helper: capture the original value, pair the mutation with a guaranteed restore, never trust an explicit happy-path restore alone.</p>
+<p class="quiz-explanation">The server's <code>postMessageAndWaitForAck</code> stashes the promise in <code>pendingAcks</code> keyed by message id; the client's <code>onMessage</code> always ends with <code>postMessage({ type: "ACK", id: msg.id })</code> after dispatching the Redux action, emitting the native event, or calling <code>navigate()</code>. This is what makes the bridge safely awaitable.</p>
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q8.</strong> When does the daily QAA workflow legitimately escalate to <code>wallet-cli</code>?</p>
+<p><strong>Q8.</strong> What role does the WebSocket bridge play that Detox alone cannot cover?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) Whenever <code>apps/cli</code> is slow</button>
-<button class="quiz-choice" data-value="B">B) For every test that involves a swap</button>
-<button class="quiz-choice" data-value="C">C) Whenever you need to read an allowance — <code>wallet-cli</code> is faster</button>
-<button class="quiz-choice" data-value="D">D) Almost never. <code>wallet-cli</code> is out of QAA scope; the canonical CLI for QAA test hooks is <code>apps/cli</code>. Escalation to <code>wallet-cli</code> is reserved for rare cross-team work where a wallet-cli-specific feature (e.g., DMK transport pinning, certain BLE flows) is genuinely required and a senior has signed off</p></button>
+<button class="quiz-choice" data-value="A">A) It replaces the Metro bundler during E2E</button>
+<button class="quiz-choice" data-value="B">B) It is the transport Detox uses to drive UI matchers</button>
+<button class="quiz-choice" data-value="C">C) It replaces the React Native <code>Bridge</code> at runtime</button>
+<button class="quiz-choice" data-value="D">D) It exchanges typed messages (<code>importAccounts</code>, <code>overrideFeatureFlag</code>, <code>mockDeviceEvent</code>, <code>sendFile</code>, <code>addKnownSpeculos</code>, etc.) so tests can seed Redux, override feature flags, emit native device events, and receive exported files — things Detox, which only drives UI, cannot do</button>
 </div>
-<p class="quiz-explanation">The new-joiner trap is treating <code>wallet-cli</code> as a general-purpose CLI just because it's newer. For QAA work, <code>apps/cli</code> is the answer in 99% of cases. Reaching for <code>wallet-cli</code> usually signals you've taken a wrong turn — pause, ask, then proceed only with sign-off.</p>
+<p class="quiz-explanation">Detox drives the UI; the bridge gives the test state-level control. Onboarding from scratch every run would take two minutes plus BLE pairing. Feature flags must be overridden without a real Firebase fetch. Device events (USB, APDU) must be mocked. The bridge handles all of that via a small typed protocol declared in <code>bridge/types.ts</code>.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q9.</strong> The senior's QAA-615 commit has <code>@step("Ensure token approval")</code> on the <code>revokeTokenApproval</code> method. What's the issue?</p>
+<p><strong>Q9.</strong> In QAA-702, the spec registers the <code>sendFile</code> bridge listener <em>before</em> tapping the Export button, and the app's <code>exportSwapHistory()</code> branches on <code>getEnv("DETOX")</code>. Why both details?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) <code>@step</code> should be <code>@Step</code> with a capital S</button>
-<button class="quiz-choice" data-value="B">B) The decorator string is a copy-paste from <code>ensureTokenApproval</code> — it lies about what the method does. The Allure report will label every revoke step as "Ensure token approval", which is actively misleading. Final PR will fix this to "Revoke token approval"</button>
-<button class="quiz-choice" data-value="C">C) <code>@step</code> is deprecated; use <code>@TestStep</code> instead</button>
-<button class="quiz-choice" data-value="D">D) Decorators don't work on async methods in this version of TypeScript</button>
+<button class="quiz-choice" data-value="A">A) Because Detox disables the share sheet globally, and bridge listeners are rate-limited</button>
+<button class="quiz-choice" data-value="B">B) Because the underlying <code>EventEmitter</code> emits <code>sendFile</code> synchronously when the button is tapped — a late listener would miss the event — and because Detox cannot dismiss the native share sheet, the app intentionally skips <code>Share.open</code> and calls <code>sendFile({ fileName: "ledgerwallet-swap-history.csv", fileContent })</code> when <code>DETOX=true</code></button>
+<button class="quiz-choice" data-value="C">C) So the CSV is written to the simulator's filesystem and read back by Allure</button>
+<button class="quiz-choice" data-value="D">D) Because <code>toAccount.type === "TokenAccount"</code> blocks the listener on Android</button>
 </div>
-<p class="quiz-explanation">The bug is observability, not correctness. The method runs fine; the Allure step name is wrong. This is a classic dev-loop artifact: the senior copied the existing method's shape including its decorator, and forgot to update the string. Final PR review catches it.</p>
+<p class="quiz-explanation">Two cooperating decisions: the app bypasses <code>Share.open</code> in Detox mode and emits a bridge event instead; the bridge client uses a plain <code>EventEmitter</code>, so listeners attached after the synchronous emit see nothing. The test assembles the CSV promise (via <code>awaitExportedCSV</code>) before <code>tapExportButton()</code> and then awaits it. CSV structural checks then assert that "To account" and "To account address" hold the parent Ethereum account name and fresh address, because for ERC20 receives <code>getMainAccount</code> returns the parent.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
-<p><strong>Q10.</strong> The QAA-615 commit comments out <code>ensureTokenApproval</code> and replaces it with <code>revokeTokenApproval</code>. The Part 5 briefing notes this is "dev-loop code, not the final shape." What is the final shape likely to be?</p>
+<p><strong>Q10.</strong> Mobile CI sharding differs from desktop in two specific ways. Which pair of statements is correct?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) The final shape removes <code>ensureTokenApproval</code> entirely and only revokes</button>
-<button class="quiz-choice" data-value="B">B) The final shape collapses both methods into a single <code>handleTokenApproval</code> that takes a mode flag</button>
-<button class="quiz-choice" data-value="C">C) The final shape keeps both: <code>revokeTokenApproval</code> as a <code>beforeEach</code> cleanup that resets allowance to zero between iterations, and <code>ensureTokenApproval</code> as the per-test setup that approves the slippage-padded amount the test actually needs. The dev-loop commit only flipped them temporarily because the senior was iterating on the revoke path</button>
-<button class="quiz-choice" data-value="D">D) The final shape calls neither — the swap provider auto-approves at swap time</button>
+<button class="quiz-choice" data-value="A">A) Mobile shards round-robin specs by filename; desktop greedily bin-packs by duration</button>
+<button class="quiz-choice" data-value="B">B) Mobile uses a single 30-shard cap across both platforms; desktop uses no cap</button>
+<button class="quiz-choice" data-value="C">C) Mobile splits specs at the runner (job) level — each shard has its own OS, simulator/emulator, and bridge port — and applies asymmetric caps (up to 3 iOS / 12 Android on regular branches; 12/12 on scheduled or release/hotfix refs) because macOS runners are scarce while Linux runners are cheap. The <code>shard-tests.mjs</code> algorithm is greedy bin-packing by historical duration, with zero-timing specs round-robin'd</button>
+<button class="quiz-choice" data-value="D">D) Mobile runs all shards sequentially to avoid simulator contention</button>
 </div>
-<p class="quiz-explanation">Both methods are needed for a deterministic broadcast-enabled regression test: revoke first to clear stale allowance from the previous run, then approve the right amount for this run. The commented-out <code>ensureTokenApproval</code> in the dev-loop commit is just the senior temporarily disabling the second half while iterating on the first half. Final PR will keep both. Recognizing this distinction — between code that helps a human iterate and code that is ready to ship — is one of the highest-leverage skills in code review; the <code>// await app.swap.ensureTokenApproval(...)</code> line is the smoking gun.</p>
+<p class="quiz-explanation">Two distinctive mobile patterns: (1) sharding is at the runner level, not the Jest-worker level — <code>maxWorkers: 1</code> stays in force per shard — and (2) the iOS/Android cap asymmetry reflects runner economics. The greedy longest-first bin-packing minimizes max-shard wall time; naive round-robin would leave one shard running 4x longer than its siblings. New (zero-timing) specs are round-robin'd on first appearance and picked up by the algorithm on the next run.</p>
 </div>
 
 <div class="quiz-score"></div>
 </div>
 
 <div class="chapter-outro">
-<strong>Part 5 complete.</strong> You own the QAA CLI stack end to end:
-
-- <code>apps/cli</code> as the canonical binary, invoked from tests as <code>node apps/cli/bin/index.js</code> via <code>child_process.spawn</code>. The Bun-based <code>wallet-cli</code> stays out of QAA scope.
-- ERC-20 approvals as on-chain state that survives reboots, simulator restarts, and repo re-clones. The <code>0x095ea7b3</code> selector renders human-readable on Ledger devices because the clear-sign decoder recognizes it.
-- revoke.cash and Etherscan as the manual escape hatches when the harness can't help — debugging local seeds, auditing what's actually approved, recovering from a broken Speculos session.
-- The five-layer integration: <code>apps/cli/bin/index.js</code> → <code>runCli.ts</code> → <code>cliCommandsUtils.ts</code> → <code>families/evm.ts</code> (device-tap parallel-driver) → <code>swap.page.ts</code> POM. Each layer has one job; the curry pattern at Layer 3 is what makes the <code>cliCommands: [...]</code> fixture syntax possible.
-- The Speculos snapshot/restore pattern. Two-app tests save the previous port and restore it in <code>finally</code>; failure to do so leaks a now-stopped port to every subsequent CLI call.
-- The <code>DISABLE_TRANSACTION_BROADCAST</code> env discipline. Flip to <code>"0"</code> with <code>setDisableTransactionBroadcastEnv</code>, restore <code>original</code> in <code>finally</code>. No exceptions; an unhandled throw between flip and restore silently flips broadcast for the rest of the run.
-- The daily workflow that prefers small typed wrappers over hand-run CLI sessions, with rare <code>wallet-cli</code> escalation only on senior sign-off.
-- One real ticket (QAA-615) walked line by line — three files, 37 lines, the <code>@step</code> copy-paste bug, and the dev-loop-vs-final-shape distinction that separates "code that helped a senior iterate" from "code that ships".
-
-<strong>Next: Part 6</strong> climbs back up the stack to the Swap Live App — the embedded UI that exercises everything you just learned. Same allowance state, same Speculos transport, same broadcast discipline — but now wrapped in a Live App iframe with a postMessage protocol of its own. The work you put into understanding why <code>revokeTokenCommand</code> exists is exactly what makes the Swap Live App's flows make sense: when the iframe asks the host to sign an approve transaction, you'll know which CLI command would emit the same calldata, which Speculos screen would appear, and which env flag would have prevented broadcast in a test. Carry that mental model forward.
+<strong>Part 5 complete.</strong> You own the mobile E2E stack end to end: React Native primitives (<code>View</code>, <code>testID</code>, <code>Platform</code>, <code>Linking</code>), the <code>mise</code>/CocoaPods/<code>adb</code>/<code>ENVFILE</code> toolchain, the Detox matcher-action-expectation DSL, the WebSocket bridge with its ACK protocol, <code>device.reverseTcpPort</code> as the Android glue, the POM hub and <code>@Step</code> decorators, the sharding algorithm with its asymmetric iOS/Android caps, the daily workflow, and one ticket shipped (QAA-702) with a bridge-delivered CSV assertion. <strong>Next: Part 6</strong> steps off the GUI altogether and onto the command line — the <strong>wallet-cli</strong> workspace that powers test-data hooks like the QAA-615 token-approval revoke we'll need before QAA-613's nightly tests can stay deterministic. Same Bun runtime, same DMK transport, same Bunli command shape — but no UI to drive. Then Part 7 picks up the Swap Live App that exercises everything you've just learned.
 </div>

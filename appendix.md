@@ -797,7 +797,7 @@ bundle install
 cd ../../..
 pnpm mobile pod
 ```
-Then retry `pnpm i`. See also Chapter 5.6 and Chapter 3.7.3.
+Then retry `pnpm i`. See also Chapter 6.6 and Chapter 4.7.3.
 
 **Q: `TypeError: Invalid Version: DS_Store` in coin-apps directory**
 A: macOS `.DS_Store` files in the coin-apps folder confuse version parsing. Remove them:

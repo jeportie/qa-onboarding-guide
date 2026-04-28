@@ -1,7 +1,7 @@
 # PART 0 — WELCOME TO LEDGER
 
 <div class="chapter-intro">
-Before you touch a test file, a Playwright config, or a Speculos emulator, you need a mental model of the thing you are testing. Part 0 gives you that model: who Ledger is, what it ships, what makes those products different from every other company selling "a wallet", and how the two chips inside a Ledger device actually collaborate. Everything that follows in Parts 1 through 6 will make sense once this foundation is in place.
+Before you touch a test file, a Playwright config, or a Speculos emulator, you need a mental model of the thing you are testing. Part 0 gives you that model: who Ledger is, what it ships, what makes those products different from every other company selling "a wallet", and how the two chips inside a Ledger device actually collaborate. Everything that follows in Parts 1 through 8 will make sense once this foundation is in place.
 </div>
 
 ---
@@ -85,10 +85,10 @@ A few things worth internalising:
 The hardware is only half the story. The other half is the software that humans actually use, and this is the half QA Automation spends most of its time inside. The canonical taxonomy is **TH/6898319408 — "List of Ledger Product/Services"**.
 
 **Ledger Live Desktop (LLD)**
-The companion desktop application. It is an **Electron** app (Chromium + Node.js in a native wrapper) shipped on Windows, macOS, and Linux. It handles device pairing, app installation, account management, portfolio view, send/receive, swap, buy/sell, staking, NFTs, and the in-app "Discover" catalogue of Live Apps. The QAA Desktop E2E suite (Part 3 of this guide) drives LLD via Playwright's Electron support.
+The companion desktop application. It is an **Electron** app (Chromium + Node.js in a native wrapper) shipped on Windows, macOS, and Linux. It handles device pairing, app installation, account management, portfolio view, send/receive, swap, buy/sell, staking, NFTs, and the in-app "Discover" catalogue of Live Apps. The QAA Desktop E2E suite (Part 4 of this guide) drives LLD via Playwright's Electron support.
 
 **Ledger Live Mobile (LLM)**
-The mobile companion. Built in **React Native**, shipped on iOS and Android. Feature parity with LLD is the north star, but the two apps have separate codebases, separate release trains, and separate QA tracks. Mobile E2E uses Detox (covered in Part 4).
+The mobile companion. Built in **React Native**, shipped on iOS and Android. Feature parity with LLD is the north star, but the two apps have separate codebases, separate release trains, and separate QA tracks. Mobile E2E uses Detox (covered in Part 5).
 
 **Live Apps**
 Third-party and first-party web applications that run **inside a webview** embedded in Ledger Live. They talk to Ledger Live through the **Wallet API** (more on this below). WalletConnect, the Buy/Sell flows (PTX), the Wallet API Tools playground, and many partner apps (DeFi aggregators, exchanges, lending protocols) are all Live Apps. From a QA perspective a Live App is a webview you point at a URL — but with a privileged JSON-RPC bridge to the host.
@@ -106,7 +106,7 @@ The TypeScript libraries inside Ledger Live that know per-blockchain logic: how 
 Native C or Rust binaries that run **on the Secure Element**. Bitcoin App, Ethereum App, Solana App, and so on. These are signed BOLOS applications. The host side (Coin Modules) and the device side (Embedded coin app) are two halves of the same coin integration. Chapter 0.2 covers the embedded side.
 
 **Coin-Tester**
-An automated testing framework specifically for coin integrations inside Ledger Live. Source lives at `github.com/LedgerHQ/ledger-live/tree/develop/libs/coin-tester` (per R2 research, `QA/6637191329`). Coin-Tester is where a new blockchain's integration is validated before being exposed to the full Ledger Live test matrix. Parts 4 and 6 of this guide cover when and why you touch it.
+An automated testing framework specifically for coin integrations inside Ledger Live. Source lives at `github.com/LedgerHQ/ledger-live/tree/develop/libs/coin-tester` (per R2 research, `QA/6637191329`). Coin-Tester is where a new blockchain's integration is validated before being exposed to the full Ledger Live test matrix. Parts 5 and 6 of this guide cover when and why you touch it.
 
 **Alpaca**
 A REST service that exposes the coin modules over HTTP, owned by the Cloud Wallet team. Introduced by ADR-025 (per R2 research, `CF/6949896196`). Not every coin module is on Alpaca yet — the migration is ongoing. When you see a `@ledgerhq/live-network`-shaped API call in a test, it may be going through Alpaca.
@@ -171,7 +171,7 @@ The physical transport stack between a Ledger device and Ledger Live is delibera
 - **NFC** is a newer addition, used during the Sync Onboarding flow on Stax and Flex.
 - **APDUs** (Application Protocol Data Units) are the binary packets that flow over whichever physical layer is in use. Every "sign this transaction" or "give me your public key" call eventually becomes an APDU.
 
-QA does not drive HID directly. Instead, we use **Speculos** — an official Ledger emulator that simulates the SE, the MCU, the screen, and the APDU transport entirely in software. Speculos is how we run device tests in CI (where no physical device exists) and how we script device-side interactions from a test file. Part 2 Chapter 2.3 goes deep on Speculos; for now, park the word and remember it as "the emulator".
+QA does not drive HID directly. Instead, we use **Speculos** — an official Ledger emulator that simulates the SE, the MCU, the screen, and the APDU transport entirely in software. Speculos is how we run device tests in CI (where no physical device exists) and how we script device-side interactions from a test file. Part 3 Chapter 3.3 goes deep on Speculos; for now, park the word and remember it as "the emulator".
 
 A concrete mental model of a single signing flow, end to end:
 
@@ -524,7 +524,7 @@ You do not need to master Speculos right now. Park these three facts:
 2. **Speculos loads a real embedded app binary.** The Bitcoin app binary you use in CI is the same binary (or a build of the same source) as the one a user would install.
 3. **Speculos is not a perfect substitute for a real device.** Timing is different. Some hardware features (NFC field detection, specific BLE pairing quirks, battery-drain edge cases) are not modelled. Always end a feature campaign with at least one pass on real hardware.
 
-Full Speculos coverage lives in **Part 2 Chapter 2.3**. For now, when you see `speculos` in a config file or a Jira ticket, you know what it is.
+Full Speculos coverage lives in **Part 3 Chapter 3.3**. For now, when you see `speculos` in a config file or a Jira ticket, you know what it is.
 
 #### Why Speculos exists at all
 
@@ -623,11 +623,11 @@ If these terms feel natural to you now, the chapter has done its job. If any fee
 #### Where to go next
 
 - **Part 1** — Ledger Live foundations: product, tech stack, E2E architecture, monorepo, and your dev environment.
-- **Part 2 Chapter 2.3** — Speculos deep dive.
-- **Part 3** — Desktop E2E end-to-end: Playwright from zero, Electron, codebase, daily workflow, and two real ticket walkthroughs.
-- **Part 4** — Mobile E2E end-to-end: React Native primer, Detox, mobile codebase, and the QAA-702 walkthrough.
-- **Part 5** — The Swap Live App.
-- **Part 6** — Mastery: test strategy, cross-platform debugging, CI/CD, AI agents.
+- **Part 3 Chapter 3.3** — Speculos deep dive.
+- **Part 4** — Desktop E2E end-to-end: Playwright from zero, Electron, codebase, daily workflow, and two real ticket walkthroughs.
+- **Part 5** — Mobile E2E end-to-end: React Native primer, Detox, mobile codebase, and the QAA-702 walkthrough.
+- **Part 6** — The Swap Live App.
+- **Part 7** — Mastery: test strategy, cross-platform debugging, CI/CD, AI agents.
 
 #### Resources — Chapter 0.2
 
@@ -1333,7 +1333,7 @@ In E2E tests, you control flags in two ways:
 1. **Via the app's Developer UI** (when exploring manually):
    - **LWD**: Settings → Developer tab → "Define feature flags used in Ledger Live" → Show → search (case-sensitive) → toggle. If the Developer tab is hidden: About tab → click the version number 10 times.
    - **LWM**: Settings → About → tap "Powered by Ledger" multiple times → Debug section appears → Debug → Configuration → Feature flags → toggle.
-2. **Programmatically in the test** — via the Playwright/Detox fixture. The test setup injects flag overrides that bypass Remote Config entirely, giving you deterministic behaviour. You will learn the exact fixture API in Part 2 (Chapter 3.7 walks the full pattern).
+2. **Programmatically in the test** — via the Playwright/Detox fixture. The test setup injects flag overrides that bypass Remote Config entirely, giving you deterministic behaviour. You will learn the exact fixture API in Part 3 (Chapter 4.7 walks the full pattern).
 
 #### Worked example — tracking a feature-flag regression
 
@@ -1785,7 +1785,7 @@ Five tools you will touch every day once you are productive: (R5)
 | **Allure dashboards** | `ledger-live.allure.green.ledgerlabs.net` | Per-run, per-branch E2E reports. Step trace, screenshots, Speculos screenshots, videos, network logs, stdout. The one link every LIVE `qaa` bug contains. |
 | **Xray execution tab** | Jira → B2CQA ticket → Xray | Shows every execution of this test. Green/red per run. After your PR merges, check here to confirm the spec ran and the status moved. |
 | **Jira dashboards** | `ledgerhq.atlassian.net/jira/dashboards/10427` | Automation test coverage. Dashboard 10216 = QAA Bugs per-squad. Dashboard 16388 = Vault Canton strategy. |
-| **Speculos** | `ghcr.io/ledgerhq/speculos:latest` | The Docker-based firmware emulator. Local dev and CI both use the same image. See Part 2 for full deep-dive. |
+| **Speculos** | `ghcr.io/ledgerhq/speculos:latest` | The Docker-based firmware emulator. Local dev and CI both use the same image. See Part 3 for full deep-dive. |
 
 You will also hear about Datadog RUM (`app.datadoghq.eu/rum/sessions`) — it is the production observability tool. QAA queries it when a bug ticket mentions "happens in production but not in CI." Not a daily tool, but a useful escape hatch.
 

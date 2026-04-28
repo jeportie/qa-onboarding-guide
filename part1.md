@@ -170,7 +170,7 @@ You now understand what Ledger Live is, what platforms it runs on, and what your
 Ledger Live is built on a modern JavaScript/TypeScript stack with specific choices for each platform. Understanding the tech stack helps you read code, write tests, and debug failures. This chapter maps every technology to its purpose in the project.
 </div>
 
-### 2.1 Language & Runtime
+### 3.1 Language & Runtime
 
 | Technology | Version | Purpose | Docs |
 |-----------|---------|---------|------|
@@ -178,7 +178,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **Node.js** | 20+ (managed via Proto) | Runtime for build tools, CLI, and main process | [nodejs.org](https://nodejs.org/) |
 | **Hermes** | (bundled) | JavaScript engine for React Native on mobile | [hermesengine.dev](https://hermesengine.dev/) |
 
-### 2.2 Frontend Frameworks
+### 3.2 Frontend Frameworks
 
 | Technology | Where Used | Purpose | Docs |
 |-----------|-----------|---------|------|
@@ -186,7 +186,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **React Native** 0.76+ | Mobile (iOS + Android) | Cross-platform native mobile UI | [reactnative.dev](https://reactnative.dev/) |
 | **Electron** 33+ | Desktop (shell) | Cross-platform desktop app framework | [electronjs.org](https://www.electronjs.org/) |
 
-### 2.3 State Management & Routing
+### 3.3 State Management & Routing
 
 | Technology | Where Used | Purpose | Docs |
 |-----------|-----------|---------|------|
@@ -195,7 +195,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **React Router** 6 | Desktop | Page navigation | [reactrouter.com](https://reactrouter.com/) |
 | **React Navigation** 6 | Mobile | Native navigation (stacks, tabs, drawers) | [reactnavigation.org](https://reactnavigation.org/) |
 
-### 2.4 Styling & UI
+### 3.4 Styling & UI
 
 | Technology | Where Used | Purpose | Docs |
 |-----------|-----------|---------|------|
@@ -205,7 +205,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **Tailwind CSS** | Internal tools | Utility-first CSS | [tailwindcss.com](https://tailwindcss.com/) |
 | **i18next** | Desktop + Mobile | Internationalization (18 languages) | [i18next.com](https://www.i18next.com/) |
 
-### 2.5 Build & Package Tools
+### 3.5 Build & Package Tools
 
 | Technology | Purpose | Docs |
 |-----------|---------|------|
@@ -215,7 +215,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **Metro** | JavaScript bundler for React Native (Mobile) | [metrobundler.dev](https://metrobundler.dev/) |
 | **ESLint** + **Oxlint** | Linting (Oxlint in Rust for speed, ESLint for depth) | [eslint.org](https://eslint.org/) / [oxc.rs](https://oxc.rs/) |
 
-### 2.6 Testing Tools
+### 3.6 Testing Tools
 
 | Tool | Layer | Used For | Docs |
 |------|-------|----------|------|
@@ -228,7 +228,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **Xray** | Test Management | Jira-integrated test case management | [getxray.app](https://www.getxray.app/) |
 | **Speculos** | E2E | Hardware wallet emulation | [GitHub](https://github.com/LedgerHQ/speculos) |
 
-### 2.7 DevOps & CI
+### 3.7 DevOps & CI
 
 | Technology | Purpose | Docs |
 |-----------|---------|------|
@@ -239,7 +239,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **Gitleaks** | Secret detection in commits | [gitleaks.io](https://gitleaks.io/) |
 
 <div class="chapter-outro">
-This is a large stack, but you do not need to master everything at once. As a QA engineer, your primary tools are Playwright, Detox, Speculos, Jest, and Allure. Part 5 provides crash courses for every technology listed here.
+This is a large stack, but you do not need to master everything at once. As a QA engineer, your primary tools are Playwright, Detox, Speculos, Jest, and Allure. Part 6 provides crash courses for every technology listed here.
 </div>
 
 <div class="resource-box">
@@ -252,7 +252,7 @@ This is a large stack, but you do not need to master everything at once. As a QA
 </ul>
 </div>
 
-### 2.8 Quiz
+### 3.8 Quiz
 
 <!-- Chapter 2 Quiz -->
 <div class="quiz-container" id="quiz-ch2" data-pass-threshold="80">
@@ -326,11 +326,11 @@ This is a large stack, but you do not need to master everything at once. As a QA
 This is the most important chapter in Part 1. Understanding the full end-to-end test architecture — every component, how data flows, and where failures can occur — is the foundation for everything you will build. Study the diagram carefully; you will reference it constantly.
 </div>
 
-### 3.1 The Full Architecture Diagram
+### 4.1 The Full Architecture Diagram
 
 ![E2E Test Stack Architecture](images/e2e_stack.png)
 
-### 3.2 Component Breakdown
+### 4.2 Component Breakdown
 
 **1. User/CI Trigger**
 Tests are triggered either locally by a developer or via GitHub Actions (on PR, on schedule, or manually via `workflow_dispatch`). The CI workflows handle building the app, pulling Docker images, and orchestrating test execution across sharded runners.
@@ -362,7 +362,7 @@ The actual blockchain networks (Bitcoin, Ethereum, Solana, etc.) that Speculos-b
 **10. Reporting**
 Test results flow to **Allure** (rich HTML reports with steps, screenshots, videos), **Xray** (Jira test management with TMS links like B2CQA-1234), and **Slack** (the `#live-repo-health` channel receives automated nightly results).
 
-### 3.3 Data Flow Lifecycle
+### 4.3 Data Flow Lifecycle
 
 Here is what happens when an E2E test runs a "Send Bitcoin" scenario:
 
@@ -395,7 +395,7 @@ This architecture is what makes Ledger Live E2E testing unique. Every test invol
 </ul>
 </div>
 
-### 3.4 Quiz
+### 4.4 Quiz
 
 <!-- Chapter 3 Quiz -->
 <div class="quiz-container" id="quiz-ch3" data-pass-threshold="80">
@@ -469,7 +469,7 @@ This architecture is what makes Ledger Live E2E testing unique. Every test invol
 The Ledger Live monorepo is one of the largest JavaScript monorepos you will encounter. Understanding its directory structure and team ownership model is essential for navigating the codebase, knowing where to make changes, and understanding code review workflows.
 </div>
 
-### 4.1 Top-Level Directory Structure
+### 5.1 Top-Level Directory Structure
 
 ```
 ledger-live/
@@ -505,7 +505,7 @@ ledger-live/
 └── CODEOWNERS                   # Team ownership mapping
 ```
 
-### 4.2 The E2E Directory (Your Home)
+### 5.2 The E2E Directory (Your Home)
 
 ```
 e2e/
@@ -538,7 +538,7 @@ e2e/
     └── utils/                       # Shared utilities
 ```
 
-### 4.3 CODEOWNERS and Team Ownership
+### 5.3 CODEOWNERS and Team Ownership
 
 The `CODEOWNERS` file maps directories to GitHub teams. When you open a PR, the owners of modified files are automatically added as reviewers:
 
@@ -551,7 +551,7 @@ The `CODEOWNERS` file maps directories to GitHub teams. When you open a PR, the 
 | `libs/coin-modules/` | `@ledgerhq/coin-integration` | Coin-specific logic |
 | `libs/device-core/` | `@ledgerhq/device-management-kit` | Device communication |
 
-### 4.4 Team-Split Convention
+### 5.4 Team-Split Convention
 
 When multiple teams contribute to the same directory, it is split into team-specific sub-folders:
 
@@ -579,7 +579,7 @@ Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e
 </ul>
 </div>
 
-### 4.5 Quiz
+### 5.5 Quiz
 
 <!-- Chapter 4 Quiz -->
 <div class="quiz-container" id="quiz-ch4" data-pass-threshold="80">
@@ -653,7 +653,7 @@ Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e
 This chapter walks you through setting up your machine to build Ledger Live and run E2E tests. Follow each step carefully — environment issues are the #1 source of "it doesn't work" questions for new joiners. There is no quiz for this chapter; the test is whether your setup works.
 </div>
 
-### 5.1 Prerequisites
+### 6.1 Prerequisites
 
 | Tool | Purpose | How to Install |
 |------|---------|---------------|
@@ -664,7 +664,7 @@ This chapter walks you through setting up your machine to build Ledger Live and 
 | **Android Studio** (for mobile) | Android emulator + SDK | [developer.android.com](https://developer.android.com/studio) |
 | **Ruby 3.3** (for mobile iOS) | CocoaPods dependency | `brew install ruby@3.3` |
 
-### 5.2 Clone and Install
+### 6.2 Clone and Install
 
 ```bash
 # 1. Clone the monorepo
@@ -683,7 +683,7 @@ git clone https://github.com/LedgerHQ/coin-apps.git
 cd ledger-live
 ```
 
-### 5.3 Environment Variables
+### 6.3 Environment Variables
 
 Set these in your shell profile (`~/.zshrc` or `~/.bash_profile`):
 
@@ -702,7 +702,7 @@ export SPECULOS_FIRMWARE_VERSION="1.1.1"                # Firmware version (use 
 - `SPECULOS_DEVICE` options: `nanoS`, `nanoSP`, `nanoX`, `stax`, `flex`, `nanoGen5`
 - Adjust `COINAPPS` path to where you cloned coin-apps
 
-### 5.4 Pull Speculos Docker Image
+### 6.4 Pull Speculos Docker Image
 
 ```bash
 docker pull ghcr.io/ledgerhq/speculos:master
@@ -713,7 +713,7 @@ Verify it is available:
 docker images | grep speculos
 ```
 
-### 5.5 Build for Desktop E2E Testing
+### 6.5 Build for Desktop E2E Testing
 
 ```bash
 # Build shared dependencies
@@ -729,15 +729,15 @@ pnpm desktop build:testing
 pnpm e2e:desktop test:playwright:setup
 ```
 
-### 5.6 Build for Mobile E2E Testing
+### 6.6 Build for Mobile E2E Testing
 
 Mobile E2E setup is significantly more involved than desktop (Xcode, Android Studio, Ruby/CocoaPods, AVDs, simulators, ENVFILE variants, Detox configs). To keep this chapter focused on the baseline dev environment, the full mobile toolchain walkthrough lives in its own place.
 
 **Baseline mac requirement:** you need an Apple Silicon Mac with at least 32 GB RAM and 100 GB free disk for a comfortable iOS + Android setup. Older Intel Macs will struggle with the iOS simulator + Metro + Speculos combination.
 
-> **See Part 4 Ch 4.4 "Mobile Toolchain & Env Setup"** for the complete walkthrough: Xcode + Android Studio install, Ruby 3.3 + bundler, CocoaPods, AVD creation, iOS simulator naming, ENVFILE variants (`.env.mock`, `.env.mock.prerelease`, release variants), and the CocoaPods lockfile troubleshooting recipe.
+> **See Part 5 Ch 5.4 "Mobile Toolchain & Env Setup"** for the complete walkthrough: Xcode + Android Studio install, Ruby 3.3 + bundler, CocoaPods, AVD creation, iOS simulator naming, ENVFILE variants (`.env.mock`, `.env.mock.prerelease`, release variants), and the CocoaPods lockfile troubleshooting recipe.
 
-### 5.7 Run Your First Test
+### 6.7 Run Your First Test
 
 **Desktop:**
 ```bash
@@ -762,7 +762,7 @@ cd e2e/mobile && pnpm test:android:debug
 # or: pnpm --filter e2e-mobile run test:android:debug
 ```
 
-### 5.8 Verify Your Setup
+### 6.8 Verify Your Setup
 
 If everything is working, you should see:
 - Speculos container starts (check with `docker ps | grep speculos`)
