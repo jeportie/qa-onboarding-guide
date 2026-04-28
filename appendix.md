@@ -158,7 +158,7 @@ nx run live-mobile:e2e:build -- --configuration android.emu.release
 
 ```bash
 pnpm commit                               # Interactive conventional commit helper
-pnpm changeset                            # Add a changeset for versioning
+pnpm changelog                            # Add a changeset for versioning
 ```
 
 ### Docker (Speculos)
@@ -266,7 +266,6 @@ pnpm dev:lld -- --inspect
 | Variable | Description |
 |---|---|
 | `GITHUB_TOKEN` | GitHub API token for authenticated Docker pulls from `ghcr.io` and CI operations |
-| `ALLURE_SERVER_URL` | URL of the Allure reporting server for uploading results |
 | `XRAY_CLIENT_ID` / `XRAY_CLIENT_SECRET` | Credentials for Jira/Xray test result import |
 
 ### Development
@@ -275,7 +274,6 @@ pnpm dev:lld -- --inspect
 |---|---|
 | `DEBUG` | Enable debug logging. Formats: `speculos:*`, `live-common:*`, `hw-transport:*` |
 | `VERBOSE` | Enable verbose output in CLI commands |
-| `PLAYWRIGHT_TRACE` | Set to `on` to capture Playwright traces for debugging |
 
 ---
 
@@ -405,7 +403,7 @@ i18next is an **internationalization framework** for JavaScript, created by **Ja
 
 **Core concepts**: Translation keys, namespaces, interpolation (`{{name}}`), plurals, `useTranslation` hook, language detection, fallback languages.
 
-**In Ledger Live**: All user-facing strings are translated. Translation files live in `apps/ledger-live-desktop/src/renderer/i18n/` and `apps/ledger-live-mobile/src/locales/`. The `t()` function is used everywhere.
+**In Ledger Live**: All user-facing strings are translated. Translation files live in `apps/ledger-live-desktop/static/i18n/` and `apps/ledger-live-mobile/src/locales/`. The `t()` function is used everywhere.
 
 <div class="resource-box">
 <h4>Resources</h4>
@@ -668,12 +666,12 @@ ESLint is a **JavaScript/TypeScript linter** created by **Nicholas Zakas**. Oxli
 | **XRP** | `@ledgerhq/coin-xrp` | XRP | Yes |
 | **Tron** | `@ledgerhq/coin-tron` | Tron (TRX) | Yes |
 | **NEAR** | `@ledgerhq/coin-near` | NEAR Protocol | Yes |
-| **MultiversX** | `@ledgerhq/coin-elrond` | MultiversX (EGLD) | Yes |
+| **MultiversX** | `@ledgerhq/coin-multiversx` | MultiversX (EGLD) | Yes |
 | **Aptos** | `@ledgerhq/coin-aptos` | Aptos (APT) | Partial |
 | **Sui** | `@ledgerhq/coin-sui` | Sui | Partial |
 | **Hedera** | `@ledgerhq/coin-hedera` | Hedera (HBAR) | Partial |
 | **Vechain** | `@ledgerhq/coin-vechain` | Vechain (VET) | Partial |
-| **Internet Computer** | `@ledgerhq/coin-internet-computer` | ICP | Partial |
+| **Internet Computer** | `@ledgerhq/coin-internet_computer` | ICP | Partial |
 | **Kaspa** | `@ledgerhq/coin-kaspa` | Kaspa | Partial |
 | **Celo** | `@ledgerhq/coin-celo` | Celo | Partial |
 | **Filecoin** | `@ledgerhq/coin-filecoin` | Filecoin (FIL) | Partial |
@@ -1220,7 +1218,7 @@ git log -1 --format=%B | pnpm exec commitlint
 
 **Changesets.** Every behavior-changing PR on a published package ships a `.changeset/*.md` file:
 ```bash
-pnpm changeset                          # interactive: pick packages + bump level
+pnpm changelog                          # interactive: pick packages + bump level
 ```
 Commit the generated file alongside your code. CI will fail without it when required.
 
@@ -1263,7 +1261,7 @@ gh run rerun <run-id>                   # re-run a failed workflow
 7. **Uncommitted work blocking a pull.** `git stash` → `git pull --rebase` → `git stash pop`.
 8. **"Detached HEAD" after `git checkout <sha>`.** Use `git switch -c new-branch` to save your position as a real branch before making changes.
 9. **Missing Jira ticket in the PR title.** Ledger Live PR titles typically follow `[LWDM|LWM|...] type(scope): description` — check your team's convention.
-10. **Changeset file missing.** CI fails on PRs that modify published packages without a `.changeset/*.md`. Run `pnpm changeset` before opening the PR.
+10. **Changeset file missing.** CI fails on PRs that modify published packages without a `.changeset/*.md`. Run `pnpm changelog` before opening the PR.
 
 ---
 
@@ -1283,7 +1281,7 @@ gh run rerun <run-id>                   # re-run a failed workflow
 | **Changesets** | Ledger Live's release-versioning tooling (`@changesets/cli`). Every behavior-changing PR ships a `.changeset/*.md` file. NOT semantic-release. |
 | **CI/CD** | Continuous Integration / Continuous Deployment. Automated pipeline that builds, tests, and deploys code on every change. Ledger Live uses GitHub Actions. |
 | **CLI** | Command-Line Interface. Ledger Live's CLI tool (`apps/cli/`) is used in E2E tests to populate test data (accounts, transactions). |
-| **CODEOWNERS** | `.github/CODEOWNERS` file mapping path patterns to GitHub teams that auto-review PRs touching those paths. |
+| **CODEOWNERS** | `CODEOWNERS` file mapping path patterns to GitHub teams that auto-review PRs touching those paths. |
 | **Coin App** | A compiled firmware application (`.elf` binary) that runs on a Ledger device to support a specific cryptocurrency (e.g., the Ethereum app, Bitcoin app). |
 | **Coin Family** | A group of related blockchains sharing the same transaction model and coin module. E.g., the EVM family includes Ethereum, Polygon, BSC, Arbitrum, etc. |
 | **Content-Addressable Store** | pnpm's storage mechanism where every package version is stored exactly once, identified by its content hash. Saves disk space in monorepos. |
@@ -1314,7 +1312,7 @@ gh run rerun <run-id>                   # re-run a failed workflow
 | **MCU** | Microcontroller Unit. The non-secure chip handling screen, USB, buttons. STM32WB35/55 on most current devices. Distinct from the SE. |
 | **Mise** | A development tool version manager (alternative to nvm, asdf). Used in Ledger Live to manage Node.js, pnpm, and other tool versions consistently. |
 | **Mnemonic Seed** | A set of words (usually 24) that encodes a master cryptographic key per BIP39. The same seed always generates the same accounts, enabling deterministic test data. |
-| **Monorepo** | A single Git repository containing multiple related projects and packages. Ledger Live is a monorepo with 2 apps, 40+ libraries, 2 E2E suites, and CI tools. |
+| **Monorepo** | A single Git repository containing multiple related projects and packages. Ledger Live is a monorepo with 5 apps (cli, ledger-live-desktop, ledger-live-mobile, wallet-cli, web-tools), 40+ libraries, 2 E2E suites, and CI tools. |
 | **MSW** | Mock Service Worker. A library for intercepting and mocking HTTP requests in tests. Used in Jest integration tests to mock API calls without a real server. |
 | **Mutation (Bot)** | A single operation the Ledger Live Bot attempts on an account (e.g., send max, send sub-max, delegate, swap). Each mutation has preconditions, a transaction builder, and assertion checks. |
 | **MVVM** | Model-View-ViewModel. An architecture pattern used in newer Ledger Live code. Components are split into Container (wiring), ViewModel (logic), and View (pure UI). |

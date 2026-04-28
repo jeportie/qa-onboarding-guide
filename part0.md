@@ -68,11 +68,11 @@ The canonical reference is the Confluence page **FW/5737481596 — "Ledger OS - 
 | Ledger Nano S Plus  | USB-C, 2 buttons              | ST33K1M5C (EAL6+)       | STM32F042              | OLED 128x64 monochrome              | Current (classic)   |
 | Ledger Stax         | Touch, curved flexible E-Ink  | ST33K1M5C (EAL6+)       | STM32WB35              | E-Ink 400x672, 16 greys, curved     | Current (touch)     |
 | Ledger Flex         | Touch, flat E-Ink             | ST33K1M5 (EAL6+)        | STM32WB35              | E-Ink 600x480, 2.84 in, 271 ppi     | Current (touch)     |
-| Ledger Nano Gen5    | Classic form factor, next-gen | ST33K1M5C               | STM32WB35              | (not yet documented publicly)       | Upcoming (per R2)   |
+| Ledger Nano Gen5    | Touch, flat display (apex) | ST33K1M5C               | STM32WB35              | (not yet documented publicly)       | Upcoming (per R2)   |
 
 A few things worth internalising:
 
-- **"Classic" line vs "Touch" line.** The classic line (Nano S, Nano X, Nano S Plus, Nano Gen5) uses physical buttons and a small monochrome OLED. The touch line (Stax, Flex, and the historical Blue) uses E-Ink and a capacitive touch panel. Many test flows branch on this distinction — a touch device uses the **Sync Onboarding** flow, a classic device uses a button-driven onboarding.
+- **"Classic" line vs "Touch" line.** The classic line (Nano S, Nano X, Nano S Plus) uses physical buttons and a small monochrome OLED. The touch line (Stax, Flex, Nano Gen5 [apex], and the historical Blue) uses E-Ink and a capacitive touch panel. Many test flows branch on this distinction — a touch device uses the **Sync Onboarding** flow, a classic device uses a button-driven onboarding.
 - **"Europa" is the internal codename for Ledger Flex.** You will see `europa` sprinkled through repo names, Speculos model flags, and CI job matrices. It is not a separate product. (per R2 research, confirmed in `FW/4553539605 — NFC Stax Europa`.)
 - **Nano S is legacy.** It is not supported in Ledger Multisig (see VG-25622) and is explicitly excluded from Ledger Recover. If a test spec says "runs on Nano S" without a very good reason, push back.
 - **Stax is curved and stackable.** Flex is flat and does not stack. Both support USB-C, BLE 5.2 and NFC. Stax additionally supports Qi wireless charging. (per R2 research, `LEU/4566614017`.)
@@ -353,7 +353,7 @@ Worth noting:
 - The **STM32WB family** is a dual-core Cortex-M (Cortex-M4 + Cortex-M0+) with a built-in BLE 5.2 radio. This is why Nano X, Stax, and Flex can do Bluetooth — the MCU silicon has a radio on die.
 - On **Flex**, roughly 1.15 MB of the SE's 1.5 MB flash is usable for apps, language packs, and pictures (the "Custom Lock Screen" feature on touch devices stores user images on-SE). (per R2 research, `LEU/4566614017`.)
 
-> **Note:** The **BGIv2** personalisation machine described in `HTS/6233456749` is designed to personalise the SE at the factory for Stax, Flex, and **Nano Gen5**. This is external corroboration that Nano Gen5 is the next classic-form device in manufacturing (as of 2026-04). Treat it as a target in your test matrix planning, but do not yet ship tests against it unless your tech lead tells you the device is ready.
+> **Note:** The **BGIv2** personalisation machine described in `HTS/6233456749` is designed to personalise the SE at the factory for Stax, Flex, and **Nano Gen5**. This is external corroboration that Nano Gen5 is the next touch-line device in manufacturing (as of 2026-04). Treat it as a target in your test matrix planning, but do not yet ship tests against it unless your tech lead tells you the device is ready.
 
 ### 0.2.3 BOLOS — What the OS Actually Does
 
@@ -546,8 +546,8 @@ The consumer-side QAA test matrix, as of 2026-04, covers:
 
 | Family   | Devices                                   | Notes                                                |
 |----------|-------------------------------------------|------------------------------------------------------|
-| Classic  | Nano S (legacy), Nano X, Nano S Plus, Nano Gen5 (planned) | Button navigation; OLED; smallest screen real estate |
-| Touch    | Stax, Flex (Europa)                       | Sync Onboarding; E-Ink; larger flows                 |
+| Classic  | Nano S (legacy), Nano X, Nano S Plus                      | Button navigation; OLED; smallest screen real estate |
+| Touch    | Stax, Flex (Europa), Nano Gen5 (apex, planned)            | Sync Onboarding; E-Ink; larger flows                 |
 | Legacy   | Blue, Nano S                              | Regression only; limited feature support             |
 
 When you read a test file, the device model usually appears either:
@@ -571,7 +571,7 @@ For reference — this lookup table saves time when you are reading somebody els
 | Nano S Plus          | `--model nanosp`          | `nanoSP` / `nanoS+`    |
 | Stax                 | `--model stax`            | `stax`                 |
 | Flex                 | `--model europa`          | `europa` / `flex`      |
-| Nano Gen5 (planned)  | (TBD, not yet in CI)      | `nanoGen5`             |
+| Nano Gen5 (planned)  | `--model apex`      | `apex`             |
 
 Note that **Flex appears as `europa`** in Speculos. This is the most common naming trip-up for new QAA engineers — a test that passes under `--model europa` but fails under `--model flex` is almost always passing because `flex` silently falls back to a default model, not because Flex is genuinely broken. Always use the canonical flag.
 

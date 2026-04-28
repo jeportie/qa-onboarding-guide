@@ -264,7 +264,7 @@ npx playwright codegen http://localhost:3000
 
 **Verbose logging:**
 ```bash
-detox test --loglevel trace -c android.debug
+detox test --loglevel trace -c android.emu.debug
 adb logcat | grep "ReactNative"
 ```
 
@@ -386,7 +386,7 @@ on:                                                # triggers
         type: choice
         options: [nanoS, nanoSP, nanoX, stax, flex, nanoGen5]
   schedule:
-    - cron: "0 3 * * 1-5"                          # Mon–Fri 03:00 UTC
+    - cron: "0 4 * * 1-5"                          # Mon–Fri 04:00 UTC
   workflow_call:                                   # callable from other workflows
 
 concurrency:
@@ -444,7 +444,7 @@ Most of CI you will meet is either a **wrapper** (lightweight YAML that fires on
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `test-mobile-e2e-reusable.yml` | `workflow_dispatch`, `schedule` (Mon–Fri 03:00 UTC), `workflow_call` | The reusable core for mobile E2E. Runs Detox against Speculos on iOS simulators and Android emulators, with true sharding (1–12 shards per platform) and greedy bin-packing. |
+| `test-mobile-e2e-reusable.yml` | `workflow_dispatch`, `schedule` (Mon–Fri 04:00 UTC), `workflow_call` | The reusable core for mobile E2E. Runs Detox against Speculos on iOS simulators and Android emulators, with true sharding (1–12 shards per platform) and greedy bin-packing. |
 | `test-mobile-e2e-lint-reusable.yml` | `workflow_call` from PR | Lints Detox test TypeScript. |
 | `notify-e2e-required-reusable.yml` | `workflow_call` on PR | Analyses diff paths and posts a PR comment listing which E2E pipelines are required for this PR. |
 
@@ -454,59 +454,20 @@ Most of CI you will meet is either a **wrapper** (lightweight YAML that fires on
 |----------|---------|--------------|
 | `bot-nonreg-nitrogen.yml` | Daily | Non-regression with SEED7 on `develop`. |
 | `bot-nonreg-oxygen.yml` | Weekly | Costly non-regression with SEED5 on `develop`. |
-| `bot-nonreg-carbone.yml` | Weekdays | Non-regression on `main` with staging explorers. |
 
 **Release workflows.** `release-*.yml` chains into both `test-ui-e2e-only-desktop.yml` and `test-mobile-e2e-reusable.yml` via `workflow_call` with `production_firebase: true` (see 6.3.9).
 
 **Mental model.** Every E2E run in the repo — whether started by a PR, a cron, a release gate, or `gh workflow run` — ultimately calls exactly one of the two reusable cores. The wrappers only differ in which inputs they pass.
 
-### 8.3.3 The `@Gate` Job
+### 8.3.3 Required Status Checks and the `notify-e2e-required` Workflow
 
-**What it is.** `@Gate` is a naming convention for the aggregator job that branch-protection rules treat as the single required check. It exists because a PR has dozens of independent jobs; requiring every one of them in the GitHub UI is unwieldy and fragile (the check list drifts as workflows are added and removed). Instead, branch protection pins **one** name — `@Gate` — and that job waits on everything else and emits a single pass/fail.
+CI gate logic in this repo is handled by the `notify-e2e-required-reusable.yml` workflow. Rather than relying on a single aggregator job named `@Gate`, the repo uses branch-protection rules on `develop` and `main` that list specific required checks, and the `notify-e2e-required` workflow analyses which E2E pipelines must pass for a given PR's diff.
 
-The convention in this repo is encoded at the end of a reusable workflow:
+The key design principle is the same: not every CI job is required for every PR. The `notify-e2e-required` reusable workflow is invoked from `build-and-test-pr.yml` and posts a PR comment listing which E2E pipelines are required based on which paths were touched. This keeps branch-protection stable without hard-coding shard indices.
 
-```yaml
-jobs:
-  # … all the real jobs: build, lint, unit, e2e, allure-report, …
+**`if: always()` on aggregator jobs.** Any job that acts as a merge gate should specify `if: always()`, so it runs even when dependencies fail or are cancelled. Without this, the job is skipped, GitHub treats the status as "pending forever", and the PR becomes unmergeable without a manual override. This pattern appears throughout the repo's reusable workflows.
 
-  "@Gate":
-    name: "@Gate"
-    needs:
-      - detox-tests-ios
-      - detox-tests-android
-      - allure-report-ios
-      - allure-report-android
-      - lint-e2e
-    if: always()                    # run even if deps failed or were cancelled
-    runs-on: ubuntu-latest
-    steps:
-      - name: Aggregate required statuses
-        shell: bash
-        run: |
-          # fail fast if any REQUIRED dep failed
-          if [[ "${{ needs.detox-tests-ios.result }}"     != "success"
-             || "${{ needs.detox-tests-android.result }}" != "success"
-             || "${{ needs.lint-e2e.result }}"            != "success" ]]; then
-            echo "::error::A required job failed."
-            exit 1
-          fi
-          # non-required jobs (e.g. allure-report) can be skipped/failed and
-          # still not block the merge — they only affect Slack reporting.
-          echo "All required jobs passed."
-```
-
-**Rules of engagement:**
-
-- If `@Gate` is green, the PR can merge.
-- If a non-required dependency fails but `@Gate` stays green, the merge is allowed and the failure is logged to Slack for QA triage.
-- Only `@Gate`'s result flows into the branch-protection contract. `required_status_checks` on `develop` / `main` names `@Gate` and nothing else.
-
-**Why aggregate rather than require each job?** Two reasons. First, workflow lists churn; hardcoding "detox-tests-ios shard 1 through 12" in branch protection breaks the moment the shard count changes — and with matrix-based sharding the **job name** of each shard includes the shard index, so every time the shard count shifts you would have to re-edit branch-protection. Second, not every job is strictly required — you might want the `upload-to-xray` step to run but not block on it, since Xray outages are common and unrelated to code quality. `@Gate` encodes that required-vs-advisory distinction in code instead of in the GitHub UI.
-
-**A subtler consequence — `if: always()`.** Without `if: always()`, `@Gate` would itself be skipped when any dependency fails or is cancelled. A skipped `@Gate` neither passes nor fails the branch-protection check, which GitHub treats as "pending forever" — and the PR becomes unmergeable without manual override. `if: always()` ensures `@Gate` always runs and always emits a definitive verdict. The aggregation logic then decides: did the required set pass? Green. Did anything required fail? Red. Did only advisory jobs fail? Still green, with a Slack note.
-
-**Reading the branch-protection in practice.** Go to the repo's Settings → Branches → `develop` rule → "Require status checks to pass before merging". You will see exactly one name: `@Gate`. Adding more job names there is explicitly discouraged — they turn into drift as soon as the workflow graph is reshaped.
+**Reading required checks in practice.** Go to the repo's Settings → Branches → `develop` rule → "Require status checks to pass before merging" to see which specific checks are required. The list is kept deliberately short to minimise drift as the workflow graph evolves.
 
 ### 8.3.4 Composite Actions
 
@@ -1427,43 +1388,24 @@ Cursor is an AI-powered IDE (fork of VS Code) that integrates AI assistance dire
 ```
 .cursor/
 ├── agents/                      # 5 specialized AI agents
-│   ├── ci-watcher.mdc          # Monitors CI pipelines
-│   ├── code-architect.mdc      # Designs feature architectures
-│   ├── code-explorer.mdc       # Explores and understands codebase
-│   ├── code-reviewer.mdc       # Reviews code changes
-│   └── test-runner.mdc         # Runs and debugs tests
+│   ├── ci-watcher.md           # Monitors CI pipelines
+│   ├── code-architect.md       # Designs feature architectures
+│   ├── code-explorer.md        # Explores and understands codebase
+│   ├── code-reviewer.md        # Reviews code changes
+│   └── test-runner.md          # Runs and debugs tests
 │
-├── commands/                    # 7 automation commands
-│   ├── cleanup.mdc             # Code cleanup
-│   ├── create-pr.mdc           # PR creation workflow
-│   ├── e2e-desktop-onboard.mdc # 6-phase desktop E2E onboarding
-│   ├── e2e-mobile-onboard.mdc  # Mobile E2E onboarding
-│   ├── feature-dev.mdc         # 7-phase feature development
-│   ├── pre-review.mdc          # 4 parallel review checks
-│   └── test-coverage.mdc       # Coverage analysis
-│
-├── rules/                       # 25 context-specific rules
-│   ├── client-ids.md
-│   ├── coin-families-contract.md
-│   ├── cursor-rules.md
-│   ├── dialogs-slice.md
-│   ├── git-workflow.md
-│   ├── jest-mocks.md
-│   ├── react-mvvm.md
-│   ├── testing.md
-│   ├── typescript.md
-│   ├── zod-schemas.md
-│   └── ... (15 more)
-│
-└── skills/                      # 8 reusable skills
-    ├── create-changeset.mdc    # Changeset creation
-    ├── e2e-swap.mdc            # Swap E2E testing
-    ├── e2e.mdc                 # Adding new coins to E2E (8 steps)
-    ├── fix-ci.mdc              # CI failure diagnosis
-    ├── get-pr-comments.mdc     # PR comment retrieval
-    ├── run-tests.mdc           # Test execution
-    ├── slack-pr-message.mdc    # PR notification to Slack
-    └── testing.mdc             # General testing skill
+├── rules/                       # 14 context-specific rules
+│   ├── coin-families-contract.mdc
+│   ├── common-commands.mdc
+│   ├── cursor-rules.mdc
+│   ├── domain-packages.mdc
+│   ├── git-workflow.mdc
+│   ├── jest-mocks.mdc
+│   ├── react-general.mdc
+│   ├── react-mvvm.mdc
+│   ├── testing.mdc
+│   ├── typescript.mdc
+│   └── ... (4 more)
 ```
 
 ### 8.4.5 Cursor Agents for QA
@@ -1537,7 +1479,7 @@ The most relevant Cursor agents for QA work:
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> AI tools are configured with project-specific rules that enforce Ledger Live's standards. They are powerful accelerators for repetitive QA tasks (writing similar tests, debugging failures, adding coin support). Use them — but always verify the output. The <code>.claude/rules/</code> and <code>.cursor/rules/</code> directories are the source of truth for how the AI should behave.
+<strong>Key takeaway:</strong> AI tools are configured with project-specific rules that enforce Ledger Live's standards. They are powerful accelerators for repetitive QA tasks (writing similar tests, debugging failures, adding coin support). Use them — but always verify the output. The <code>~/.claude/rules/</code> and <code>.cursor/rules/</code> directories are the source of truth for how the AI should behave.
 </div>
 
 ### 8.4.9 Quiz
@@ -1550,7 +1492,7 @@ The most relevant Cursor agents for QA work:
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q1.</strong> What is the purpose of <code>.claude/rules/</code> and <code>.cursor/rules/</code> files?</p>
+<p><strong>Q1.</strong> What is the purpose of <code>~/.claude/rules/</code> and <code>.cursor/rules/</code> files?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) They are documentation files for new developers</button>
 <button class="quiz-choice" data-value="B">B) They are configuration rules that shape how AI agents behave and enforce project-specific coding standards</button>

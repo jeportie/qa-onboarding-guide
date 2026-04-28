@@ -89,7 +89,7 @@ The three layers to remember:
 
 <photo of: Discover screen showing the Swap tile>
 
-The Discover screen is rendered by the **Wallet shell itself** — the tiles are read from the manifest service. When you see the Swap tile here, it means `ledger-live` has resolved the `swap-live-app-aws` manifest, validated it against `@ledgerhq/wallet-api-manifest-validator`, and decided this build/jurisdiction/feature-flag combination should expose Swap. Hiding the tile is *not* a Live App concern — it is a Wallet-side decision driven by Firebase `ledger-live-production` flags (see Ch 7.3.3) and the manifest's `platforms` field. If a tester reports "I don't see Swap on my build", the bug is almost always in the manifest or in the Wallet's flag layer, not in the Live App.
+The Discover screen is rendered by the **Wallet shell itself** — the tiles are read from the manifest service. When you see the Swap tile here, it means `ledger-live` has resolved the `swap-live-app-aws` manifest, validated it against `@ledgerhq/live-common (platform/types.ts)`, and decided this build/jurisdiction/feature-flag combination should expose Swap. Hiding the tile is *not* a Live App concern — it is a Wallet-side decision driven by Firebase `ledger-live-production` flags (see Ch 7.3.3) and the manifest's `platforms` field. If a tester reports "I don't see Swap on my build", the bug is almost always in the manifest or in the Wallet's flag layer, not in the Live App.
 
 <photo of: Swap Live App opening — splash / loader>
 
@@ -109,7 +109,7 @@ Manifests live inside `ledger-live`. They declare how each Live App is exposed i
 
 The manifest service is consumed by both desktop and mobile. For each Live App there is typically one manifest per environment.
 
-**Manifest schema (from the Wallet API spec).** Every manifest validated by `@ledgerhq/wallet-api-manifest-validator` carries this shape:
+**Manifest schema (from the Wallet API spec).** Every manifest validated by `@ledgerhq/live-common (platform/types.ts)` carries this shape:
 
 | Field | Type | Purpose |
 |---|---|---|
@@ -117,7 +117,7 @@ The manifest service is consumed by both desktop and mobile. For each Live App t
 | `name` | `string` | Display name shown in the Wallet (e.g., `"Swap"`) |
 | `url` | `string` | The URL the Wallet loads in the webview |
 | `homepageUrl` | `string` | Canonical homepage for the app |
-| `platform` / `platforms` | `"desktop" \| "mobile" \| "all"` or array | Which Wallet shells load this app |
+| `platform` / `platforms` | `"ios" \| "android" \| "desktop"` or array | Which Wallet shells load this app |
 | `apiVersion` | `string` | Wallet-API semver range the app expects (e.g., `^2.0.0`) |
 | `manifestVersion` | `string` | Manifest schema version |
 | `branch` | `"stable" \| "experimental" \| "soon" \| "debug"` | Stability channel exposed to users |
@@ -195,7 +195,7 @@ Wallet API is split across a **Client** (bundled inside the Live App) and a **Se
 | Method | Purpose |
 |---|---|
 | `transaction.sign` | User signs a transaction on the device — returns the raw signed tx |
-| `transaction.broadcast` | Broadcasts a previously signed transaction — returns the tx hash |
+| `transaction.signAndBroadcast` | Broadcasts a previously signed transaction — returns the tx hash |
 | `message.sign` | User signs an EIP-191 / EIP-712 message on the device |
 | `account.list` | List accounts the user has in the Wallet |
 | `account.request` | Prompt the user to pick (or create) an account for the Live App |
@@ -220,10 +220,10 @@ A minimal request / response pair, verbatim to the spec:
 
 | Code | Title | When QA sees it |
 |---|---|---|
-| `100` | `AccountNotFound` | The Live App passed an `accountId` the Wallet cannot match — usually a stale fixture or a currency the Wallet has not added |
-| `101` | `AccountNotMain` | A sub-account was used where a main account was expected — common mistake when a test targets a token account by mistake |
-| `102` | `AccountAndTransactionNotLinked` | The transaction object is for a different currency family than the account — the single most frequent "I swear I typed the right thing" error in fixture-driven tests |
-| `103` | `TransactionNotProvided` | The transaction object is missing or malformed — often after a build that dropped a required field |
+| `ACCOUNT_NOT_FOUND` | `AccountNotFound` | The Live App passed an `accountId` the Wallet cannot match — usually a stale fixture or a currency the Wallet has not added |
+| `CURRENCY_NOT_FOUND` | `AccountNotMain` | A sub-account was used where a main account was expected — common mistake when a test targets a token account by mistake |
+| `PERMISSION_DENIED` | `AccountAndTransactionNotLinked` | The transaction object is for a different currency family than the account — the single most frequent "I swear I typed the right thing" error in fixture-driven tests |
+| `NOT_IMPLEMENTED_BY_WALLET` | `TransactionNotProvided` | The transaction object is missing or malformed — often after a build that dropped a required field |
 
 **Two things to internalize as a QA:**
 
@@ -622,21 +622,14 @@ async ensureTokenApproval(
   provider: Provider,
   minAmount: string,
 ): Promise<void> {
-  // 1. Check the current on-chain allowance via the swap backend / RPC
-  const current = await this.readAllowance(fromAccount, provider);
+  // 1. Check whether the current on-chain allowance is sufficient
+  const sufficient = await isTokenAllowanceSufficientCommand(fromAccount, provider.contractAddress, minAmount);
 
-  // 2. If allowance >= minAmount, the approval step is already covered — skip
-  if (BigNumber(current).gte(minAmount)) return;
+  // 2. If allowance is sufficient, skip
+  if (sufficient) return;
 
   // 3. Otherwise, pre-seed the allowance using the CLI hook
-  await approveTokenCommand({
-    account: fromAccount,
-    spender: provider.spenderAddress,
-    amount: minAmount,
-  });
-
-  // 4. Wait for the allowance to be visible on-chain (poll the token contract)
-  await this.waitForAllowance(fromAccount, provider, minAmount);
+  await approveTokenCommand(fromAccount, provider.contractAddress, minAmount);
 }
 ```
 
@@ -653,7 +646,7 @@ The approval step is the single most common source of "this swap test only flake
 | Symptom | Most-likely cause | First check |
 |---|---|---|
 | Test hangs at "select provider" with no error | Provider list rendered but `selectExchangeWithoutKyc` cannot find a non-KYC match | Inspect the rendered provider list; the env may have all DEX providers disabled in `swap-configuration` or in the `swap-live-app` Firebase |
-| `INSUFFICIENT_ALLOWANCE` revert post-broadcast | `ensureTokenApproval` called but the broadcast either failed silently or the test moved on before the chain confirmed | Add a `waitForAllowance` poll with a timeout; check the test network's block time |
+| `INSUFFICIENT_ALLOWANCE` revert post-broadcast | `ensureTokenApproval` called but the broadcast either failed silently or the test moved on before the chain confirmed | Add a `isTokenAllowanceSufficientCommand` poll with a timeout; check the test network's block time |
 | Approval step rendered when QA expected it to be skipped | A previous run revoked, or the spender address changed (provider router redeployed) | Re-read the spender address from the provider metadata; do not hardcode |
 | Approval step **not** rendered when QA expected it | Allowance from a prior run still on-chain (broadcast was on); test never entered the gating path | Confirm the env's broadcast mode; if on, make sure 6.2.12's revocation runs before the test |
 | Device shows raw calldata instead of "Approve USDC for Uniswap" | The token / contract is missing from the device's clear-signing plugin | This is a device-app concern, not a swap concern; file against the relevant coin app |
@@ -755,11 +748,7 @@ async revokeTokenApproval(
   fromAccount: TokenAccount,
   provider: Provider,
 ): Promise<void> {
-  await revokeTokenCommand({
-    account: fromAccount,
-    spender: provider.spenderAddress,
-  });
-  await this.waitForAllowance(fromAccount, provider, "0");
+  await revokeTokenCommand(fromAccount, provider.contractAddress);
 }
 ```
 
@@ -801,39 +790,37 @@ The senior QAA's commit added these symbols (sketched here; Part 6 Ch 6.8 walks 
 ```typescript
 // libs/ledger-live-common/src/e2e/cliCommandsUtils.ts (added in QAA-615)
 
-export const approveTokenCommand = ({
-  account,
-  spender,
-  amount,
-}: {
-  account: TokenAccount;
-  spender: string;
-  amount: string;
-}): CliCommand => ({
-  command: "tx",
-  args: [
-    "--accountId", account.id,
-    "--recipient", account.token.contractAddress,
-    "--data", buildApproveCalldata(spender, amount),
-    "--amount", "0",
-  ],
-});
+export const approveTokenCommand = async (
+  account: TokenAccount,
+  spender: string,
+  approveAmount: string,
+) => {
+  const original = setDisableTransactionBroadcastEnv("0");
+  const result = runCliTokenApproval({
+    currency: account.currency.speculosApp.name,
+    index: account.index,
+    spender,
+    token: account.currency.id,
+    mode: "approveToken",
+    approveAmount,
+    waitConfirmation: true,
+  });
+  // restore env after run
+  return result;
+};
 
-export const revokeTokenCommand = ({
-  account,
-  spender,
-}: {
-  account: TokenAccount;
-  spender: string;
-}): CliCommand => ({
-  command: "tx",
-  args: [
-    "--accountId", account.id,
-    "--recipient", account.token.contractAddress,
-    "--data", buildApproveCalldata(spender, "0"),
-    "--amount", "0",
-  ],
-});
+export const revokeTokenCommand = async (account: TokenAccount, spender: string) => {
+  const original = setDisableTransactionBroadcastEnv("0");
+  const result = runCliTokenApproval({
+    currency: account.currency.speculosApp.name,
+    index: account.index,
+    spender,
+    token: account.currency.id,
+    mode: "revokeApproval",
+    waitConfirmation: true,
+  });
+  return result;
+};
 ```
 
 The two commands are **almost identical** — only the third argument to `buildApproveCalldata` differs. This is by design: it makes the two operations symmetric in the codebase, easy to review, and trivially testable side by side. A maintenance bug fixed in one is automatically a candidate fix for the other.
@@ -846,31 +833,22 @@ async ensureTokenApproval(
   provider: Provider,
   minAmount: string,
 ): Promise<void> {
-  const current = await this.readAllowance(fromAccount, provider);
-  if (BigNumber(current).gte(minAmount)) return;
-  await this.cli.run(approveTokenCommand({
-    account: fromAccount,
-    spender: provider.spenderAddress,
-    amount: minAmount,
-  }));
-  await this.waitForAllowance(fromAccount, provider, minAmount);
+  const sufficient = await isTokenAllowanceSufficientCommand(fromAccount, provider.contractAddress, minAmount);
+  if (sufficient) return;
+  await approveTokenCommand(fromAccount, provider.contractAddress, minAmount);
 }
 
 async revokeTokenApproval(
   fromAccount: TokenAccount,
   provider: Provider,
 ): Promise<void> {
-  await this.cli.run(revokeTokenCommand({
-    account: fromAccount,
-    spender: provider.spenderAddress,
-  }));
-  await this.waitForAllowance(fromAccount, provider, "0");
+  await revokeTokenCommand(fromAccount, provider.contractAddress);
 }
 ```
 
 Notice the symmetry of the POM wrappers: read state → execute command → wait for the chain to reflect the new state. The "wait for the chain" step is the unsexy but indispensable bit — without it, the next assertion would race the block confirmation and flake on slow test networks.
 
-> **Note:** `waitForAllowance` is itself a small piece of infrastructure worth understanding. It polls the token contract's `allowance(owner, spender)` view function on a fixed interval (commonly 500ms-1s) until it sees the expected value, with a deadline (commonly 30s on testnets, longer on slower chains). When tests "flake on the approval step" without an obvious cause, the deadline is the first knob to inspect.
+> **Note:** `isTokenAllowanceSufficientCommand` is itself a small piece of infrastructure worth understanding. It polls the token contract's `allowance(owner, spender)` view function on a fixed interval (commonly 500ms-1s) until it sees the expected value, with a deadline (commonly 30s on testnets, longer on slower chains). When tests "flake on the approval step" without an obvious cause, the deadline is the first knob to inspect.
 
 #### Common pitfalls
 
@@ -882,7 +860,7 @@ Notice the symmetry of the POM wrappers: read state → execute command → wait
 
 4. **The "first run after a long pause" trap.** When a test environment has been idle for weeks, allowances from old runs may have been auto-cleared by the provider (some routers periodically rotate spender contracts). The test sees no allowance, runs `ensureTokenApproval`, and the approval ends up against a stale spender — the swap then fails. **Mitigation:** treat the spender address as a runtime input, fetch it fresh on every test run.
 
-5. **Using `revokeTokenApproval` in nightly broadcast-off runs.** It is a no-op for state but still makes a CLI round-trip and a `waitForAllowance` poll that *will time out* (because the chain never changes). This adds a 30-second tax to every test for no benefit. **Mitigation:** gate the call on `process.env.DISABLE_TRANSACTION_BROADCAST !== "1"`.
+5. **Using `revokeTokenApproval` in nightly broadcast-off runs.** It is a no-op for state but still makes a CLI round-trip and a `isTokenAllowanceSufficientCommand` poll that *will time out* (because the chain never changes). This adds a 30-second tax to every test for no benefit. **Mitigation:** gate the call on `process.env.DISABLE_TRANSACTION_BROADCAST !== "1"`.
 
 #### Quick reference — full primitive surface
 
@@ -894,8 +872,8 @@ For QA writing a new swap test that involves an ERC-20 source, the full surface 
 | `revokeTokenCommand` | `cliCommandsUtils.ts` | Build the CLI invocation that signs+broadcasts a `approve(spender, 0)` |
 | `ensureTokenApproval` | `swap.page.ts` | Idempotent: check current allowance, seed if needed, wait for chain |
 | `revokeTokenApproval` | `swap.page.ts` | Force-clear the allowance, wait for chain to reflect zero |
-| `readAllowance` (helper) | `swap.page.ts` | Pure read — query `allowance(owner, spender)` view function |
-| `waitForAllowance` (helper) | `swap.page.ts` | Poll allowance until it matches expected value or timeout |
+| `isTokenAllowanceSufficientCommand` (helper) | `swap.page.ts` | Pure read — query `allowance(owner, spender)` view function |
+| `isTokenAllowanceSufficientCommand` (helper) | `swap.page.ts` | Poll allowance until it matches expected value or timeout |
 | `buildApproveCalldata` (helper) | `coin-evm` | Produce the 68-byte calldata payload for either approve or revoke |
 
 Anything beyond this surface is provider-specific or out of scope — the Live App's own approval UI is rendered by the Live App, not the QAA framework, and the test's job is to drive *around* that UI deterministically, not to recreate it.
@@ -1067,7 +1045,7 @@ Swap-related feature flags live in three places at once. When tracing a flag, ch
 
 | Source | Examples |
 |---|---|
-| **Firebase `ledger-live-production`** | `ptxSwap`, `ptxEarn`, manifest overrides, Swap entry-point toggles |
+| **Firebase `ledger-live-production`** | `ptxSwapLiveApp`, `ptxEarn`, manifest overrides, Swap entry-point toggles |
 | **Firebase `swap-live-app`** | Provider enablement (e.g., `changelly_enabled`), UI experiments, best-rate algorithm toggles |
 | **`swap-configuration` repo** | Pair enablement, min/max amounts, per-provider pair whitelist |
 

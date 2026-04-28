@@ -2,7 +2,7 @@
 
 Part 6 covers the CLI surface QAA owns: `apps/cli`, the typed wrappers around it, the Speculos device-tap layer that drives signing, and the broadcast discipline that keeps regression tests deterministic. Ten chapters; this fragment contains the first two — the framing chapter (6.1) and the blockchain primer (6.2). Read them in order; everything after assumes the vocabulary established here.
 
-The reference branch for everything in Part 6 is `support/qaa_add_revoke_token` at commit `4fa4868a35`, authored by Abdurrahman SASTIM. Three small files, thirty-seven lines added — the canonical example of "do one thing well" in QAA tooling. By the end of the part you should be able to read those three files at a glance and know exactly which layer each line touches.
+The reference branch for everything in Part 6 is `support/qaa-615-add-revoke-token` at commit `4fa4868a35`, authored by Abdurrahman SASTIM. Three small files, thirty-seven lines added — the canonical example of "do one thing well" in QAA tooling. By the end of the part you should be able to read those three files at a glance and know exactly which layer each line touches.
 
 ## CLI in QA — apps/cli is the canonical CLI
 
@@ -41,7 +41,7 @@ The monorepo contains two CLI applications. **Only `apps/cli` is the QAA canonic
 
 `apps/wallet-cli` is a future-facing rewrite using Bun and the new Device Management Kit. It is not part of the QAA workflow today. Earlier drafts of this onboarding guide taught wallet-cli; that material was wrong. If you read it elsewhere, ignore it. Everything in Part 6 from here on refers to `apps/cli`.
 
-> **Verify:** if a future PR adds wallet-cli wrappers in `cliCommandsUtils.ts`, the canonical-CLI claim must be revisited. As of `support/qaa_add_revoke_token` @ `4fa4868a35`, every wrapper invokes `apps/cli/bin/index.js`.
+> **Verify:** if a future PR adds wallet-cli wrappers in `cliCommandsUtils.ts`, the canonical-CLI claim must be revisited. As of `support/qaa-615-add-revoke-token` @ `4fa4868a35`, every wrapper invokes `apps/cli/bin/index.js`.
 
 The reason this section exists at all: earlier drafts of Part 6 of the onboarding guide taught wallet-cli as the canonical CLI, complete with Bun setup instructions, Bunli command authoring patterns, and DMK descriptor walkthroughs. That material was wrong — not "out of date", but actively misleading because no QAA test path uses any of it. If you onboard a teammate and they cite "I read in the guide that we use wallet-cli", that's a copy of the obsolete draft. Send them this chapter instead.
 
@@ -271,7 +271,7 @@ try {
 
 Without the snapshot you leak the port; without the restore you break the swap test that runs next.
 
-A sixth thing worth flagging early: **there is no transactional rollback**. If a CLI revoke broadcasts and then the test fails for an unrelated reason, the on-chain state is already mutated. The revoke is permanent. Tests that broadcast must be designed assuming every successful broadcast lands and every failed broadcast leaves state in an undefined intermediate place — typically "broadcast succeeded but the harness crashed before it noticed". This is why broadcast-enabled tests almost always run on testnets with cheap, recoverable state, and why `DISABLE_TRANSACTION_BROADCAST=1` is the default in most CI paths.
+A sixth thing worth flagging early: **there is no transactional rollback**. If a CLI revoke broadcasts and then the test fails for an unrelated reason, the on-chain state is already mutated. The revoke is permanent. Tests that broadcast must be designed assuming every successful broadcast lands and every failed broadcast leaves state in an undefined intermediate place — typically "broadcast succeeded but the harness crashed before it noticed". This is why broadcast-enabled tests require careful state management and why `DISABLE_TRANSACTION_BROADCAST=1` is the default in most CI paths.
 
 **Output parsing assumes a stable format.** Already mentioned in passing, but it's worth its own bullet because it is the source of the most surprising regressions. The wrappers in `cliCommandsUtils.ts` parse stdout — sometimes greping for a substring, sometimes parsing JSON. If a CLI command starts emitting an extra log line (debug print, deprecation warning, even a leading newline) the parser can break. The fix is always in the parser, not the CLI: the canonical output format is whatever the CLI emits, and the parsers accommodate it. But "test fails because the CLI now logs an extra warning" is a real failure mode. When triaging a sudden mass test failure, run the failing CLI command by hand and eyeball the stdout against what the parser expects.
 
@@ -324,7 +324,7 @@ You now have the full call stack in your head: spec → POM method → wrapper �
 <h4>Resources</h4>
 <ul>
 <li><code>apps/cli/README.md</code> — the binary's own quickstart</li>
-<li>Branch <code>support/qaa_add_revoke_token</code> @ commit <code>4fa4868a35</code> — the senior's reference implementation of <code>revokeTokenCommand</code> + <code>revokeTokenApproval</code></li>
+<li>Branch <code>support/qaa-615-add-revoke-token</code> @ commit <code>4fa4868a35</code> — the senior's reference implementation of <code>revokeTokenCommand</code> + <code>revokeTokenApproval</code></li>
 <li><code>libs/ledger-live-common/src/e2e/runCli.ts</code> — the spawn engine (~80 lines, read it once end-to-end)</li>
 <li><code>libs/ledger-live-common/src/e2e/cliCommandsUtils.ts</code> — the typed wrappers (~250 lines)</li>
 <li><code>libs/ledger-live-common/src/e2e/families/evm.ts</code> — Speculos device-tap helpers</li>
@@ -594,7 +594,7 @@ All three are the same problem in different costumes. The cure is the same: revo
 
 **The seed matters.** QAA's test seed is shared infrastructure. Multiple developers, multiple CI runs, multiple debugging sessions touch the same address space on the same testnets. The chain doesn't care that "this allowance came from Alice's local debugging at 3pm and should be irrelevant to Bob's nightly at 2am" — they're the same `(owner, spender, token)` triple as far as the storage slot is concerned. Hygiene around the test seed is a team-level discipline, not just a per-test concern. Chapter 6.3 covers the manual cleanup tools because human-driven hygiene is a real part of the workflow, not just an emergency fallback.
 
-A useful comparison: think of the test seed like a shared development database. You wouldn't expect tests to run reliably on a database that other people are mutating concurrently and that doesn't get cleaned between runs. The seed-on-chain situation is structurally identical, except (a) you can't `TRUNCATE TABLE allowances` to reset, you have to issue revoke transactions one by one, and (b) the cleanup costs gas. Hence the importance of making the cleanup automatic via the CLI hook, and of running broadcast-enabled tests on testnets where gas is free and transaction throughput is high.
+A useful comparison: think of the test seed like a shared development database. You wouldn't expect tests to run reliably on a database that other people are mutating concurrently and that doesn't get cleaned between runs. The seed-on-chain situation is structurally identical, except (a) you can't `TRUNCATE TABLE allowances` to reset, you have to issue revoke transactions one by one, and (b) the cleanup costs gas. Hence the importance of making the cleanup automatic via the CLI hook, and of managing broadcast-enabled tests against Ethereum mainnet with real funds.
 
 **The opposite of "broadcast" is not "do nothing" — it's "sign and discard".** The CLI still runs through the full sign flow when broadcast is disabled: it prompts the device, walks the screens, builds an APDU, gets a signature back, and then does *not* push the signed bytes to chain. This is the right behaviour for tests that want to assert "the device shows the right approval screen" without touching state — the signing exercise is real, but the on-chain consequence is absent. The wrappers around `approveTokenCommand` and `revokeTokenCommand` flip this exact behaviour: they need broadcast on, because the *point* of the call is the on-chain mutation, not the screen flow assertion.
 
@@ -643,7 +643,7 @@ There is one place QAA might legitimately want to test infinite approval: a regr
 
 > **Verify:** the exact threshold above which Ledger firmware considers an amount "effectively infinite" and shows a warning screen. Older firmware checks for the literal `2^256 − 1`; newer firmware may use a heuristic threshold (e.g. amount > 10^28). If a test needs to assert "the warning appears", confirm with current firmware behaviour first.
 
-**A subtle gas point.** A revoke transaction costs gas. On Ethereum mainnet that's anywhere from a few cents (when the network is quiet) to several dollars (when it's congested). On testnets it's effectively free. QAA tests run on testnets specifically so the cost-per-revoke doesn't matter. If a future test ever needs to run against mainnet (e.g. a real-money smoke test), the cumulative cost of revoke hooks across many test runs becomes a budget item — at which point the team would weigh "broadcast disabled" coverage against "fully on-chain" coverage and make an explicit choice. For day-to-day work, "always revoke after every test that approved" is the right default.
+**A subtle gas point.** A revoke transaction costs gas. On Ethereum mainnet that's anywhere from a few cents (when the network is quiet) to several dollars (when it's congested). On testnets it's effectively free. QAA tests run on Ethereum mainnet with real funds. The cumulative cost of revoke hooks across many test runs is a real budget item — the team weighs "broadcast disabled" coverage against "fully on-chain" coverage explicitly. For day-to-day work, "always revoke after every test that approved" is the right default.
 
 ### 6.2.9 Clear-sign behaviour on the Ledger device
 
@@ -690,7 +690,7 @@ Putting the pieces together:
 4. The Ledger device clear-signs both approve and revoke through the same screen flow (6.2.9).
 5. Therefore: a CLI hook that issues `send --mode revokeApproval` between test iterations cleanly resets state, and the existing Speculos device-tap helper (`approveToken()` in `families/evm.ts`) drives the device side without modification.
 
-That is exactly what the senior's QAA-615 commit on `support/qaa_add_revoke_token` adds: `revokeTokenCommand` in `cliCommandsUtils.ts` (the typed wrapper), `revokeTokenApproval` on `swap.page.ts` (the POM method), and the swap spec switching from `ensureTokenApproval` to `revokeTokenApproval` for the dev loop. Chapters 6.3 through 6.8 unpack each layer.
+That is exactly what the senior's QAA-615 commit on `support/qaa-615-add-revoke-token` adds: `revokeTokenCommand` in `cliCommandsUtils.ts` (the typed wrapper), `revokeTokenApproval` on `swap.page.ts` (the POM method), and the swap spec switching from `ensureTokenApproval` to `revokeTokenApproval` for the dev loop. Chapters 6.3 through 6.8 unpack each layer.
 
 The manual alternative — revoke.cash, Etherscan's Write tab — is what humans use when the harness isn't available. Same on-chain effect, different UX, same primitive: `approve(spender, 0)`.
 
@@ -812,7 +812,7 @@ Four scenarios force the question.
 
 **1. Local Speculos broke mid-test.** You ran a swap spec by hand on a feature branch. Speculos crashed halfway through the device dance. The CLI never reached the broadcast step, but the previous test already left a non-zero allowance on-chain. Now your local seed is dirty, the Speculos container is in a bad state, and re-running the harness keeps failing on setup. You need a way to clean the on-chain state without restarting the entire e2e suite.
 
-**2. You need to audit a real seed.** Someone hands you a Sepolia address and asks "what's this seed approving?" You don't want to write a one-off script. You want a UI that lists every active allowance in two seconds.
+**2. You need to audit a real seed.** Someone hands you an Ethereum mainnet address and asks "what's this seed approving?" You don't want to write a one-off script. You want a UI that lists every active allowance in two seconds.
 
 **3. CI revoke failed, and you want to see on-chain truth.** A nightly run failed. Allure shows the revoke step threw an error. You don't trust the test logs — they could be wrong about which spender was approved or how much. You go to the block explorer and read the allowance directly from the contract.
 
@@ -822,7 +822,7 @@ In each case, the manual tool is the ground-truth oracle. The CLI is part of the
 
 ### 6.3.2 revoke.cash
 
-`revoke.cash` is the canonical manual revoke tool. Open-source, run by Rosco Kalis, hosted at `https://revoke.cash`. Source on GitHub at `RevokeCash/revoke.cash`. Multi-chain: Ethereum, Polygon, Arbitrum, Optimism, BSC, Avalanche, plus most testnets including Sepolia and Holesky.
+`revoke.cash` is the canonical manual revoke tool. Open-source, run by Rosco Kalis, hosted at `https://revoke.cash`. Source on GitHub at `RevokeCash/revoke.cash`. Multi-chain: Ethereum, Polygon, Arbitrum, Optimism, BSC, Avalanche, plus most networks including Holesky.
 
 #### Connect modes
 
@@ -850,7 +850,7 @@ Gas only. revoke.cash takes no fee, no commission, no premium. Each revoke is on
 
 #### What the UI looks like
 
-Picture a tabular list. Each row carries a token logo, the token symbol, the spender address (often pretty-printed: "Uniswap V3 Router"), the current allowance, the chain badge, the date of the last interaction, and a red "Revoke" button on the right edge. A search bar at the top filters by token name or spender address. A chain selector at the top right switches between Ethereum, Sepolia, Polygon, etc. — the address stays connected; only the chain changes.
+Picture a tabular list. Each row carries a token logo, the token symbol, the spender address (often pretty-printed: "Uniswap V3 Router"), the current allowance, the chain badge, the date of the last interaction, and a red "Revoke" button on the right edge. A search bar at the top filters by token name or spender address. A chain selector at the top right switches between Ethereum mainnet, Polygon, etc. — the address stays connected; only the chain changes.
 
 If you arrive with a paste-only connection, the "Revoke" buttons are greyed out and a banner at the top says "connect a wallet to revoke." All other inspection capabilities work.
 
@@ -868,8 +868,8 @@ This is the cheapest possible audit. No wallet connect, no transaction, no gas, 
 
 The same UI works on every Etherscan-family explorer:
 
-- `sepolia.etherscan.io` — Sepolia testnet
-- `holesky.etherscan.io` — Holesky testnet
+- `etherscan.io` — Ethereum mainnet
+- `holesky.etherscan.io` — Holesky (reference only)
 - `polygonscan.com` — Polygon
 - `arbiscan.io` — Arbitrum
 - `optimistic.etherscan.io` — Optimism
@@ -911,7 +911,7 @@ Two adjacent tools come up in QAA conversation; neither replaces revoke.cash for
 
 For block explorers across other chains, the pattern is identical to Etherscan:
 
-- Sepolia → `sepolia.etherscan.io`
+- Ethereum mainnet → `etherscan.io`
 - Polygon → `polygonscan.com`
 - Arbitrum → `arbiscan.io`
 - Optimism → `optimistic.etherscan.io`
@@ -922,7 +922,7 @@ Same Read Contract / Write Contract tabs, same `allowance(owner, spender)` and `
 
 ### 6.3.6 A Worked Debug Walk-Through
 
-Concrete picture. Nightly run on the QAA seed `0xBEEF...0001` (Sepolia). Allure shows the swap test failed at the post-condition assertion `expect(allowance).toBe(0)`. The CLI revoke step in the logs reads "exit code 0" — i.e. the subprocess succeeded.
+Concrete picture. Nightly run on the QAA seed `0xBEEF...0001` (Ethereum mainnet). Allure shows the swap test failed at the post-condition assertion `expect(allowance).toBe(0)`. The CLI revoke step in the logs reads "exit code 0" — i.e. the subprocess succeeded.
 
 Three possible explanations:
 
@@ -932,7 +932,7 @@ Three possible explanations:
 
 You diagnose with two manual tabs.
 
-**Tab 1: revoke.cash, paste-only.** Drop `0xBEEF...0001`, switch to Sepolia. If the row for the failing token/spender pair shows up with a non-zero allowance, the on-chain state is genuinely dirty — eliminate explanation 1. If the row does not show up (or shows zero), the on-chain state is clean and your test's assertion logic is the bug — that's explanation 1, look in the spec, not in the CLI.
+**Tab 1: revoke.cash, paste-only.** Drop `0xBEEF...0001`, switch to Ethereum mainnet. If the row for the failing token/spender pair shows up with a non-zero allowance, the on-chain state is genuinely dirty — eliminate explanation 1. If the row does not show up (or shows zero), the on-chain state is clean and your test's assertion logic is the bug — that's explanation 1, look in the spec, not in the CLI.
 
 **Tab 2: Etherscan Read.** Same address pair, query `allowance(0xBEEF...0001, <spenderAddress>)` on the token contract. Cross-check what revoke.cash showed. If they agree on non-zero, you're in explanation 2 or 3.
 
@@ -955,12 +955,12 @@ A short list of the operational moments when you stop typing CLI commands and op
 
 ### 6.3.8 Hygiene Rules
 
-The QAA test seed is shared infrastructure. Multiple engineers across desktop and mobile use the same testnet seeds for swap, send, earn, and delegate specs. Treat it like a shared dev database: clean up after yourself, never assume someone else did.
+The QAA test seed is shared infrastructure. Multiple engineers across desktop and mobile use the same mainnet seeds for swap, send, earn, and delegate specs. Treat it like a shared dev database: clean up after yourself, never assume someone else did.
 
 A short discipline:
 
 - **Never connect someone else's wallet.** If a colleague hands you a seed-phrase, do not import it into your MetaMask just to revoke. Use the paste-only audit mode of revoke.cash, identify what needs to be cleaned, and ask them to clean it themselves with their wallet. The principle: only your wallet talks to your wallet.
-- **Prefer testnets.** All QA work should target Sepolia, Holesky, or another testnet. If a test is touching mainnet, that's a flag — talk to the senior. Mainnet allowances cost real gas to revoke.
+- **Use Ethereum mainnet.** QA swap regression runs on real Ethereum mainnet with the team's shared seed. Mainnet allowances cost real gas to revoke — the team budgets for this. If you are unsure whether a test should broadcast, ask your senior.
 - **Clean up after manual sessions.** If you ran a flow by hand, end the session by checking revoke.cash and reverting any non-zero allowances you created. Don't leave the seed dirty for the next engineer.
 - **Verify before announcing.** Don't tell the team "the test seed is clean" until you've checked it on a block explorer or revoke.cash. Test logs lie when assertions are weak; on-chain state is the ground truth.
 - **Document non-obvious approvals.** If a test deliberately creates and leaves an approval (rare, but it happens — for example a regression test for "what does the UI do when an approval already exists"), add a comment in the spec and a note in the team doc so the next person doesn't try to clean it.
@@ -1033,10 +1033,10 @@ For QAA, the lesson is concrete: when you see an unlimited approval in test logs
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) Clean up non-zero allowances after manual testing sessions</button>
 <button class="quiz-choice" data-value="B">B) Verify on-chain (revoke.cash or Etherscan Read) before announcing the seed is clean</button>
-<button class="quiz-choice" data-value="C">C) Prefer testnets for all QA work</button>
+<button class="quiz-choice" data-value="C">C) Use `DISABLE_TRANSACTION_BROADCAST=1` during development to avoid unintended on-chain state changes</button>
 <button class="quiz-choice" data-value="D">D) Import a colleague's seed phrase into your wallet so you can revoke on their behalf</button>
 </div>
-<p class="quiz-explanation">Never import someone else's seed phrase. The principle is: only your wallet talks to your wallet. If a colleague's seed needs cleaning, ask them to do it. The other three are correct hygiene practices.</p>
+<p class="quiz-explanation">Never import someone else's seed phrase. The principle is: only your wallet talks to your wallet. If a colleague's seed needs cleaning, ask them to do it. Options A, B, and C are all correct hygiene practices: clean up after manual sessions, verify on-chain state, and use broadcast-disabled mode during development.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
@@ -1058,7 +1058,7 @@ For QAA, the lesson is concrete: when you see an unlimited approval in test logs
 ## The Five-Layer Integration
 
 <div class="chapter-intro">
-The CLI does not stand alone. When a Playwright spec calls <code>app.swap.revokeTokenApproval(account, provider)</code>, the line of code you wrote in a page object reaches across <strong>five distinct layers</strong> before a Speculos-emulated Ledger device finally signs an ERC-20 <code>approve(spender, 0)</code> transaction and broadcasts it to a public testnet. Each layer absorbs a different concern: subprocess plumbing, typed wrappers, device-tap automation, Speculos lifecycle, test orchestration. Most QA work — by far — lives in the topmost layer (the page object methods you write per ticket). The four layers below it are infrastructure that already exists and rarely changes. This chapter catalogues those layers, shows the real code from the senior engineer's <code>support/qaa_add_revoke_token</code> branch, and traces the complete end-to-end call path. Keep this open when you land on a CLI integration ticket: it will tell you which layer to touch and which to leave alone.
+The CLI does not stand alone. When a Playwright spec calls <code>app.swap.revokeTokenApproval(account, provider)</code>, the line of code you wrote in a page object reaches across <strong>five distinct layers</strong> before a Speculos-emulated Ledger device finally signs an ERC-20 <code>approve(spender, 0)</code> transaction and broadcasts it to Ethereum mainnet. Each layer absorbs a different concern: subprocess plumbing, typed wrappers, device-tap automation, Speculos lifecycle, test orchestration. Most QA work — by far — lives in the topmost layer (the page object methods you write per ticket). The four layers below it are infrastructure that already exists and rarely changes. This chapter catalogues those layers, shows the real code from the senior engineer's <code>support/qaa-615-add-revoke-token</code> branch, and traces the complete end-to-end call path. Keep this open when you land on a CLI integration ticket: it will tell you which layer to touch and which to leave alone.
 </div>
 
 ### 6.4.1 Why Five Layers
@@ -1941,7 +1941,7 @@ The one place to be careful: when a Layer 3 helper takes a curried form (`liveDa
 </div>
 
 <div class="chapter-outro">
-You now have a layer-by-layer map of how a single line in a desktop spec — <code>await app.swap.revokeTokenApproval(account, provider)</code> — descends through five distinct files, spawns a Node subprocess, drives a Speculos REST API in parallel with that subprocess, and reaches an on-chain broadcast on a public testnet. The next chapter zooms in on one of the supporting cast members of this trace: the Speculos lifecycle. <code>launchSpeculos</code> and <code>cleanSpeculos</code> appeared at the top and bottom of every Layer 5 method in this chapter; Chapter 6.5 takes them apart, shows what <code>startSpeculos</code> does inside (Docker container or remote pool), explains the <code>SPECULOS_API_PORT</code> snapshot-and-restore pattern in full, and gives you the playbook for debugging Speculos boot failures.
+You now have a layer-by-layer map of how a single line in a desktop spec — <code>await app.swap.revokeTokenApproval(account, provider)</code> — descends through five distinct files, spawns a Node subprocess, drives a Speculos REST API in parallel with that subprocess, and reaches an on-chain broadcast on Ethereum mainnet. The next chapter zooms in on one of the supporting cast members of this trace: the Speculos lifecycle. <code>launchSpeculos</code> and <code>cleanSpeculos</code> appeared at the top and bottom of every Layer 5 method in this chapter; Chapter 6.5 takes them apart, shows what <code>startSpeculos</code> does inside (Docker container or remote pool), explains the <code>SPECULOS_API_PORT</code> snapshot-and-restore pattern in full, and gives you the playbook for debugging Speculos boot failures.
 </div>
 
 ## Speculos Lifecycle in CLI Tests
@@ -2583,7 +2583,7 @@ Broadcast off does **not** mean signing off. Speculos still receives the unsigne
 - **Broadcast disabled:** the `signed` event is the terminal state of the pipeline. The CLI prints it (in `default` or `json` format) and exits. The signed bytes are visible in CLI stdout but go nowhere. They are dropped on the floor. No `bridge.broadcast`, no node submission, no on-chain effect.
 - **Broadcast enabled:** the `signed` event triggers the `concatMap` operator. `bridge.broadcast({ account, signedOperation: e.signedOperation })` ships the bytes to a node (the configured RPC endpoint for that currency). The node returns a transaction hash (or an error). The optimistic operation is updated with the hash; the CLI prints `✔️ broadcasted! optimistic operation: ...` and exits.
 
-This is why a `--mode revokeApproval` call with broadcast disabled is **useful for nothing in production tests** — the revoke needs to land on chain or it has not happened. It is, however, useful for debugging. Run the same revoke command with `DISABLE_TRANSACTION_BROADCAST=1` and you can verify that signing works, the device-tap automation walks the right screens, the data field is the right calldata, and so on, all without spending a single cent of testnet ETH. Once that local validation passes, set the variable to `"0"` and let the broadcast happen for real.
+This is why a `--mode revokeApproval` call with broadcast disabled is **useful for nothing in production tests** — the revoke needs to land on chain or it has not happened. It is, however, useful for debugging. Run the same revoke command with `DISABLE_TRANSACTION_BROADCAST=1` and you can verify that signing works, the device-tap automation walks the right screens, the data field is the right calldata, and so on, all without spending a single cent of real ETH. Once that local validation passes, set the variable to `"0"` and let the broadcast happen on Ethereum mainnet.
 
 The decoupling also means Speculos and the broadcast gate are orthogonal concerns. Speculos always emulates a hardware device; the broadcast gate decides what happens to the device's output. Tests that need to assert on device-screen content (for clear-signing audits, e.g.) run with broadcast off so they are cheap; tests that need to verify on-chain state changes run with broadcast on. The choice is per-test and per-helper, not global.
 
@@ -2663,7 +2663,7 @@ This is your immediate signal. The optimistic operation is the local representat
 
 **Layer 3 — the next test's allowance read.** The most important layer in practice. After a revoke, the next test that calls `getEvmTokenAllowance` (via `tokenAllowance` CLI or via `isTokenAllowanceSufficientCommand`) should see the allowance you just set. If revoke set it to zero, the next call returns zero; if approve set it to N, the next call returns N. This is the **after-the-fact verification** pattern and it is the only one that proves chain state. Layers 1 and 2 prove the broadcast call returned; only layer 3 proves the chain saw it.
 
-**Layer 4 — out-of-band tools.** For one-off audits (Chapter 6.3), open `revoke.cash` or Etherscan's read-contract tab on the testnet you broadcast to, plug in the seed's address, and read the allowance directly. This bypasses the test harness entirely and is useful when something feels wrong and you want to know what the chain actually says.
+**Layer 4 — out-of-band tools.** For one-off audits (Chapter 6.3), open `revoke.cash` or Etherscan's read-contract tab for Ethereum mainnet, plug in the seed's address, and read the allowance directly. This bypasses the test harness entirely and is useful when something feels wrong and you want to know what the chain actually says.
 
 The four layers form a verification ladder. In automated tests, layers 1 and 3 are the everyday signals — layer 1 fails fast if the broadcast did not return, layer 3 confirms the state actually changed. Layer 2 catches confirmation timeouts. Layer 4 is the manual escape hatch.
 
@@ -2938,7 +2938,7 @@ For CLI invocations specifically, the spawn engine (`runCli.ts`) prints `[CLI] E
 If a single test takes more than two minutes per iteration, something is wrong. Common culprits:
 
 - **Speculos won't start.** Docker daemon is down, or a previous Speculos container is wedged on the port. `docker ps` and `docker rm -f $(docker ps -aq --filter ancestor=ghcr.io/ledgerhq/speculos)` clears it.
-- **Live-common changes not picked up.** If you edited `cliCommandsUtils.ts`, the desktop test imports the compiled output. `pnpm common:build` (or `pnpm -w build:libs` depending on which scripts your branch has) recompiles.
+- **Live-common changes not picked up.** If you edited `cliCommandsUtils.ts`, the desktop test imports the compiled output. `pnpm build:libs` recompiles.
 - **You are accidentally running the full suite.** `--grep` requires a string; if you forget the value Playwright runs everything. Always quote the B2CQA tag.
 
 ### 6.7.5 Running a Single Test That Uses the CLI
@@ -2968,7 +2968,7 @@ Speculos runs in Docker by default. If Docker is not running, the test fails alm
 
 ### 6.7.6 Smoke Against a Real Device
 
-Most QAA work stays on Speculos. But before merging changes that affect signing flows for high-stakes coins (ETH mainnet via testnet, BTC, etc.), run a smoke against a real device once. The pyramid:
+Most QAA work stays on Speculos. But before merging changes that affect signing flows for high-stakes coins (ETH, BTC, etc.), run a smoke against a real device once. The pyramid:
 
 1. **Speculos local Docker** — the everyday default. Fast, deterministic, isolated.
 2. **Speculos remote pool** — `REMOTE_SPECULOS=true` plus `SPECULOS_ADDRESS=<pool-host>:<port>`. Same protocol, different host. Useful when your laptop's Docker is misbehaving or when you want to mirror what CI does. Most of the time, identical-looking results to local Speculos.
@@ -3074,7 +3074,7 @@ The verb is imperative, lowercase. The scope identifies the area (`desktop` sinc
 | `bugfix/qaa-XXX-...` | Fixing a flake, fixing a broken existing helper |
 | `chore/qaa-XXX-...` | Tooling, configs, dependency bumps |
 
-Names use kebab-case. Keep them short and action-oriented. For QAA-615, `support/qaa_add_revoke_token` (the senior used underscores; the global convention prefers kebab — pick what your team's recent branches use).
+Names use kebab-case. Keep them short and action-oriented. For QAA-615, `support/qaa-615-add-revoke-token` (the senior used underscores; the global convention prefers kebab — pick what your team's recent branches use).
 
 **Pushing and opening a PR:**
 
@@ -3088,7 +3088,7 @@ gh pr create --base develop --title "test(desktop): add revoke token command in 
 - Wires QAA-615 acceptance test.
 
 ## Test plan
-- [x] `pnpm test:e2e --grep "B2CQA-XXXX"` passes locally on Speculos
+- [x] `pnpm e2e:test` passes locally on Speculos (run specific test by file/tag via Detox)
 - [x] Typecheck passes for `ledger-live-common` and `desktop-e2e`
 - [x] Lint passes
 EOF
@@ -3181,7 +3181,7 @@ The classic e2e symptom. Order of suspects, in increasing rarity:
 
 1. **Allowance state from a previous CI run is stale.** Check on-chain via Etherscan; if there is residual allowance, the suite needs a revoke `beforeEach`.
 2. **Different Speculos image.** CI pins a specific Speculos commit; locally you have whatever Docker pulled most recently. If your test depends on a behaviour that changed between versions, this manifests.
-3. **Network flake to the testnet RPC.** Less common — most QAA tests use stable RPC endpoints — but a transient testnet outage can drop a broadcast. Re-run the CI job once before assuming the test is broken.
+3. **Network flake to the Ethereum mainnet RPC.** Less common — most QAA tests use stable RPC endpoints — but a transient RPC outage can drop a broadcast. Re-run the CI job once before assuming the test is broken.
 4. **Race between fixture seeding and the test body.** If the fixture's CLI call is async and the test body assumes seeding is done, the assumption can hold locally (where fixtures finish faster than the test starts) and break on a slower CI runner. Check the fixture engine's `await` discipline.
 
 ### 6.7.13 Chapter 6.7 Quiz
@@ -3247,7 +3247,7 @@ The classic e2e symptom. Order of suspects, in increasing rarity:
 </div>
 
 <div class="quiz-question" data-correct="B">
-<p><strong>Q6.</strong> You signed off locally on a test that broadcasts a revoke on Sepolia and want to confirm the transaction actually landed before opening the PR. Which is the most reliable verification?</p>
+<p><strong>Q6.</strong> You signed off locally on a test that broadcasts a revoke on Ethereum mainnet and want to confirm the transaction actually landed before opening the PR. Which is the most reliable verification?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) The CLI exited with code 0 — that is sufficient</button>
 <button class="quiz-choice" data-value="B">B) Run a follow-up <code>tokenAllowance</code> call (or open <code>revoke.cash</code> on the seed's address) and read the actual on-chain allowance — if it is now zero, the revoke landed</button>
@@ -3267,7 +3267,7 @@ You now have the full daily workflow — recon, change shape, iteration loop, sm
 ## Walkthrough QAA-615 — Line-by-Line
 
 <div class="chapter-intro">
-This is your Part 6 capstone. Unlike the QAA-702 (Part 5) and QAA-1136 (Part 7) walkthroughs — where you start from a green baseline and add a missing scenario — QAA-615 is a <strong>spike that already has a starting commit</strong>. A senior engineer (Abdurrahman SASTIM) pushed branch <code>support/qaa_add_revoke_token</code> with commit <code>4fa4868a35</code>: 3 files, 37 lines. The wiring works; the shape is incomplete; one of the lines contains a copy-paste bug. Your job is to read every one of those lines, understand <em>why</em> the senior wrote them, then identify what is still missing before this can be merged. By the end of this chapter you will be able to take the senior's branch, finish the work, and ship the spike report.
+This is your Part 6 capstone. Unlike the QAA-702 (Part 5) and QAA-1136 (Part 7) walkthroughs — where you start from a green baseline and add a missing scenario — QAA-615 is a <strong>spike that already has a starting commit</strong>. A senior engineer (Abdurrahman SASTIM) pushed branch <code>support/qaa-615-add-revoke-token</code> with commit <code>4fa4868a35</code>: 3 files, 37 lines. The wiring works; the shape is incomplete; one of the lines contains a copy-paste bug. Your job is to read every one of those lines, understand <em>why</em> the senior wrote them, then identify what is still missing before this can be merged. By the end of this chapter you will be able to take the senior's branch, finish the work, and ship the spike report.
 </div>
 
 ### 6.8.1 Understanding the Ticket
@@ -3276,7 +3276,7 @@ This is your Part 6 capstone. Unlike the QAA-702 (Part 5) and QAA-1136 (Part 7) 
 **Parent epic:** QAA-919 — *Swap regression coverage automation*
 **Type:** Spike
 **Status:** In Progress (the senior's branch is the spike's draft deliverable)
-**Branch:** `support/qaa_add_revoke_token`
+**Branch:** `support/qaa-615-add-revoke-token`
 **Commit:** `4fa4868a35` by Abdurrahman SASTIM, dated 2026-04-27
 
 The ticket asks one specific question:
@@ -3298,7 +3298,7 @@ That comment is the architectural seed for the work. It tells the senior: the ne
 The broadcast distinction (Chapter 6.6) is the core context. To recap:
 
 - **Nightly suite** — `DISABLE_TRANSACTION_BROADCAST=1`. The CLI signs locally but never sends. On-chain allowance never changes. No revoke needed; no real money at risk; ~10 minutes of run time.
-- **Regression suite** — `DISABLE_TRANSACTION_BROADCAST=0`. The CLI signs and broadcasts. Allowances are real; the QAA test seed actually changes state on Sepolia/Holesky. Without a revoke hook, run #2 sees whatever allowance run #1 left behind.
+- **Regression suite** — `DISABLE_TRANSACTION_BROADCAST=0`. The CLI signs and broadcasts. Allowances are real; the QAA test seed actually changes state on Ethereum mainnet. Without a revoke hook, run #2 sees whatever allowance run #1 left behind.
 
 **Without QAA-615**, the broadcast-enabled regression suite has a state-leak problem:
 
@@ -3320,8 +3320,8 @@ Cross-references:
 
 ```bash
 cd /path/to/ledger-live
-git fetch origin support/qaa_add_revoke_token
-git checkout -b support/qaa_add_revoke_token origin/support/qaa_add_revoke_token
+git fetch origin support/qaa-615-add-revoke-token
+git checkout -b support/qaa-615-add-revoke-token origin/support/qaa-615-add-revoke-token
 git show 4fa4868a35
 ```
 
@@ -3656,11 +3656,11 @@ QAA-615 is a spike. The deliverable is **not** just code — it's a written answ
 
 #### 7. Test against a real device
 
-Speculos is canonical for CI but a real Nano S Plus or Stax run on Sepolia confirms the clear-sign content matches expectations. Quick validation:
+Speculos is canonical for CI but a real Nano S Plus or Stax run on Ethereum mainnet confirms the clear-sign content matches expectations. Quick validation:
 
 - Plug a Nano S Plus seeded with the QAA test seed
-- Switch to Sepolia (or the testnet your team uses for swap regression)
-- Run the spec with `MOCK=0 SPECULOS=0` (whatever your local convention is for "use the real device")
+- Switch to Ethereum mainnet (the network your team uses for swap regression)
+- Run the spec with `MOCK=0` (to use a real device instead of Speculos)
 - Tap through the revoke screens manually
 - Verify the device displays "Type: Approve / Amount: 0 USDT / Spender: 0xRouter"
 
@@ -3772,14 +3772,12 @@ async revokeTokenApproval(fromAccount: Account | TokenAccount, provider: Provide
   try {
     // revokeTokenCommand is already global on mobile via jest.environment.ts:138
     const result = await revokeTokenCommand(fromAccount, provider.contractAddress);
-    // Mobile uses jest-allure-circus differently; use the team's standard attachment helper
-    await allure.attachment(
-      `revoke-${provider.uiName}.txt`,
-      Buffer.from(result, "utf-8"),
-      "text/plain",
-    );
+    await allure.description(`Token revoke result for ${provider.uiName}:\n\n ${result}`);
   } finally {
-    await cleanSpeculos(speculos, previousSpeculosPort);
+    await deleteSpeculos(speculos.id);
+    if (previousSpeculosPort > 0) {
+      await registerSpeculos(previousSpeculosPort);
+    }
   }
 }
 ```
@@ -3811,11 +3809,11 @@ This uses the existing reader (Chapter 6.4 §5). Zero return means the revoke la
 
 #### Option B — revoke.cash (Chapter 6.3)
 
-Open `https://revoke.cash`, paste the QAA test address (read-only, no wallet connection needed), select Sepolia, find the token + spender pair. After a successful revoke, the entry should disappear from the list.
+Open `https://revoke.cash`, paste the QAA test address (read-only, no wallet connection needed), select Ethereum mainnet, find the token + spender pair. After a successful revoke, the entry should disappear from the list.
 
 #### Option C — Etherscan read tab
 
-`https://sepolia.etherscan.io/token/<contract>#readContract`, scroll to `allowance(owner, spender)`, paste the test wallet address as `owner` and the provider router as `spender`. Returns 0 in raw smallest units after a successful revoke.
+`https://etherscan.io/token/<contract>#readContract`, scroll to `allowance(owner, spender)`, paste the test wallet address as `owner` and the provider router as `spender`. Returns 0 in raw smallest units after a successful revoke.
 
 Use Option A in the spec itself if you ever want a hard assertion. Use Options B/C for one-off audits and during the spike's manual verification step.
 
@@ -3902,7 +3900,7 @@ Symptom: green on your machine, red on CI.
 Causes (in decreasing order of likelihood):
 - `REMOTE_SPECULOS=true` on CI — the remote pool has different latency. Add `await waitForSpeculosReady(device.id)` (already in `launchSpeculos` for remote; check the path is hit)
 - CI's QAA seed has different account state than yours — the on-chain allowance differs at run-start
-- CI is on a different testnet than your local — confirm `DEFAULT_NETWORK` env
+- CI is pointed at a different RPC endpoint than your local — confirm `DEFAULT_NETWORK` env
 
 #### "Allowance is zero before revoke even runs"
 
@@ -4072,7 +4070,7 @@ Reading the previous eight chapters gives you the map. These exercises put you o
 
 ### 6.9.1 Exercise 1: Read your first allowance (15 min)
 
-**Objective.** Run the legacy `apps/cli` directly, with no test wrapping, to read an ERC-20 allowance for an arbitrary owner/spender pair on Sepolia. This grounds every later abstraction (`runCliGetTokenAllowance`, `isTokenAllowanceSufficientCommand`, `ensureTokenApproval`) in a single thing you've already typed.
+**Objective.** Run the legacy `apps/cli` directly, with no test wrapping, to read an ERC-20 allowance for an arbitrary owner/spender pair on Ethereum mainnet. This grounds every later abstraction (`runCliGetTokenAllowance`, `isTokenAllowanceSufficientCommand`, `ensureTokenApproval`) in a single thing you've already typed.
 
 **Instructions.**
 1. From the monorepo root, run:
@@ -4084,7 +4082,7 @@ Reading the previous eight chapters gives you the map. These exercises put you o
      --ownerAddress 0xYOUR_TEST_ADDRESS \
      --format json
    ```
-2. Replace `0xYOUR_TEST_ADDRESS` with any address you control on Sepolia (or any mainnet address you want to inspect — read-only, no signing involved).
+2. Replace `0xYOUR_TEST_ADDRESS` with any Ethereum mainnet address you want to inspect (read-only, no signing involved).
 3. Read the JSON output line by line. Identify the `allowanceStr` value and the `unitMagnitude`.
 
 **Verification.** Stdout is valid JSON. The `allowanceStr` is a string of digits in the token's smallest unit (for USDC: 6 decimals, so `1000000` = 1 USDC). If you used a fresh address, the value will be `"0"`.
@@ -4106,7 +4104,7 @@ Reading the previous eight chapters gives you the map. These exercises put you o
 
 **Instructions.**
 1. Open `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts`.
-2. Read `isTokenAllowanceSufficientCommand(account, spender, minAmount)` end to end. Note: it builds CLI args, calls `runCliGetTokenAllowance`, parses with `parseTokenAllowanceCliOutput`, compares against `minAmount`, and returns a string (the allowance) when sufficient or `"0"` otherwise.
+2. Read `isTokenAllowanceSufficientCommand(account, spender, minAmount)` end to end. Note: it builds CLI args, calls `runCliGetTokenAllowance`, parses with `parseTokenAllowanceCliOutput`, compares against `minAmount`, and returns a string (the allowance) when sufficient or the numeric `0` otherwise.
 3. On paper (or in a scratch file you don't commit), sketch a `getCurrentAllowanceCommand(account, spender)` that returns the raw `allowanceStr` always — no comparison, no boolean coercion. Signature: `(account: TokenAccount, spender: string) => Promise<string>`.
 4. Decide: would you curry it? Would the curry buy you anything?
 
@@ -4157,7 +4155,7 @@ Reading the previous eight chapters gives you the map. These exercises put you o
 **Instructions.**
 1. Sketch the API of `manualRevokeAndVerify(account: TokenAccount, spender: string): Promise<void>`.
 2. The helper does two things in order:
-   - **(a) Print the revoke.cash URL** for the account's address: `https://revoke.cash/address/<account.address>?chainId=11155111` (Sepolia). Print it big, with newlines around it, so the engineer running the script can't miss it. Optionally `console.log` instructions: "Open this URL, connect MetaMask, click Revoke for the spender at address X, sign in MetaMask. This script will detect the on-chain change and exit."
+   - **(a) Print the revoke.cash URL** for the account's address: `https://revoke.cash/address/<account.address>?chainId=1` (Ethereum mainnet). Print it big, with newlines around it, so the engineer running the script can't miss it. Optionally `console.log` instructions: "Open this URL, connect MetaMask, click Revoke for the spender at address X, sign in MetaMask. This script will detect the on-chain change and exit."
    - **(b) Poll `getEvmTokenAllowance`** every 10 seconds. Time out at 5 minutes. Exit cleanly when the allowance drops to `0`. Print elapsed time on each tick so the engineer can see progress.
 3. Document the use case explicitly: when Speculos is acting up, when a CI revoke failed and you want to clean state by hand without restarting the harness, when auditing what a real seed has approved.
 4. Document why this never goes into a CI test: it requires human input. CI is non-interactive. There is no MetaMask in CI. The whole point of the typed wrappers (Ch 6.4) is to drive Speculos so this kind of human-in-the-loop helper is unnecessary in CI.
@@ -4166,7 +4164,7 @@ Reading the previous eight chapters gives you the map. These exercises put you o
 
 **Hints.**
 - `getEvmTokenAllowance` is the read-only function from `libs/ledger-live-common/src/families/evm/getTokenAllowance.ts`. You can call it directly from a debugging helper — no subprocess needed because no signing is involved.
-- The 5-minute timeout is generous; revoking on Sepolia usually confirms in 15-60 seconds. The timeout exists to avoid an infinite hang if the engineer wandered off.
+- The 5-minute timeout is generous; revoking on Ethereum mainnet usually confirms in 15-60 seconds. The timeout exists to avoid an infinite hang if the engineer wandered off.
 - For mainnet debugging (very rare for QAA), swap the `chainId=11155111` to `chainId=1` and adjust the network in the polling call.
 
 **Stretch goal.** Add a third option to your sketch: an "auto-paste" mode that, on macOS, runs `pbcopy` with the revoke.cash URL so the engineer can `Cmd+V` into a browser. Document that this is shell-out and is therefore platform-specific (Linux has `xclip`, Windows has `clip`).
@@ -4289,13 +4287,13 @@ If the symptom isn't on this list, the next read is the `runCliCommand` error bl
 
 If you've checked every box and finished all seven exercises, the natural next steps are:
 
-- **Pair with the senior who wrote QAA-615** (briefing §1) on the final-shape PR. The dev-loop commit is on `support/qaa_add_revoke_token`; the final PR will likely keep both `revokeTokenApproval` (as `beforeEach`) and `ensureTokenApproval` (as per-test setup). Volunteering to review that PR is the cleanest way to confirm your model matches reality.
+- **Pair with the senior who wrote QAA-615** (briefing §1) on the final-shape PR. The dev-loop commit is on `support/qaa-615-add-revoke-token`; the final PR will likely keep both `revokeTokenApproval` (as `beforeEach`) and `ensureTokenApproval` (as per-test setup). Volunteering to review that PR is the cleanest way to confirm your model matches reality.
 - **Pick up a follow-up ticket** that touches `cliCommandsUtils.ts`. Anything in the QAA backlog tagged "CLI" or "test-data hooks" is fair game. You're now able to read those tickets without translation.
 - **Move to Part 7** (Swap Live App). The same allowance state, Speculos transport, and broadcast discipline you just learned reappear there, wrapped in a Live App iframe. Most of what you learned in Part 6 transfers; the new content is the postMessage protocol and the Live App sandboxing model.
 - **Volunteer for the QAA-615 mobile parity work** sketched in Exercise 7. The desktop ships first; the mobile follow-up is concrete, scoped, and a perfect first cross-platform contribution.
 - **Read one CLI command source file end to end** (e.g., `apps/cli/src/commands/blockchain/send.ts`). You don't need to memorize it; you need the muscle memory of having traced the rxjs pipe from sign to broadcast at least once.
 - **Sit in on a QAA review** of a `swap.page.ts` change. Watching how seniors challenge POM additions (does it duplicate an existing helper? does it leak env state? does the `@step` decorator string match the action?) is faster than reading any style guide.
-- **Run the full QAA-615 spec locally** end to end on Sepolia, with broadcast on, against the QAA test seed. Watch a real revoke land on-chain via Etherscan. Confirm the on-chain allowance dropped to zero. This grounds every abstraction you've learned in a verifiable on-chain effect.
+- **Run the full QAA-615 spec locally** end to end on Ethereum mainnet, with broadcast on, against the QAA test seed. Watch a real revoke land on-chain via Etherscan. Confirm the on-chain allowance dropped to zero. This grounds every abstraction you've learned in a verifiable on-chain effect.
 - **Write a small internal post-mortem** on the QAA-615 dev-loop commit, framed as: "what makes this not the final shape, and what would final-shape review look for?" Share it with one peer for feedback. The exercise of articulating the distinction in writing solidifies it more than any number of re-reads.
 
 <div class="chapter-outro">

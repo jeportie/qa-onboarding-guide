@@ -18,9 +18,9 @@ e2e/mobile/                        # peer to e2e/desktop/
 |-- jest.globalSetup.ts            # Pre-test setup (delegates to Detox)
 |-- jest.globalTeardown.ts         # Post-run cleanup
 |-- babel.config.js                # Babel for the test transform
-|-- tsconfig.test.json             # TS config for specs (experimentalDecorators)
+|-- tsconfig.json             # TS config for specs (experimentalDecorators)
 |
-|-- specs/                         # TEST FILES (~197 specs)
+|-- specs/                         # TEST FILES (~213 specs)
 |   |-- account/                   #   Account screen tests
 |   |-- addAccount/                #   Add-account flow tests
 |   |-- buySell/                   #   Buy / sell flow tests
@@ -1180,13 +1180,12 @@ Breaking those down:
 | Config                   | Platform | Build type | Firebase / flags source      |
 |--------------------------|----------|------------|------------------------------|
 | `ios.sim.debug`          | iOS      | Debug      | `.env.mock` (staging)        |
-| `ios.sim.staging`        | iOS      | Staging    | Staging Firebase             |
+| `ios.sim.staging`        | iOS      | Staging    | Pre-release Firebase             |
 | `ios.sim.release`        | iOS      | Release    | Production-like, mock flags  |
 | `ios.sim.prerelease`     | iOS      | Prerelease | `.env.mock.prerelease` (prod)|
 | `android.emu.debug`      | Android  | Debug      | `.env.mock` (staging)        |
-| `android.emu.staging`    | Android  | Staging    | Staging Firebase             |
+| `android.emu.prerelease`    | Android  | Staging    | Pre-release Firebase             |
 | `android.emu.release`    | Android  | Release    | Production-like, mock flags  |
-| `android.emu.prerelease` | Android  | Prerelease | `.env.mock.prerelease` (prod)|
 
 Rules of thumb:
 - For iterating on tests locally → `ios.sim.debug` or `android.emu.debug`. Fast, hot-reloadable.
@@ -1392,14 +1391,14 @@ Detox is an open-source **grey-box** end-to-end testing framework for React Nati
 - Created by: Wix (the website builder)
 - First release: 2016
 - Targets: React Native on iOS and Android only
-- Runs on top of: **EarlGrey 2** (iOS) and **Espresso** (Android) — both are Google-maintained native UI test drivers
+- Runs on top of: **XCUITest** (iOS) and **Espresso** (Android) — both are Google-maintained native UI test drivers
 - Killer feature: **synchronization** — Detox knows when the app's JS bridge, dispatch queues, animations, timers, and network calls are idle, and it automatically waits until the app is idle before performing the next action
 
 **Grey-box vs black-box — what the difference actually means:**
 
 | Aspect | Black-box (Appium) | Grey-box (Detox) |
 |--------|--------------------|------------------|
-| How it drives the app | Talks to an external OS-level agent (WebDriverAgent on iOS, UIAutomator2 on Android) over HTTP | Injects a native test library into the app itself (EarlGrey/Espresso) |
+| How it drives the app | Talks to an external OS-level agent (WebDriverAgent on iOS, UIAutomator2 on Android) over HTTP | Injects a native test library into the app itself (XCUITest/Espresso) |
 | Knowledge of app state | None — sees only what the OS accessibility tree exposes | Full — sees the JS bridge, dispatch queues, animations, timers, network |
 | Waiting strategy | Poll with timeouts (`implicitWait`) | Wait for app to be idle, then act |
 | Flakiness | High — tests need explicit waits and retries everywhere | Low — idle detection eliminates most race conditions |
@@ -1775,16 +1774,16 @@ describe("First Detox test", () => {
 
 There is no `sleep()`, no `waitForTimeout()`, no polling loop. That is the entire point of Detox.
 
-### 5.5.10 The Platform Split — EarlGrey vs Espresso
+### 5.5.10 The Platform Split — XCUITest vs Espresso
 
 Detox is a thin-ish cross-platform façade over two very different native drivers:
 
-- **iOS:** [EarlGrey 2](https://github.com/google/EarlGrey) — Google's iOS UI test driver. Runs in the same process as the app. Hooks into `CADisplayLink`, `NSURLSession`, `NSOperationQueue`, main dispatch queue, etc., to detect idle.
+- **iOS:** [XCUITest](https://developer.apple.com/documentation/xctest) — Apple's native iOS UI testing framework. Runs in the same process as the app. Hooks into `CADisplayLink`, `NSURLSession`, `NSOperationQueue`, main dispatch queue, etc., to detect idle.
 - **Android:** [Espresso](https://developer.android.com/training/testing/espresso) — Google's Android UI test driver. Runs in an instrumented test process. Hooks into the main looper, `IdlingResource`s, view tree observer.
 
 **Consequences you will hit in practice:**
 
-| Symptom | iOS (EarlGrey) | Android (Espresso) |
+| Symptom | iOS (XCUITest) | Android (Espresso) |
 |---------|----------------|--------------------|
 | Test IDs resolve to | `accessibilityIdentifier` | `android:tag` |
 | `by.text` matches against | `UILabel`/`UITextView` text | `android:text` (excludes children's text unless the view is a merged node) |
@@ -1810,13 +1809,13 @@ You rarely need to branch by platform in test logic, but you *do* have to rememb
 <li><a href="https://wix.github.io/Detox/docs/api/the-element-object">Detox: The element() Object</a> — why it's a proxy, not a node</li>
 <li><a href="https://wix.github.io/Detox/docs/api/waitfor">Detox: waitFor API</a> — polling and <code>whileElement</code></li>
 <li><a href="https://wix.github.io/Detox/docs/api/device">Detox: device API</a> — the process-wide device handle</li>
-<li><a href="https://github.com/google/EarlGrey">EarlGrey 2</a> — the iOS driver Detox wraps</li>
+<li><a href="https://developer.apple.com/documentation/xctest">XCUITest</a> — the iOS driver Detox wraps</li>
 <li><a href="https://developer.android.com/training/testing/espresso">Espresso</a> — the Android driver Detox wraps</li>
 </ul>
 </div>
 
 <div class="chapter-outro">
-<strong>Key takeaway:</strong> Detox is a grey-box React Native E2E framework. Every test reduces to three verbs — matcher, action, expectation — composed through a lazy <code>element()</code> proxy. It synchronizes automatically with the app's internal queues, so you almost never write <code>sleep()</code>. Under the hood, iOS runs on EarlGrey and Android on Espresso, and the small platform seams (scroll start position, <code>reverseTcpPort</code>, APK vs app bundle) are the ones you'll hit in practice.
+<strong>Key takeaway:</strong> Detox is a grey-box React Native E2E framework. Every test reduces to three verbs — matcher, action, expectation — composed through a lazy <code>element()</code> proxy. It synchronizes automatically with the app's internal queues, so you almost never write <code>sleep()</code>. Under the hood, iOS runs on XCUITest and Android on Espresso, and the small platform seams (scroll start position, <code>reverseTcpPort</code>, APK vs app bundle) are the ones you'll hit in practice.
 </div>
 
 ### 5.5.11 Quiz
@@ -2193,7 +2192,7 @@ Detox does not run tests itself; it delegates to a runner. Ledger Live uses **Je
 ```js
 // lines 35-80 — the config itself
 module.exports = async () => ({
-  rootDir: "..",                                                           // (1)
+  rootDir: ".",                                                           // (1)
   maxWorkers: process.env.JEST_MAX_WORKERS
     ? parseInt(process.env.JEST_MAX_WORKERS, 10)
     : 1,                                                                   // (2)
@@ -2214,15 +2213,15 @@ module.exports = async () => ({
       module: { type: "commonjs" },
     }],
   },
-  setupFilesAfterEnv: ["<rootDir>/e2e/setup.ts"],                          // (5)
-  testTimeout: 150000,                                                     // (6)
-  testMatch: ["<rootDir>/e2e/specs/**/*.spec.ts"],                         // (7)
+  setupFilesAfterEnv: ["<rootDir>/setup.ts"],                          // (5)
+  testTimeout: 300000,                                                     // (6)
+  testMatch: ["<rootDir>/specs/**/*.spec.ts"],                         // (7)
   reporters: [
     "detox/runners/jest/reporter",                                         // (8)
     ["jest-allure2-reporter", jestAllure2ReporterOptions],
   ],
-  globalSetup: "<rootDir>/e2e/jest.globalSetup.ts",                        // (9)
-  testEnvironment: "<rootDir>/e2e/jest.environment.ts",                    // (10)
+  globalSetup: "<rootDir>/jest.globalSetup.ts",                        // (9)
+  testEnvironment: "<rootDir>/jest.environment.ts",                    // (10)
   testEnvironmentOptions: {
     eventListeners: [
       "jest-metadata/environment-listener",
@@ -2244,8 +2243,8 @@ Line by line:
 2. **`maxWorkers`** — **default is `1`**. Parallel E2E is off by default because each worker needs its own simulator/emulator, and booting three emulators locally is painful. Set `JEST_MAX_WORKERS=3` on CI where three emulators are pre-booted.
 3. **`@swc/jest`** — not `ts-jest` (too slow). SWC compiles TypeScript to JS 20× faster. `target: es2022` keeps async/await native.
 4. **`decorators: true`** — enables `@Step` (see 35.8). Without this flag, TypeScript decorators are a syntax error.
-5. **`setupFilesAfterEnv: ["<rootDir>/e2e/setup.ts"]`** — runs `setup.ts` *after* Jest's globals (`describe`, `it`, `expect`) are injected. This is where Ledger Live wires up its globals: `global.app`, `global.Step`, the page-object helpers (see 35.6).
-6. **`testTimeout: 150000`** — 150 seconds per test. Mobile is slow: launching the app, importing accounts over the bridge, mocking device events, rendering onboarding screens — it adds up.
+5. **`setupFilesAfterEnv: ["<rootDir>/setup.ts"]`** — runs `setup.ts` *after* Jest's globals (`describe`, `it`, `expect`) are injected. This is where Ledger Live wires up its globals: `global.app`, `global.Step`, the page-object helpers (see 35.6).
+6. **`testTimeout: 300000`** — 300 seconds (5 minutes) per test. Mobile is slow: launching the app, importing accounts over the bridge, mocking device events, rendering onboarding screens — it adds up.
 7. **`testMatch`** — any `*.spec.ts` under `e2e/specs/`.
 8. **`reporters`** — Detox's Jest reporter logs action traces; `jest-allure2-reporter` generates the Allure XML/JSON that populates the reporting dashboard.
 9. **`globalSetup`** — runs *once* per process, before all workers. Here it just delegates to Detox's own setup (boot the device, install the app if needed). See 35.6.
@@ -2607,7 +2606,7 @@ What happens at runtime:
 - The step name supports positional parameter interpolation — `$0` = first arg, `$1` = second, etc.
 - In the Allure report, the test tree shows the step hierarchy with timings and nested assertions.
 
-**Why this needs `experimentalDecorators: true`.** Open `e2e/tsconfig.test.json`:
+**Why this needs `experimentalDecorators: true`.** Open `e2e/tsconfig.json`:
 
 ```json
 {
@@ -2879,7 +2878,7 @@ e2e/mobile/
 │   ├── trade/                     # swap, send, receive, stake, buySell, earn*, operationDetails, deviceValidation, celoManageAssets
 │   └── wallet/                    # portfolio, portfolioEmptyState, walletTabNavigator, mainNavigation, transferMenu.drawer
 │
-├── specs/                         # 197 .spec.ts files — organised by feature bucket
+├── specs/                         # 213 .spec.ts files — organised by feature bucket
 │   ├── deeplinks.spec.ts
 │   ├── languageChange.spec.ts
 │   ├── market.spec.ts
@@ -3871,9 +3870,9 @@ export default class CommonPage {
 
 The `accountId(account: Account)` function translates a shared `Account` enum value into the testID the mobile app renders. This is the reason tests can write `await app.common.selectAccount(Account.BTC_1)` — the enum carries everything the POM needs to build a matcher. The same `Account` enum is consumed by desktop; the two suites thus agree on the fixture's semantic identity while each translates it to its own locator grammar.
 
-### 5.7.11 The Specs Layer — 197 files across 15+ buckets
+### 5.7.11 The Specs Layer — 213 files across 15+ buckets
 
-`specs/` holds the actual Jest test files. There are 197 `.spec.ts` files in the canonical workspace today. They are organised into top-level buckets under `specs/`:
+`specs/` holds the actual Jest test files. There are 213 `.spec.ts` files in the canonical workspace today. They are organised into top-level buckets under `specs/`:
 
 ```
 specs/
@@ -5209,7 +5208,7 @@ Do not write the spec first. You will re-edit it six times. Instead:
 1. **Fixtures (`userdata/*.json`)** — what does the app state need to be at `beforeAll`?
 2. **POM methods (`page/*.page.ts`)** — `@Step` decorators, return types, no assertions on the caller's behalf unless the step name says "Expect".
 3. **Spec (`specs/**/*.spec.ts`)** — stitch the POM calls into an `it()`.
-4. **Dry-run locally** — `pnpm mobile e2e:test -t "<name>"`.
+4. **Dry-run locally** — `pnpm test:ios:debug -- -t "<name>"`.
 5. **Fix** — the first run fails. That is normal. Read the failure, open Allure, patch the POM or spec.
 6. **Push** to a branch.
 7. **CI green** — wait for the full matrix. If flaky, rerun once; if flaky twice, treat as failure and investigate.
@@ -5437,7 +5436,7 @@ Reviewer-facing signals that you did the work:
 ## Real Ticket Walkthrough: QAA-702 — Swap History ERC20 Export
 
 <div class="chapter-intro">
-Your mobile capstone. <strong>QAA-702</strong> — <em>[SWAP] [LLM] Improve 'History' test</em> — is a live, in-progress sprint ticket. The parent scenario <strong>B2CQA-604</strong> already has step 1 automated (native → native swap export); QAA-702 asks you to add step 2: the same export flow, but with an <strong>ERC20 token on the Receive side</strong>. This is not a recap. By the end of this chapter you will have a branch, a new spec file, an extended userdata fixture, a green Detox run, and an Allure report ready to paste into a PR.
+Your mobile capstone. <strong>QAA-702</strong> — <em>[SWAP] [LLM] Improve 'History' test</em> — is a completed sprint ticket (retrospective walkthrough). The parent scenario <strong>B2CQA-604</strong> already has step 1 automated (native → native swap export); QAA-702 asks you to add step 2: the same export flow, but with an <strong>ERC20 token on the Receive side</strong>. This is not a recap. By the end of this chapter you will have a branch, a new spec file, an extended userdata fixture, a green Detox run, and an Allure report ready to paste into a PR.
 </div>
 
 ### 5.10.1 Understanding the Ticket
@@ -5445,7 +5444,7 @@ Your mobile capstone. <strong>QAA-702</strong> — <em>[SWAP] [LLM] Improve 'His
 **Jira ticket:** QAA-702 · **Parent epic:** QAA-919 *"SWAP regression coverage automation"*
 **Xray test case:** B2CQA-604 *"[SWAP] User should be able to export all history operations"*
 **Linked bug:** LIVE-19533 *"[SWAP][LLM][iOS] Can't export Swap history"* (closed)
-**Status:** In Progress · not yet automated · labels `LLM`, `UI`
+**Status:** Done · not yet automated · labels `LLM`, `UI`
 
 The ticket text, verbatim:
 
@@ -5580,7 +5579,7 @@ async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) 
 **Choice: SOL → USDT (ERC-20 on Ethereum).** Reasons:
 
 - **Matches the bug.** LIVE-19533 was triggered by an ERC20 receive; USDT is the archetype.
-- **USDT is the highest-volume ERC20 Ledger Live users receive from swaps.** USDC is a close second, covered in 4.10.13 as the obvious follow-up.
+- **USDT is the highest-volume ERC20 Ledger Live users receive from swaps.** USDC is a close second, covered in 5.10.15 as the obvious follow-up.
 - **The enum entry already exists.** `TokenAccount.ETH_USDT_1` is defined at `libs/ledger-live-common/src/e2e/enum/Account.ts:319` with `accountName: "Tether USD 1"`, `Currency.ETH_USDT` (ticker `"USDT"`), and `parentAccount: Account.ETH_1`.
 - **Reuses the step-1 spec shape exactly.** Only three fields change in the spec: the receive-side account (`TokenAccount.ETH_USDT_1` instead of `Account.ETH_1`), the `swapId`, and the two address constants (because the swap we capture in Phase 2 will be executed on a different SOL/ETH holder pair from step 1 — we will add two new entries to `Addresses.ts`).
 
@@ -5590,7 +5589,7 @@ async checkExportedFileContents(swap: SwapType, provider: Provider, id: string) 
 
 ### 5.10.5 Create a Branch
 
-Following the repo convention for new E2E coverage — `test/` prefix, ticket slug:
+Following the repo convention for new E2E coverage — `support/` prefix, ticket slug:
 
 ```bash
 cd /path/to/ledger-live
@@ -5598,10 +5597,10 @@ git checkout develop
 git pull
 pnpm i
 
-git checkout -b test/qaa-702-swap-history-erc20-export
+git checkout -b support/qaa-702-swap-history-erc20-export
 ```
 
-Why `test/` and not `feat/`: the change lives entirely under `e2e/mobile/`, `e2e/mobile/userdata/`, and `libs/ledger-live-common/src/e2e/enum/`. We are shipping test coverage, not product behaviour. This matches the commit type we will use below (`test(mobile): ...`) — check recent PRs landing swap specs to confirm the team's current preference; `feat(mobile):` is also tolerated.
+Why `support/` and not `feat/`: the change lives entirely under `e2e/mobile/`, `e2e/mobile/userdata/`, and `libs/ledger-live-common/src/e2e/enum/`. We are shipping test coverage, not product behaviour. This matches the commit type we will use below (`test(mobile): ...`) — check recent PRs landing swap specs to confirm the team's current preference; `feat(mobile):` is also tolerated.
 
 ### 5.10.6 Run the Baseline in Isolation
 
@@ -5663,7 +5662,7 @@ To produce a genuine swap operation we execute it for real, then scrape the resu
 1. **Start from the fixture state** (Phase 1 step 3 already put the fixture in `app.json`). Launch LLD.
 2. **Plug in a Ledger device** loaded with the **QAA test seed**. That seed owns the Solana account (`Solana 1`) already present in the fixture — otherwise the swap won't sign.
 3. **Open Swap.** Choose **SOL** as the *from* asset (pick your existing Solana 1 account), **USDT** on Ethereum as the *to* asset.
-4. **Enter the minimum amount — `0.07` SOL** (on French locale, LLD renders this as `0,07` — the comma form is what the Swap class stores, and what you'll pass back in the spec below).
+4. **Enter the minimum amount — `0.07` SOL** (on French locale, LLD renders this as `0.07` — the comma form is what the Swap class stores, and what you'll pass back in the spec below).
 5. **Select a quote.** Today only **NEAR Intents** quotes this pair; take it. Quote availability drifts over time, so note whatever you use.
 6. **Confirm the swap on the device.** Let it execute to completion.
 7. **Go to Swap → History.** Confirm the new entry shows up.
@@ -5807,7 +5806,7 @@ What changed, line-by-line:
 - Each local is set to the **parent** `accountName` when the side is an ERC20 TokenAccount (guarded on both `tokenType === TokenType.ERC20` and the presence of `parentAccount`, so a malformed enum entry can't trigger a null dereference), and falls back to the account's own `accountName` otherwise.
 - The `toContain(swap.accountToDebit.accountName)` and `toContain(swap.accountToCredit.accountName)` assertions are replaced with the resolved locals.
 - Ticker, address, amount, provider, and `swapId` assertions are unchanged — those already read the right source.
-- `TokenType` must be in scope. If it is not already imported at the top of the file, add it alongside the existing enum imports, e.g. `import { TokenType } from "@ledgerhq/live-common/e2e/enum/Account"` (verify the exact export path against the file — it lives alongside `TokenAccount`).
+- `TokenType` must be in scope. If it is not already imported at the top of the file, add it alongside the existing enum imports, e.g. `import { TokenType } from "@ledgerhq/live-common/e2e/enum/TokenType"` (verify the exact export path against the file — it lives alongside `TokenAccount`).
 
 This change is backward-compatible: step 1 (SOL → native ETH) takes neither `if` branch, so `accountToCreditNameInCsv` still resolves to `"Ethereum 1"` (the step-1 expectation). No adjustment to step 1 is required — but your rerun matrix must still include it, because a driver change always has to clear the existing green before you trust it on the new case.
 
@@ -5819,7 +5818,7 @@ import { Provider } from "@ledgerhq/live-common/e2e/enum/Provider";
 import { Addresses } from "@ledgerhq/live-common/e2e/enum/Addresses";
 import { runExportSwapHistoryOperationsTest } from "./swap.other";
 
-const solMinAmount = "0,07";
+const solMinAmount = "0.07";
 const swapId = "1172570f-5a02-43b9-83fc-cad47bfd12f3";
 
 const swapHistoryERC20TestConfig = {
@@ -5856,8 +5855,8 @@ runExportSwapHistoryOperationsTest(
 
 Field-by-field justification:
 
-- **`swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, solMinAmount)`** — debit is `Account.SOL_1`, credit is the ERC20 token account `TokenAccount.ETH_USDT_1`. Note the `TokenAccount` import is added to the same `@ledgerhq/live-common/e2e/enum/Account` module as the base `Account` enum. The amount is passed as the string `"0,07"` (comma form — that's what the fixture stores under the French locale). `Swap` is a global injected by the Jest environment — do not `import` it.
-- **`solMinAmount = "0,07"`** hoisted to a named constant so the magic number doesn't get lost in the object.
+- **`swap: new Swap(Account.SOL_1, TokenAccount.ETH_USDT_1, solMinAmount)`** — debit is `Account.SOL_1`, credit is the ERC20 token account `TokenAccount.ETH_USDT_1`. Note the `TokenAccount` import is added to the same `@ledgerhq/live-common/e2e/enum/Account` module as the base `Account` enum. The amount is passed as the string `"0.07"` (dot form used throughout the codebase). `Swap` is a global injected by the Jest environment — do not `import` it.
+- **`solMinAmount = "0.07"`** hoisted to a named constant so the magic number doesn't get lost in the object.
 - **`provider: Provider.NEAR_INTENTS`** — must match the `"provider": "nearintents"` field in the fixture entry you just pasted.
 - **`swapId`** hoisted and set to the UUID you copied from the CSV; the driver uses it verbatim to locate the CSV row.
 - **`addressFrom: Addresses.SWAP_HISTORY_ERC20_SOL_FROM`** — the Solana holder the swap was executed from (captured in Phase 2, added to the enum in Step 1 above).
@@ -5878,7 +5877,7 @@ pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperationsERC20"
 
 1. **Fixture JSON is malformed** — most common. `jq .` on the file catches this in one command. Fix the comma/brace that went missing when you pasted the accounts block in Phase 3.
 2. **`swapId` mismatch** between spec and fixture. The UUID you captured from the CSV (e.g., `1172570f-5a02-43b9-83fc-cad47bfd12f3`) must appear verbatim in both files; the driver compares byte-for-byte.
-3. **`toContain` miss on `swap.amount`.** The amount string you pass to the `Swap` constructor must appear *as written* in the CSV. Here it is `"0,07"` (comma — the locale form Ledger Live writes to the CSV). If you see a `toContain("0,07")` failure, open the CSV and confirm what character the app actually used; on an English-locale build it may write `0.07` instead, in which case align the spec's `solMinAmount` with the CSV.
+3. **`toContain` miss on `swap.amount`.** The amount string you pass to the `Swap` constructor must appear *as written* in the CSV. Here it is `"0.07"` (dot form — the amount string as used to the CSV). If you see a `toContain("0.07")` failure, open the CSV and confirm what character the app actually used; on an English-locale build it may write `0.07` instead, in which case align the spec's `solMinAmount` with the CSV.
 4. **`provider` mismatch.** `Provider.NEAR_INTENTS` resolves to the string `"nearintents"` in the enum; the fixture entry must use the same key. If you took the swap through a different provider, update both.
 5. **`toContain` miss on `swap.accountToCredit.accountName`** — the driver asserts that `"Tether USD 1"` appears in the exported CSV. If the product has recently renamed the default USDT account label, you will need to align `TokenAccount.ETH_USDT_1.accountName` with reality (a live-common change — separate concern, cover it in a follow-up PR).
 
@@ -6057,14 +6056,14 @@ Phase 4 Step 2 changed a driver shared by every swap export spec. The change des
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q4.</strong> The driver calls <code>jestExpect(fileContents).toContain(swap.amount)</code>. You pass <code>"0,07"</code> (comma) to the <code>Swap</code> constructor via <code>solMinAmount</code>. The fixture's <code>fromAmount</code> is <code>"69637880"</code>. Why is the assertion still correct?</p>
+<p><strong>Q4.</strong> The driver calls <code>jestExpect(fileContents).toContain(swap.amount)</code>. You pass <code>"0.07"</code> (comma) to the <code>Swap</code> constructor via <code>solMinAmount</code>. The fixture's <code>fromAmount</code> is <code>"69637880"</code>. Why is the assertion still correct?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) The CSV export is human-readable in display units (SOL) using the running app's locale — the French locale renders <code>0,07 SOL</code>. <code>fromAmount</code>'s integer lamports are live-common's internal storage. The assertion reads the CSV, not the fixture</button>
 <button class="quiz-choice" data-value="B">B) <code>toContain</code> silently coerces numeric types</button>
 <button class="quiz-choice" data-value="C">C) The driver divides by 10^9 before asserting</button>
 <button class="quiz-choice" data-value="D">D) The assertion is known-broken but nobody has fixed it</button>
 </div>
-<p class="quiz-explanation">Internal units (lamports) and display units (SOL) are different representations of the same amount. The CSV shows display units with the locale's decimal separator; that is what <code>"0,07"</code> matches on a French-locale build. The fixture's <code>fromAmount: "69637880"</code> is 0.069637880 SOL at 9 decimals — within rounding of the 0,07 the user typed, and stored separately from what the CSV shows.</p>
+<p class="quiz-explanation">Internal units (lamports) and display units (SOL) are different representations of the same amount. The CSV shows display units with the locale's decimal separator; that is what <code>"0.07"</code> matches on a French-locale build. The fixture's <code>fromAmount: "69637880"</code> is 0.069637880 SOL at 9 decimals — within rounding of the 0,07 the user typed, and stored separately from what the CSV shows.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
@@ -6106,12 +6105,12 @@ Reading and watching are not enough. The exercises below move from minor POM add
 **Objective.** Practice adding a decorated assertion to an existing POM.
 
 **Instructions.**
-1. Open `apps/ledger-live-mobile/e2e/page/trade/swapHistory.page.ts` (the POM you wrote in Chapter 5.10 — or a draft of it).
+1. Open `e2e/mobile/page/trade/swap.page.ts` (the POM you wrote in Chapter 5.10 — or a draft of it).
 2. Add a selector for the history empty-state title: `swap-history-empty-title`.
 3. Add a method `expectEmptyState()` decorated with `@Step("Expect swap history to be empty")` that asserts the empty-state title is visible.
 4. Make sure the method is `public async`.
 
-**Verification.** Run `pnpm mobile tsc --noEmit`. No type errors. Open the POM side by side with `swap.page.ts`; the signature should match the other `expect*` methods.
+**Verification.** Run `pnpm mobile typecheck`. No type errors. Open the POM side by side with `swap.page.ts`; the signature should match the other `expect*` methods.
 
 **Hints.**
 - Copy the shape of `expectOperationRowVisible(swapId)`, drop the parameter.
@@ -6124,7 +6123,7 @@ Reading and watching are not enough. The exercises below move from minor POM add
 **Objective.** Write a minimal end-to-end spec that re-uses an existing POM.
 
 **Instructions.**
-1. Locate `apps/ledger-live-mobile/e2e/page/common/passwordEntry.page.ts` (or its equivalent — search with `rg "passwordEntry"`).
+1. Locate `e2e/mobile/page/passwordEntry.page.ts` (or its equivalent — search with `rg "passwordEntry"`).
 2. Write a spec `e2e/specs/common/passwordEntryClose.spec.ts` with a single `it()`:
    - `beforeAll` → `app.init({ userdata: "skipOnboardingWithPasswordLock" })` — if this fixture does not exist, use the closest one that boots the app at the lock screen.
    - Assert the password-entry modal is visible.
@@ -6132,7 +6131,7 @@ Reading and watching are not enough. The exercises below move from minor POM add
    - Assert the modal is gone.
 3. Tag the spec with an arbitrary `$TmsLink("B2CQA-DUMMY")` — the point is the wiring, not the Xray link.
 
-**Verification.** Run `pnpm mobile e2e:test -c ios.sim.debug -t "password entry close"`. Three runs, all green.
+**Verification.** Run `pnpm test:ios:debug -- -t "password entry close"`. Three runs, all green.
 
 **Hints.**
 - If `skipOnboardingWithPasswordLock` does not exist, check `userdata/` for a "locked" variant; if none, discuss with your lead before inventing one.
@@ -6157,7 +6156,7 @@ Reading and watching are not enough. The exercises below move from minor POM add
 - The existing `android.emu.debug` block is your template; change only `device.avdName`.
 - API 34 introduces stricter foreground-service policy — if the app fails to boot, you likely need to adjust `device.headless` or `device.utilBinaryPaths`.
 
-**Stretch goal.** Add the new config to a nightly CI job by appending it to the matrix in `.github/workflows/test-mobile-e2e.yml`. Do not merge without your lead's sign-off — nightly minutes are not free.
+**Stretch goal.** Add the new config to a nightly CI job by appending it to the matrix in `.github/workflows/test-mobile-e2e-reusable.yml`. Do not merge without your lead's sign-off — nightly minutes are not free.
 
 ### 5.11.4 Exercise 4: Multi-Account Userdata + Accounts List Spec (60 min)
 
@@ -6167,7 +6166,7 @@ Reading and watching are not enough. The exercises below move from minor POM add
 1. Create `e2e/userdata/twoEthTwoUsdt.json` — two Ethereum parent accounts (`Ethereum 1`, `Ethereum 2`), each with a USDT TokenAccount child (balances: `100 USDT`, `250 USDT`).
 2. Write `e2e/specs/accounts/listTwoEthTwoUsdt.spec.ts` that:
    - Boots with the new userdata.
-   - Opens the Accounts tab via `app.accounts.openAccountsTab()`.
+   - Opens the Accounts tab via `app.accounts.openViaDeeplink()`.
    - Asserts four rows are visible: `Ethereum 1`, `Ethereum 2`, and the two USDT child rows.
 3. Tag with `$TmsLink("B2CQA-DUMMY2")`.
 
@@ -6175,24 +6174,24 @@ Reading and watching are not enough. The exercises below move from minor POM add
 
 **Hints.**
 - Use distinct, collision-free account IDs — copy the ID pattern from an existing userdata fixture.
-- The Accounts list uses `accounts-account-row-$accountId` as its testID pattern (confirm by grepping `src/screens/Accounts/`).
+- The Accounts list uses `account-row-${id}` as its testID pattern (confirm by grepping `src/screens/Accounts/`).
 
 **Stretch goal.** Extend with a third Ethereum account that has an ERC721 NFT sub-account, and assert the NFT row renders distinctly.
 
 ### 5.11.5 Exercise 5: Feature-Flag Override via Bridge (90 min)
 
-**Objective.** Use the bridge's `setFeatureFlag` (or equivalent) to flip a flag in `beforeAll` and assert the UI changes.
+**Objective.** Use the bridge's `overrideFeatureFlag` (or equivalent) to flip a flag in `beforeAll` and assert the UI changes.
 
 **Instructions.**
 1. Locate the bridge message responsible for setting a feature flag in `e2e/bridge/types.ts`.
-2. In a new spec `swapLiveAppFlagOn.spec.ts`, in `beforeAll`, send `setFeatureFlag("ptxSwapLiveApp", { enabled: true })` to the app before it navigates.
+2. In a new spec `swapLiveAppFlagOn.spec.ts`, in `beforeAll`, send `overrideFeatureFlag("ptxSwapLiveAppMobile", { enabled: true })` to the app before it navigates.
 3. In the `it()`, open the swap tab and assert the Live App route is mounted (look for a testID like `swap-live-app-root` — if it does not exist, add the product ticket and stop; do not hack around it).
 
 **Verification.** Three green runs. Flip the flag to `false` and rerun; the test should fail as expected.
 
 **Hints.**
-- The bridge `setFeatureFlag` contract is documented in Chapter 5.6. If the payload shape is wrong, the app ignores the message silently — attach a `onerror` logger while iterating.
-- Not every flag propagates at runtime without an app restart. Check `FeatureFlagsProvider` in `apps/ledger-live-mobile/src/components/FeatureFlags/`.
+- The bridge `overrideFeatureFlag` contract is documented in Chapter 5.6. If the payload shape is wrong, the app ignores the message silently — attach a `onerror` logger while iterating.
+- Not every flag propagates at runtime without an app restart. Check `FeatureFlagsProvider` in `apps/ledger-live-mobile/src/components/FirebaseFeatureFlags.tsx`.
 
 **Stretch goal.** Write a helper `withFeatureFlags(flags) { ... }` that accepts an object and sends one bridge message per flag. Use it in your `beforeAll`.
 
@@ -6201,9 +6200,9 @@ Reading and watching are not enough. The exercises below move from minor POM add
 **Objective.** Add a scheduled CI entry that runs only swap-tagged specs.
 
 **Instructions.**
-1. Open `.github/workflows/test-mobile-e2e-reusable.yml` and its caller (likely `test-mobile-e2e.yml`).
+1. Open `.github/workflows/test-mobile-e2e-reusable.yml` and its caller (likely `test-mobile-e2e-reusable.yml`).
 2. Add a `schedule` trigger firing at `0 2 * * *` (02:00 UTC).
-3. Add a matrix entry that passes `-t "SWAP|Swap|swap"` to `pnpm mobile e2e:test` — this filters by test-name pattern.
+3. Add a matrix entry that passes `-t "SWAP|Swap|swap"` to `pnpm test:ios:debug` — this filters by test-name pattern.
 4. Limit to one shard (swap-only run — no need to parallelize across 10 shards for a dozen tests).
 
 **Verification.** Run `act` locally or push to a throwaway branch and wait for the scheduled run. Confirm only swap specs execute.
@@ -6242,7 +6241,7 @@ Reading and watching are not enough. The exercises below move from minor POM add
 2. If not, boots it.
 3. Runs `detox test --reuse -c ios.sim.debug -t "$@"` — the `--reuse` flag reuses an already-installed app binary.
 4. Does **not** shut down the simulator on exit.
-5. Accepts the same `-t` pattern and `-c` config as `pnpm mobile e2e:test`.
+5. Accepts the same `-t` pattern and `-c` config as `pnpm test:ios:debug`.
 
 The existing pnpm command rebuilds and rebooks every time; `--reuse` is up to 30 s faster per run.
 

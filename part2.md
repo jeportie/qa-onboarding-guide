@@ -947,7 +947,7 @@ A practical map for the test data that drives Send/Receive specs:
 | Provider enum | `libs/ledger-live-common/src/e2e/enum/Provider.ts` | Swap providers (used by send.swap.spec) |
 | Fee enum | `libs/ledger-live-common/src/e2e/enum/Fee.ts` | Slow / medium / fast labels |
 | Transaction model | `libs/ledger-live-common/src/e2e/models/Transaction.ts` | The `(debit, credit, amount, speed, memoTag)` value object |
-| CLI helpers | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithRecipientAddressCommand`, `getAddressCommand`, `getAccountAddress` |
+| CLI helpers | `libs/ledger-live-common/src/e2e/cliCommandsUtils.ts` | `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithRecipientAddressCommand`, `getAccountAddress` |
 | Userdata fixtures (desktop) | `e2e/desktop/tests/userdata/*.json` | Pre-seeded LLD app states |
 | Userdata fixtures (mobile) | `e2e/mobile/userdata/*.json` | Pre-seeded LLM app states |
 | Speculos device actions | `libs/coin-modules/coin-<family>/src/speculos-deviceActions.ts` | Per-family auto-approve scripts |
@@ -962,7 +962,7 @@ What you have just learned will resurface across the rest of the guide in concre
 | --- | --- |
 | **Part 4 — Desktop E2E** | The send-tx, new-send-flow, and receive-address spec families discussed in 2.1.11 are the canonical examples used to teach the desktop POM pattern, fixture / userdata system, and the Speculos device-action driver. Chapter 4.4 (Playwright Advanced — Fixtures, POM, Decorators) uses Send/Receive as a worked example, and Part 3 Ch 3.3 (Speculos) does the same on the device-emulation side. |
 | **Part 5 — Mobile E2E** | `e2e/mobile/specs/send/sendETH.spec.ts` and the associated driver `send.ts` are the worked examples in Ch 5.2 ("Writing your first mobile E2E test") and Ch 5.3 ("Translation table"). Ch 5.7 covers the mobile Send POM in detail. |
-| **Part 6 — CLI helpers** | The `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithRecipientAddressCommand`, and `getAddressCommand` helpers — which seed Speculos with funded accounts and pre-resolve recipient addresses for send tests — are documented in Ch 6.4. The Send specs at all three levels (desktop, mobile, common) consume these helpers. |
+| **Part 6 — CLI helpers** | The `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithRecipientAddressCommand`, and `getAccountAddress` helpers — which seed Speculos with funded accounts and pre-resolve recipient addresses for send tests — are documented in Ch 6.4. The Send specs at all three levels (desktop, mobile, common) consume these helpers. |
 | **Part 7 — Swap deep dive** | Swap is conceptually a Send with a derived recipient. The Swap drawer composes `bridge.signOperation` and `bridge.broadcast` exactly as Send does, but the recipient address is resolved by the swap provider rather than typed by the user. |
 | **Ch 2.5 — Buy/Sell** | Buy uses Receive plumbing (the address shown to the partner provider is the next fresh address from the same `bridge.receive(account, { verify: true, deviceId })` call). Sell uses Send plumbing. |
 
@@ -1221,7 +1221,7 @@ The bridge interface (`CountervaluesBridge`) is the persistence boundary: the pl
 
 #### 2.2.2.b Where rates come from for tokens
 
-For a native chain (BTC, ETH, SOL) the API key is the chain's CoinGecko ID — `bitcoin`, `ethereum`, `solana`. For ERC-20 tokens it is `<chain>/<contract>`, e.g. `ethereum/0xdac17f958d2ee523a2206206994597c13d831ec7` (USDT). `inferCurrencyAPIID` in `helpers.ts` builds these IDs from the cryptoassets registry. If a token is not in the price feed at all, `fetchLatest` returns `0` for its pair, the countervalue rendering falls back to "—", and the asset still appears in the list with its native balance only.
+For a native chain (BTC, ETH, SOL) the API key is the chain's CoinGecko ID — `bitcoin`, `ethereum`, `solana`. For ERC-20 tokens it is `<chain>/erc20/<internal_name>`, e.g. `ethereum/erc20/usd_tether__erc20_` (USDT). `inferCurrencyAPIID` in `helpers.ts` builds these IDs from the cryptoassets registry. `inferCurrencyAPIID` in `helpers.ts` builds these IDs from the cryptoassets registry. If a token is not in the price feed at all, `fetchLatest` returns `0` for its pair, the countervalue rendering falls back to "—", and the asset still appears in the list with its native balance only.
 
 ### 2.2.3 The Portfolio User Flow
 
@@ -2817,7 +2817,7 @@ You now have a complete map of Ledger Live's stake and earn feature — from the
 ## Swap (Overview)
 
 <div class="chapter-intro">
-Swap is the highest-complexity feature in Ledger Wallet. It spans two codebases, seven providers, two signing paradigms, and the largest Page Object Model in the desktop test suite. This chapter gives you the product-level mental model you need before reading the E2E code: what Swap does, where it lives in the app, how the user flow unfolds step by step, and which test artefacts cover it. The deep technical dive — Live App architecture, Wallet API, manifest wiring, deployment pipeline — lives in Part 7 (Swap Live App). Cross-references to that part are distributed throughout this chapter; follow them when you need to go deeper on any sub-topic.
+Swap is the highest-complexity feature in Ledger Wallet. It spans two codebases, twelve providers, two signing paradigms, and the largest Page Object Model in the desktop test suite. This chapter gives you the product-level mental model you need before reading the E2E code: what Swap does, where it lives in the app, how the user flow unfolds step by step, and which test artefacts cover it. The deep technical dive — Live App architecture, Wallet API, manifest wiring, deployment pipeline — lives in Part 7 (Swap Live App). Cross-references to that part are distributed throughout this chapter; follow them when you need to go deeper on any sub-topic.
 </div>
 
 ---
@@ -2944,13 +2944,15 @@ sequenceDiagram
 
 ### 2.4.5 Provider Categories
 
-Ledger Swap currently integrates seven providers. Understanding the CEX/DEX boundary is essential for QA because it determines whether a token approval step is present.
+Ledger Swap currently integrates twelve providers. Understanding the CEX/DEX boundary is essential for QA because it determines whether a token approval step is present.
 
 | Provider | Category | KYC Required | Contract Address | Notes |
 |---|---|---|---|---|
 | Changelly | CEX | No | — | Floating and fixed rate; most broadly supported pairs |
 | Exodus | CEX | No | — | Cross-chain pairs including BTC; native to Ledger |
 | CIC | CEX | No | — | |
+| NEAR Intents | CEX | No | — | Cross-chain intents; native to NEAR protocol |
+| Swaps.xyz | CEX | No | — | |
 | THORChain | DEX | No | `0xD37BbE...` | Cross-chain native asset swaps; requires approval for ERC-20 from-assets |
 | Uniswap | DEX | No | `0x000000...` | EVM only; requires approval; not available on Ledger Nano S devices |
 | 1inch | DEX | No | `0x111111...` | EVM only; requires approval; has a dedicated signing app (`AppInfos.ONE_INCH`) |
@@ -4111,9 +4113,9 @@ The desktop Manager is a three-phase screen:
 
 The `SyncSkipUnderPriority priority={999}` wrapper in `index.tsx` prevents account syncing (which would compete for the transport) while the Manager screen is active.
 
-#### Mobile — `screens/Manager/` (legacy path)
+#### Mobile — My Ledger
 
-The mobile entry point (`screens/Manager/index.tsx`) is the navigation hub for the My Ledger section. It routes to:
+The mobile entry point navigates through `MyLedgerChooseDevice` → `MyLedgerDevice` (the app catalog screen at `screens/MyLedgerDevice/index.tsx`), identical in function to the desktop Dashboard. It routes to:
 
 - `MyLedgerChooseDevice` — selects or re-connects the device.
 - `MyLedgerDevice` — the app catalog screen (`screens/MyLedgerDevice/index.tsx`), identical in function to the desktop Dashboard.
@@ -4234,25 +4236,29 @@ stateDiagram-v2
     batteryCheck --> allowManager : Battery OK
 
     allowManager --> confirmUpdate : User allows Manager on device
-    confirmUpdate --> installingOsuFirmware : User confirms on device
+    confirmUpdate --> start : User confirms on device
 
-    installingOsuFirmware --> installingFirmware : OSU downloaded and flashed
-    installingFirmware --> installingMcu : SE OS installed; MCU update needed
-    installingMcu --> restoreApps : MCU updated; device restarts
-    installingFirmware --> restoreApps : MCU update not needed
+    start --> appsBackup : Backing up installed apps
+    appsBackup --> imageBackup : Apps backed up
+    imageBackup --> firmwareUpdate : Image backed up
 
-    restoreApps --> restoringLanguage : Re-installing saved apps
-    restoringLanguage --> restoringCustomLockScreen : Language pack restored (if applicable)
-    restoringCustomLockScreen --> completed : Custom lock screen restored
+    firmwareUpdate --> firmwareUpdate : OSU downloaded and flashed
+    firmwareUpdate --> firmwareUpdate : SE OS installed; MCU update needed
+    firmwareUpdate --> appsRestore : MCU updated; device restarts
+    firmwareUpdate --> appsRestore : MCU update not needed
 
-    restoringLanguage --> completed : No custom lock screen
-    restoreApps --> completed : No apps to restore
+    appsRestore --> languageRestore : Re-installing saved apps
+    languageRestore --> imageRestore : Language pack restored (if applicable)
+    imageRestore --> completed : Custom lock screen restored
+
+    languageRestore --> completed : No custom lock screen
+    appsRestore --> completed : No apps to restore
 
     completed --> [*]
 
-    installingOsuFirmware --> error : Transport failure
-    installingFirmware --> error : Transport failure
-    installingMcu --> error : Transport failure
+    firmwareUpdate --> error : Transport failure
+    firmwareUpdate --> error : Transport failure
+    firmwareUpdate --> error : Transport failure
     error --> idle : User taps Retry
 ```
 
@@ -4369,7 +4375,6 @@ When the device is disconnected mid-session, the `currentDevice` selector change
 
 | Screen | File | Responsibility |
 |---|---|---|
-| `Manager` | `screens/Manager/index.tsx` | Navigation hub; routes to ChooseDevice or Device |
 | `MyLedgerChooseDevice` | `screens/MyLedgerChooseDevice/index.tsx` | Device picker; entry to BLE or USB connect |
 | `MyLedgerDevice` | `screens/MyLedgerDevice/index.tsx` | App catalog; holds `useApps` state |
 | `FirmwareUpdate` | `screens/FirmwareUpdate/index.tsx` | Full update flow; `useUpdateFirmwareAndRestoreSettings` |
@@ -4719,7 +4724,7 @@ This section walks the session lifecycle in detail. The catalog and release life
 The user flow looks like this:
 
 1. User opens Discover in Ledger Wallet.
-2. Wallet renders the catalog: it iterates the manifests fetched from the **Manifest API** for the current Firebase environment (development / staging / pre-prod / production — see Part 0 Ch 0.4) and filters them by `visibility`, `platforms` (`desktop | mobile | all`) and feature flags.
+2. Wallet renders the catalog: it iterates the manifests fetched from the **Manifest API** for the current Firebase environment (development / staging / pre-prod / production — see Part 0 Ch 0.4) and filters them by `visibility`, `platforms` (`ios | android | desktop`) and feature flags.
 3. User taps a tile.
 4. Wallet looks up the manifest for that `id`, picks the right URL based on the manifest's `type` (`url`, `dappUrl`, or `webUrl`).
 5. Wallet creates a webview component pointed at that URL, with a `postMessage` channel attached.
@@ -4925,7 +4930,7 @@ A Manifest V2 entry looks roughly like this (real fields, taken from `LiveAppMan
   "homepageUrl": "https://www.ledger.com/swap",
   "supportUrl": "https://support.ledger.com",
   "icon": "https://cdn.live.ledger.com/icons/swap.png",
-  "platforms": ["desktop", "mobile"],
+  "platforms": ["android", "ios", "desktop"],
   "apiVersion": "^2.0.0",
   "manifestVersion": "2",
   "categories": ["exchange", "defi"],
@@ -4944,7 +4949,6 @@ A Manifest V2 entry looks roughly like this (real fields, taken from `LiveAppMan
     "wallet.capabilities"
   ],
   "domains": ["https://swap-live-app.staging.aws.ledger.com"],
-  "type": "walletApp",
   "params": { "embeddedTheme": "light" },
   "visibility": "complete"
 }

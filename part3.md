@@ -30,10 +30,10 @@ develop (main integration branch -- your base for all work)
 
 The full release lifecycle is automated with GitHub Actions:
 
-1. **Create Release** — A `release` branch is created from `develop` head. Changesets enters pre-release mode (`pnpm changeset pre enter next`). Pushing to this branch triggers pre-release builds.
+1. **Create Release** — A `release` branch is created from `develop` head. Changesets enters pre-release mode (`pnpm changelog pre enter next`). Pushing to this branch triggers pre-release builds.
 2. **Stabilisation** — Fixes are pushed directly to `release`. Each push triggers new pre-release builds. QA validates the pre-release builds.
 3. **Prepare Release** — When QA approves, the `release-prepare` workflow exits pre-release mode, bumps versions, tags apps, and merges `release` into `main` and `develop`.
-4. **Release** — The `release-final` workflow builds production binaries, publishes libraries to npm with `pnpm changeset publish`, and pushes tags.
+4. **Release** — The `release-final` workflow builds production binaries, publishes libraries to npm with `pnpm changelog publish`, and pushes tags.
 
 **Hotfix flow**: A `hotfix` branch is created from `main` head. Uses pre-release channel `hotfix`. After QA validation, merged back into `main`, `develop`, and `release` (if present).
 
@@ -41,7 +41,7 @@ The full release lifecycle is automated with GitHub Actions:
 
 **Pre-release channels**: Any branch can enter pre-release mode with any channel name:
 ```bash
-pnpm changeset pre enter experimental-bitcoin
+pnpm changelog pre enter experimental-bitcoin
 # Then trigger the Release Prerelease workflow manually
 # Builds will be available at: https://download.live.ledger.com/experimental-bitcoin/{os}
 ```
@@ -110,7 +110,7 @@ Every PR that modifies a **published** package needs a changeset — a small mar
 
 ```bash
 # Add a changeset (interactive prompt):
-pnpm changeset
+pnpm changelog
 # The wiki also defines this alias:
 pnpm changelog
 
@@ -186,7 +186,7 @@ pnpm mobile pod
 <li><a href="https://semver.org">Semantic Versioning (semver)</a> — the versioning convention followed by Ledger packages</li>
 <li><a href="https://learngitbranching.js.org/">Learn Git Branching</a> — interactive visual game to master Git branching concepts</li>
 <li><a href="https://github.com/gitleaks/gitleaks">Gitleaks</a> — the secret scanner used in pre-commit hooks</li>
-<li><a href="https://github.com/nickel-lang/hk">hk</a> — the modern Git hooks manager (Husky alternative)</li>
+<li><a href="https://github.com/jdx/hk">hk</a> — the modern Git hooks manager (Husky alternative)</li>
 </ul>
 </div>
 
@@ -255,7 +255,7 @@ pnpm mobile pod
 <button class="quiz-choice" data-value="C">C) It only builds desktop binaries</button>
 <button class="quiz-choice" data-value="D">D) It exits pre-release mode, bumps versions, tags apps, and merges <code>release</code> into <code>main</code> and <code>develop</code></button>
 </div>
-<p class="quiz-explanation">The prepare step runs <code>pnpm changeset pre exit</code> and <code>pnpm changeset version</code>, then merges the release branch into both <code>main</code> and <code>develop</code>. If there are conflicts on <code>develop</code>, a PR titled "Release merge conflicts" is created.</p>
+<p class="quiz-explanation">The prepare step runs <code>pnpm changelog pre exit</code> and <code>pnpm changelog version</code>, then merges the release branch into both <code>main</code> and <code>develop</code>. If there are conflicts on <code>develop</code>, a PR titled "Release merge conflicts" is created.</p>
 </div>
 
 <div class="quiz-score"></div>
@@ -264,10 +264,10 @@ pnpm mobile pod
 ---
 
 
-## pnpm, Turbo & Build Pipeline
+## pnpm, Nx & Build Pipeline
 
 <div class="chapter-intro">
-A monorepo with 200+ packages needs a fast package manager and an intelligent build orchestrator. This chapter covers <strong>pnpm</strong> (the package manager), <strong>Turborepo</strong> (the build system), and the practical commands you will use daily to install, build, and run packages. You will also learn how to deal with dependency duplicates — a recurring challenge in large monorepos.
+A monorepo with 200+ packages needs a fast package manager and an intelligent build orchestrator. This chapter covers <strong>pnpm</strong> (the package manager), <strong>Nx</strong> (the build orchestrator), and the practical commands you will use daily to install, build, and run packages. You will also learn how to deal with dependency duplicates — a recurring challenge in large monorepos.
 </div>
 
 ### 3.2.1 pnpm Basics
@@ -310,13 +310,13 @@ The `--filter` flag selects which packages to operate on:
 --filter="[origin/develop]"           # Packages changed since develop
 ```
 
-### 3.2.4 Turbo (Build Orchestration)
+### 3.2.4 Nx (Build Orchestration)
 
-Turbo manages the **build dependency graph**. When you run `pnpm build:lld`, Turbo knows to build all dependent libraries first, in the correct order, with maximum parallelism.
+Nx manages the **build dependency graph**. When you run `pnpm build:lld`, Nx knows to build all dependent libraries first, in the correct order, with maximum parallelism.
 
 ```bash
 # Build a specific library
-pnpm turbo build --filter=@ledgerhq/live-common
+pnpm --filter @ledgerhq/live-common run build
 
 # Build all libraries
 pnpm build:libs
@@ -337,7 +337,7 @@ error TS2305: Module '"@ledgerhq/live-countervalues-react"' has no exported memb
 
 The library needs to be **rebuilt** — its build output is stale:
 ```bash
-pnpm turbo build --filter=@ledgerhq/live-countervalues-react
+pnpm --filter @ledgerhq/live-countervalues-react run build
 ```
 
 ### 3.2.6 Live Reload During Development
@@ -394,9 +394,9 @@ On Windows, running binaries by specifying their path in package.json scripts wi
 <h4>Resources</h4>
 <ul>
 <li><a href="https://pnpm.io/">pnpm documentation</a> — created by Zoltan Kochan</li>
-<li><a href="https://turbo.build/repo/docs">Turborepo documentation</a> — by Vercel (Jared Palmer)</li>
+<li><a href="https://nx.dev/docs">Nx documentation</a> — build system and task orchestration</li>
 <li><a href="https://pnpm.io/filtering">pnpm filtering</a> — complete reference for the <code>--filter</code> flag</li>
-<li><a href="https://turbo.build/repo/docs/crafting-your-repository/caching">Turbo caching</a> — how Turbo avoids rebuilding unchanged packages</li>
+<li><a href="https://nx.dev/concepts/how-caching-works">Nx caching</a> — how Nx avoids rebuilding unchanged packages</li>
 <li><a href="https://semver.org/">Semantic Versioning</a> — the versioning convention for all packages</li>
 </ul>
 </div>
@@ -429,11 +429,11 @@ On Windows, running binaries by specifying their path in package.json scripts wi
 <p><strong>Q2.</strong> A typecheck error says <code>Module '@ledgerhq/coin-evm' has no exported member 'getTransactionStatus'</code>. What should you do?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) Delete <code>node_modules</code> and reinstall everything</button>
-<button class="quiz-choice" data-value="B">B) Run <code>pnpm turbo build --filter=@ledgerhq/coin-evm</code></button>
+<button class="quiz-choice" data-value="B">B) Run <code>pnpm --filter @ledgerhq/coin-evm run build</code></button>
 <button class="quiz-choice" data-value="C">C) Ignore the error — it's a false positive</button>
 <button class="quiz-choice" data-value="D">D) Upgrade the package version in package.json</button>
 </div>
-<p class="quiz-explanation">The library's build output is stale. Rebuilding it with Turbo regenerates the TypeScript declaration files and exports.</p>
+<p class="quiz-explanation">The library's build output is stale. Rebuilding it with Nx regenerates the TypeScript declaration files and exports.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
@@ -502,9 +502,9 @@ Speculos is a **Ledger device emulator** that runs real firmware inside a Docker
 
 Speculos exposes three surfaces:
 
-- A **REST API** (default port 5000) for button presses, screenshots, APDU commands, and automation rules
+- A **REST API** (port auto-assigned in the test framework; port 5000 by default for manual runs) for button presses, screenshots, APDU commands, and automation rules
 - A **TCP server** (default port 9999) for raw APDU communication
-- A **web UI** at `http://localhost:5000` that renders the emulated screen in your browser — invaluable for visual debugging
+- A **web UI** at `http://localhost:<port>` that renders the emulated screen in your browser — invaluable for visual debugging (use the port you passed to `--api-port`)
 
 In E2E tests, Speculos runs inside a **Docker container**. Each test gets its own container on a unique port so that test workers can run in parallel without stepping on each other.
 
@@ -1127,7 +1127,7 @@ curl http://localhost:<port>/screenshot -o now.png
 |---------|-------------------|-----------|
 | `container not ready` after 30s timeout | Stuck container from a previous run | `docker rm -f $(docker ps -aq --filter name=speculos)` |
 | `no app found for X on nanoSP` | Stale `coin-apps` checkout | `cd $COINAPPS && git pull` |
-| `EADDRINUSE` on port 5000 | Another Speculos still owns the port | `lsof -i :5000`, then kill |
+| `EADDRINUSE` on Speculos port | Another Speculos process still owns the port | `lsof -i :<port>` (check `SPECULOS_API_PORT` value), then kill |
 | `SIGNATURE_INVALID` on transaction | Wrong app version pinned vs seed state | Verify `appQuery.appVersion` against coin-apps |
 | Test hangs at "waiting for device" | `MOCK=1` still set, app uses mock transport | `export MOCK=0`, relaunch app |
 | Screenshots blank / all black | Container started but firmware did not boot | Check Docker logs; may need to repull the image |
@@ -1345,7 +1345,7 @@ export E2E_FEATURE_FLAGS_JSON='{"myFlag":{"enabled":true}}'
 ### 3.4.4 The Wallet 4.0 Toggle
 
 ```bash
-export E2E_ENABLE_WALLET40=1
+export E2E_ENABLE_WALLET40=0  # Disable W40 (on by default; omit to keep it enabled)
 ```
 
 This enables the Wallet 4.0 UI, which significantly changes navigation and layout. Some tests need this flag, others expect the classic UI. Always be aware of which UI version your test targets.
@@ -1708,7 +1708,7 @@ Key design choices:
 
 The reporter configuration lives in two files, one per platform. These are canonical — if you change the reporter list, change it here.
 
-**Desktop — `apps/ledger-live-desktop/playwright.config.ts`:**
+**Desktop — `apps/ledger-live-desktop/tests/playwright.config.ts`:**
 
 ```typescript
 import { defineConfig } from "@playwright/test";
@@ -1717,15 +1717,7 @@ export default defineConfig({
   testDir: "./tests/specs",
   reporter: [
     ["list"],                                          // terminal output
-    ["allure-playwright", {
-      detail: true,
-      outputFolder: "allure-results",
-      links: {
-        // Transforms the plain id "B2CQA-817" into a full Jira URL in the report
-        tms: { urlTemplate: "https://ledgerhq.atlassian.net/browse/%s" },
-        issue: { urlTemplate: "https://ledgerhq.atlassian.net/browse/%s" },
-      },
-    }],
+    ["allure-playwright"],                           // writes allure-results/ (no options in actual config)
     ["./tests/utils/customJsonReporter.ts"],           // writes xray-report.json
     ["html", { open: "never", outputFolder: "playwright-report" }],
   ],
@@ -2067,7 +2059,7 @@ ls apps/ledger-live-desktop/allure-results
 # -> 3f8e...-attachment.png
 # -> xray-report.json        <- custom reporter output
 
-cat apps/ledger-live-desktop/xray-report.json
+cat e2e/desktop/tests/artifacts/xray/xray-report.json
 # { "testExecutionKey": undefined,
 #   "tests": [ { "testKey": "B2CQA-2499", "status": "PASSED" } ] }
 
@@ -2239,7 +2231,7 @@ This five-minute exercise is mandatory onboarding for anyone touching E2E tests.
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 3 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions across Git, pnpm/Turbo, Speculos, Firebase, Allure · 80% to pass</p>
+<p class="quiz-subtitle">10 questions across Git, pnpm/Nx, Speculos, Firebase, Allure · 80% to pass</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="B">
@@ -2359,6 +2351,6 @@ This five-minute exercise is mandatory onboarding for anyone touching E2E tests.
 
 <div class="chapter-outro">
 
-Part 3 complete. You now share the same vocabulary — Git, pnpm/Turbo, Speculos, Firebase, Allure — as every other engineer on the team. Part 4 takes you deep into the Desktop E2E stack: Playwright from zero, Electron, the fixture hub, the codebase catalog, and two real ticket walkthroughs.
+Part 3 complete. You now share the same vocabulary — Git, pnpm/Nx, Speculos, Firebase, Allure — as every other engineer on the team. Part 4 takes you deep into the Desktop E2E stack: Playwright from zero, Electron, the fixture hub, the codebase catalog, and two real ticket walkthroughs.
 
 </div>

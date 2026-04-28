@@ -24,7 +24,7 @@ e2e/desktop/
 |   |   |-- send.swap.spec.ts         # Swap tests
 |   |   |-- portfolio.spec.ts         # Portfolio tests
 |   |   |-- market.spec.ts            # Market discovery tests
-|   |   |-- onboarding.spec.ts        # First-launch tests
+|   |   |-- marketBanner.spec.ts        # Market banner tests
 |   |   +-- ... (16 more)
 |   |
 |   |-- page/                         # PAGE OBJECTS
@@ -405,7 +405,7 @@ import { getDescription } from "tests/utils/customJsonReporter";
 
 test.describe("YOUR FEATURE NAME", () => {
   test.use({
-    teamOwner: Team.QAA,
+    teamOwner: Team.WALLET_XP,
     userdata: "skip-onboarding-with-last-seen-device",
     // speculosApp: account.currency.speculosApp,    // Uncomment if device needed
     // cliCommands: [liveDataCommand(account)],        // Uncomment for test data
@@ -1809,7 +1809,7 @@ This is your reference chapter. It catalogs every file in <code>e2e/desktop/test
 
 | File | Purpose |
 |------|---------|
-| `tests/fixtures/common.ts` | **The most important file.** Defines all test fixtures (covered in Ch 4.4.2-23.4) |
+| `tests/fixtures/common.ts` | **The most important file.** Defines all test fixtures (covered in Ch 4.4.2-4.6) |
 
 ### 4.6.3 Page Objects — The Class Hierarchy
 
@@ -1943,13 +1943,15 @@ The codebase supports both **legacy** and **new modular** UI flows. The `getModu
 ```typescript
 // From modularSelectorUtils.ts
 export async function getModularSelector(app, type: "ASSET" | "ACCOUNT") {
+  const page = app.getPage();
   try {
-    // Wait up to 5 seconds for the modular dialog to appear
-    await app.modularDialog.waitForDialogToBeVisible(type, 5000);
-    return app.modularDialog;  // New UI is active
+    const dialogLocator = page.getByTestId(`modular-dialog-screen-${type}_SELECTION`);
+    await dialogLocator.waitFor({ state: "visible", timeout: 5000 });
+    if (await dialogLocator.isVisible()) return app.modularDialog;
   } catch {
-    return null;  // Fall back to legacy UI
+    // Did not appear — assume legacy UI
   }
+  return null;
 }
 ```
 
@@ -2085,7 +2087,7 @@ export MOCK=0
 export SPECULOS_DEVICE=nanoSP
 export SEED="your test seed phrase"
 export COINAPPS="/path/to/coin-apps"
-export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:master
+export SPECULOS_IMAGE_TAG=ghcr.io/ledgerhq/speculos:latest
 
 # 2. Docker is running
 docker info  # Should not error
@@ -2118,7 +2120,7 @@ pnpm e2e:desktop test:playwright:setup
 Launch the app and manually perform the flow you are automating:
 
 ```bash
-pnpm desktop dev  # Launch in development mode
+pnpm desktop start  # Launch in development mode
 ```
 
 - Navigate to the feature
@@ -2137,7 +2139,7 @@ Before writing code, decide:
 | **speculosApp** | `Currency.BTC.speculosApp`, etc. | Which blockchain does the test interact with? |
 | **cliCommands** | `liveDataCommand(account)` or empty | Does the test need pre-populated account data? |
 | **featureFlags** | Specific overrides or none | Does the test need non-default features? |
-| **teamOwner** | `Team.WALLET_XP`, `Team.QAA`, etc. | Which team owns this feature? |
+| **teamOwner** | `Team.WALLET_XP`, `Team.WALLET_XP`, etc. | Which team owns this feature? |
 | **Tags** | Device + currency + family + scope | Which devices and currencies does this test support? |
 
 ### 4.7.6 Step 6: Write the Test
@@ -2153,7 +2155,7 @@ import { getDescription } from "tests/utils/customJsonReporter";
 
 test.describe("YOUR FEATURE", () => {
   test.use({
-    teamOwner: Team.QAA,
+    teamOwner: Team.WALLET_XP,
     userdata: "skip-onboarding-with-last-seen-device",
     speculosApp: Currency.BTC.speculosApp,
   });
@@ -2319,7 +2321,7 @@ This command will ask for your ticket URL, description, change type, scope, and 
 <button class="quiz-choice" data-value="C">C) The browser DevTools (Elements panel) in the running Electron app</button>
 <button class="quiz-choice" data-value="D">D) The Speculos REST API</button>
 </div>
-<p class="quiz-explanation">Launch the Ledger Live Desktop app (<code>pnpm desktop dev</code>), open DevTools with <code>Cmd+Shift+I</code>, and use the Elements panel to inspect DOM elements and find their <code>data-testid</code> attributes.</p>
+<p class="quiz-explanation">Launch the Ledger Live Desktop app (<code>pnpm desktop start</code>), open DevTools with <code>Cmd+Shift+I</code>, and use the Elements panel to inspect DOM elements and find their <code>data-testid</code> attributes.</p>
 </div>
 
 <div class="quiz-question" data-correct="B">
@@ -2342,7 +2344,7 @@ This command will ask for your ticket URL, description, change type, scope, and 
 ## Real Ticket Walkthrough -- QAA-1139 (Add Account BTC)
 
 <div class="chapter-intro">
-This is your capstone chapter. Everything you learned in Chapters 22-28 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
+This is your capstone chapter. Everything you learned in Chapters 4.1-4.7 converges here on a real Jira ticket: <strong>QAA-1139 — Automate Add Account (first time, BTC) test on Desktop</strong>. We will walk through the entire process step by step, following the exact workflow you will use every day: understand the ticket → create a branch → run the test in isolation → implement → rerun → commit → create PR → mark ready.
 </div>
 
 ### 4.8.1 Understanding the Ticket
@@ -2400,7 +2402,7 @@ The existing `add.account.spec.ts` already tests adding BTC:
 ```typescript
 const currencies = [
   { currency: Currency.BTC, xrayTicket: "B2CQA-2499, B2CQA-2644, B2CQA-2672, B2CQA-2073" },
-  // ... 17 more currencies
+  // ... 16 more currencies
 ];
 
 for (const currency of currencies) {
@@ -2450,7 +2452,7 @@ docker info
 export MOCK=0
 export COINAPPS="/path/to/coin-apps"        # your local coin-apps clone
 export SEED="your 24-word test seed"
-export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:master"
+export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:latest"
 export SPECULOS_DEVICE="nanoSP"
 
 # Build the desktop app for testing
@@ -3459,7 +3461,7 @@ test.describe("Broken Test", () => {
 5. Verifies the "Transaction sent" toaster appears
 6. Verifies the transaction appears in the operation list
 
-**No hints.** Use everything you learned in Chapters 22-30. Refer to:
+**No hints.** Use everything you learned in Chapters 4.1-4.9. Refer to:
 - `send.tx.spec.ts` for existing send test patterns
 - `send.modal.ts` for page object methods
 - `speculos.page.ts` for device signing
@@ -3480,7 +3482,7 @@ Part 4 took you from the desktop suite's architecture (PageHolder, Component, Ap
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 4 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions · 80% to pass · Covers Ch 4.1-3.11</p>
+<p class="quiz-subtitle">10 questions · 80% to pass · Covers Ch 4.1-4.11</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="A">

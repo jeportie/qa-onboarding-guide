@@ -210,7 +210,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | Technology | Purpose | Docs |
 |-----------|---------|------|
 | **pnpm** | Fast, disk-efficient package manager | [pnpm.io](https://pnpm.io/) |
-| **Turborepo** | Monorepo build orchestration + caching | [turbo.build](https://turbo.build/) |
+| **Nx** | Monorepo build orchestration + caching | [nx.dev](https://nx.dev/) |
 | **Rspack** | Rust-based bundler for Desktop (replaces webpack) | [rspack.dev](https://rspack.dev/) |
 | **Metro** | JavaScript bundler for React Native (Mobile) | [metrobundler.dev](https://metrobundler.dev/) |
 | **ESLint** + **Oxlint** | Linting (Oxlint in Rust for speed, ESLint for depth) | [eslint.org](https://eslint.org/) / [oxc.rs](https://oxc.rs/) |
@@ -268,7 +268,7 @@ This is a large stack, but you do not need to master everything at once. As a QA
 <button class="quiz-choice" data-value="C">C) Kotlin</button>
 <button class="quiz-choice" data-value="D">D) Swift</button>
 </div>
-<p class="quiz-explanation">TypeScript 5.x is used throughout: desktop app, mobile app, shared libraries, and tests.</p>
+<p class="quiz-explanation">TypeScript 6.x is used throughout: desktop app, mobile app, shared libraries, and tests.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
@@ -341,7 +341,7 @@ Playwright launches the Electron app and controls the Chromium renderer process.
 **3. Mobile E2E (Detox)**
 Detox launches the React Native app on an iOS Simulator or Android Emulator. A **WebSocket bridge** enables communication between the test process and the running app for state injection and mock device actions. See Chapters 9 and 15 for details.
 
-**4. e2e/common/**
+**4. libs/ledger-live-common/src/e2e/**
 Shared infrastructure used by both desktop and mobile tests. Contains the Speculos transport layer, device model definitions, coin app configurations, and APDU helpers. This ensures both platforms use identical device emulation logic.
 
 **5. Speculos Emulator**
@@ -426,14 +426,14 @@ This architecture is what makes Ledger Live E2E testing unique. Every test invol
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> Where does `e2e/common/` fit in the architecture?</p>
+<p><strong>Q3.</strong> Where does `libs/ledger-live-common/src/e2e/` fit in the architecture?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) It contains only desktop tests</button>
 <button class="quiz-choice" data-value="B">B) It is the Speculos Docker image</button>
 <button class="quiz-choice" data-value="C">C) It contains the Allure reporter</button>
 <button class="quiz-choice" data-value="D">D) It is shared infrastructure (Speculos transport, device models, coin configs) used by both desktop and mobile tests</button>
 </div>
-<p class="quiz-explanation">The e2e/common/ layer ensures both Playwright (desktop) and Detox (mobile) tests use identical device emulation logic, preventing platform-specific inconsistencies.</p>
+<p class="quiz-explanation">The libs/ledger-live-common/src/e2e/ layer ensures both Playwright (desktop) and Detox (mobile) tests use identical device emulation logic, preventing platform-specific inconsistencies.</p>
 </div>
 
 <div class="quiz-question" data-correct="A">
@@ -488,8 +488,7 @@ ledger-live/
 ├── e2e/
 │   ├── desktop/                 # Playwright E2E tests for LLD
 │   ├── mobile/                  # Detox E2E tests for LLM
-│   └── common/                  # Shared E2E infrastructure
-├── domain/
+│   # (Shared E2E utilities live in libs/ledger-live-common/src/e2e/)
 │   ├── entity/                  # Domain entity packages
 │   └── api/                     # Domain API packages (RTK Query)
 ├── shared/                      # Shared utility packages
@@ -532,10 +531,7 @@ e2e/
 │   ├── jest.environment.ts          # Allure reporter wiring
 │   ├── package.json                 # Nx/Turbo workspace (`e2e-mobile`)
 │   └── project.json                 # Nx project descriptor
-└── common/                          # Shared E2E infrastructure
-    ├── speculos/                    # Speculos transport and management
-    ├── models/                      # Device model definitions
-    └── utils/                       # Shared utilities
+# (Shared E2E utilities live in libs/ledger-live-common/src/e2e/)
 ```
 
 ### 5.3 CODEOWNERS and Team Ownership
@@ -545,11 +541,11 @@ The `CODEOWNERS` file maps directories to GitHub teams. When you open a PR, the 
 | Path Pattern | Team | Responsibility |
 |-------------|------|---------------|
 | `e2e/` | `@ledgerhq/qaa` | E2E test infrastructure (your team) |
-| `apps/ledger-live-desktop/` | `@ledgerhq/live-desktop` | Desktop app |
-| `apps/ledger-live-mobile/` | `@ledgerhq/live-mobile` | Mobile app |
-| `libs/ledger-live-common/` | `@ledgerhq/live-common` | Shared business logic |
-| `libs/coin-modules/` | `@ledgerhq/coin-integration` | Coin-specific logic |
-| `libs/device-core/` | `@ledgerhq/device-management-kit` | Device communication |
+| `apps/ledger-live-desktop/` | `@ledgerhq/platform` | Desktop app |
+| `apps/ledger-live-mobile/` | `@ledgerhq/platform` | Mobile app |
+| `libs/ledger-live-common/` | `@ledgerhq/platform` | Shared business logic |
+| `libs/coin-modules/` | `@ledgerhq/platform` | Coin-specific logic |
+| `libs/device-core/` | `@ledgerhq/live-devices` | Device communication |
 
 ### 5.4 Team-Split Convention
 
@@ -558,13 +554,13 @@ When multiple teams contribute to the same directory, it is split into team-spec
 ```
 [feature]/
   index.ts                 # Re-exports only
-  team-coin-integration/   # Files owned by @ledgerhq/coin-integration
+  team-coin-integration/   # Files owned by @ledgerhq/platform
     coin_bitcoin.ts
-  team-live-desktop/       # Files owned by @ledgerhq/live-desktop
+  team-live-desktop/       # Files owned by @ledgerhq/platform
     settings.ts
 ```
 
-This keeps CODEOWNERS clear: `**/team-coin-integration/` is owned by `@ledgerhq/coin-integration`.
+This keeps CODEOWNERS clear: `**/team-coin-integration/` is owned by `@ledgerhq/platform`.
 
 <div class="chapter-outro">
 Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e/` is your home, `libs/ledger-live-common/` contains shared logic you will import, and `apps/` contains the applications you test. Use `pnpm --filter` to target specific packages.
@@ -610,7 +606,7 @@ Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> What does the `e2e/common/` directory contain?</p>
+<p><strong>Q3.</strong> What does the `libs/ledger-live-common/src/e2e/` directory contain?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) Common React components shared between desktop and mobile</button>
 <button class="quiz-choice" data-value="B">B) The Speculos Docker image</button>
@@ -634,10 +630,10 @@ Navigating a monorepo with 100+ packages takes practice. The key shortcuts: `e2e
 <div class="quiz-question" data-correct="B">
 <p><strong>Q5.</strong> Which team owns the `e2e/` directory?</p>
 <div class="quiz-choices">
-<button class="quiz-choice" data-value="A">A) @ledgerhq/live-desktop</button>
+<button class="quiz-choice" data-value="A">A) @ledgerhq/platform</button>
 <button class="quiz-choice" data-value="B">B) @ledgerhq/qaa</button>
-<button class="quiz-choice" data-value="C">C) @ledgerhq/coin-integration</button>
-<button class="quiz-choice" data-value="D">D) @ledgerhq/live-common</button>
+<button class="quiz-choice" data-value="C">C) @ledgerhq/platform</button>
+<button class="quiz-choice" data-value="D">D) @ledgerhq/platform</button>
 </div>
 <p class="quiz-explanation">The QA & Automation team (@ledgerhq/qaa) owns the E2E test infrastructure, including the entire e2e/ directory.</p>
 </div>
@@ -692,7 +688,7 @@ Set these in your shell profile (`~/.zshrc` or `~/.bash_profile`):
 export MOCK=0                                           # Use real Speculos, not mocks
 export COINAPPS="/Users/yourname/coin-apps"             # Path to coin-apps repository
 export SEED="your 24 word recovery phrase here"         # Test seed (get from QAA team)
-export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:master"
+export SPECULOS_IMAGE_TAG="ghcr.io/ledgerhq/speculos:latest"
 export SPECULOS_DEVICE="nanoSP"                         # Device model to emulate
 export SPECULOS_FIRMWARE_VERSION="1.1.1"                # Firmware version (use prod version)
 ```
@@ -705,7 +701,7 @@ export SPECULOS_FIRMWARE_VERSION="1.1.1"                # Firmware version (use 
 ### 6.4 Pull Speculos Docker Image
 
 ```bash
-docker pull ghcr.io/ledgerhq/speculos:master
+docker pull ghcr.io/ledgerhq/speculos:latest
 ```
 
 Verify it is available:
@@ -831,7 +827,7 @@ If your first test runs — even if it fails — your setup is correct. Most fai
 </div>
 
 <div class="quiz-question" data-correct="D">
-<p><strong>Q3.</strong> What is the purpose of the `e2e/common/` directory?</p>
+<p><strong>Q3.</strong> What is the purpose of the `libs/ledger-live-common/src/e2e/` directory?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) It contains the React component library</button>
 <button class="quiz-choice" data-value="B">B) It stores shared npm packages</button>
@@ -886,14 +882,14 @@ If your first test runs — even if it fails — your setup is correct. Most fai
 </div>
 
 <div class="quiz-question" data-correct="A">
-<p><strong>Q8.</strong> What is Turborepo's role in the monorepo?</p>
+<p><strong>Q8.</strong> What is Nx's role in the monorepo?</p>
 <div class="quiz-choices">
 <button class="quiz-choice" data-value="A">A) It orchestrates build tasks across 100+ packages with caching and parallelism</button>
 <button class="quiz-choice" data-value="B">B) It replaces pnpm as the package manager</button>
 <button class="quiz-choice" data-value="C">C) It runs E2E tests in parallel</button>
 <button class="quiz-choice" data-value="D">D) It manages Git branches</button>
 </div>
-<p class="quiz-explanation">Turborepo understands the dependency graph between packages and runs builds in the correct order, with caching to skip unchanged packages.</p>
+<p class="quiz-explanation">Nx understands the dependency graph between packages and runs builds in the correct order, with caching to skip unchanged packages. The `build:lld` script in `package.json` uses `nx run-many -t build -p ledger-live-desktop`.</p>
 </div>
 
 <div class="quiz-question" data-correct="C">
