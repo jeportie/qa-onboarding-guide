@@ -623,11 +623,13 @@ If these terms feel natural to you now, the chapter has done its job. If any fee
 #### Where to go next
 
 - **Part 1** — Ledger Live foundations: product, tech stack, E2E architecture, monorepo, and your dev environment.
+- **Part 2** — Ledger Wallet Features: Send/Receive, Portfolio, Stake, Swap, Buy/Sell, Device Management, Discover.
 - **Part 3 Chapter 3.3** — Speculos deep dive.
 - **Part 4** — Desktop E2E end-to-end: Playwright from zero, Electron, codebase, daily workflow, and two real ticket walkthroughs.
 - **Part 5** — Mobile E2E end-to-end: React Native primer, Detox, mobile codebase, and the QAA-702 walkthrough.
-- **Part 6** — The Swap Live App.
-- **Part 7** — Mastery: test strategy, cross-platform debugging, CI/CD, AI agents.
+- **Part 6** — CLI Automation: apps/cli, the five-layer integration, Speculos lifecycle, broadcast discipline, QAA-615 walkthrough.
+- **Part 7** — The Swap Live App.
+- **Part 8** — Mastery: test strategy, cross-platform debugging, CI/CD, AI agents.
 
 #### Resources — Chapter 0.2
 

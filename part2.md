@@ -960,11 +960,11 @@ What you have just learned will resurface across the rest of the guide in concre
 
 | Where | What |
 | --- | --- |
-| **Part 4 — Desktop E2E** | The send-tx, new-send-flow, and receive-address spec families discussed in 2.1.11 are the canonical examples used to teach the desktop POM pattern, fixture / userdata system, and the Speculos device-action driver. Chapters 3.4 (POMs), 3.5 (fixtures), 3.7 (Speculos) all use Send/Receive as the worked example. |
+| **Part 4 — Desktop E2E** | The send-tx, new-send-flow, and receive-address spec families discussed in 2.1.11 are the canonical examples used to teach the desktop POM pattern, fixture / userdata system, and the Speculos device-action driver. Chapter 4.4 (Playwright Advanced — Fixtures, POM, Decorators) uses Send/Receive as a worked example, and Part 3 Ch 3.3 (Speculos) does the same on the device-emulation side. |
 | **Part 5 — Mobile E2E** | `e2e/mobile/specs/send/sendETH.spec.ts` and the associated driver `send.ts` are the worked examples in Ch 5.2 ("Writing your first mobile E2E test") and Ch 5.3 ("Translation table"). Ch 5.7 covers the mobile Send POM in detail. |
 | **Part 6 — CLI helpers** | The `liveDataCommand`, `liveDataWithAddressCommand`, `liveDataWithRecipientAddressCommand`, and `getAddressCommand` helpers — which seed Speculos with funded accounts and pre-resolve recipient addresses for send tests — are documented in Ch 6.4. The Send specs at all three levels (desktop, mobile, common) consume these helpers. |
 | **Part 7 — Swap deep dive** | Swap is conceptually a Send with a derived recipient. The Swap drawer composes `bridge.signOperation` and `bridge.broadcast` exactly as Send does, but the recipient address is resolved by the swap provider rather than typed by the user. |
-| **Part 8 — Buy/Sell** | Buy uses Receive plumbing (the address shown to the partner provider is the next fresh address from the same `bridge.receive(account, { verify: true, deviceId })` call). Sell uses Send plumbing. |
+| **Ch 2.5 — Buy/Sell** | Buy uses Receive plumbing (the address shown to the partner provider is the next fresh address from the same `bridge.receive(account, { verify: true, deviceId })` call). Sell uses Send plumbing. |
 
 The bridge interface in 2.1.9 is also the foundation for Stake (Chapter 2.3) and Edit Transaction (the cancel/replace flow that lives under `editTransaction/` in EVM and Bitcoin).
 
@@ -2733,11 +2733,11 @@ Covers native delegation across all supported Cosmos-family and other chains.
 |---|---|
 | Desktop E2E architecture — fixtures, `WebPlatformPlayer` frame helpers, `featureFlagUtils.ts` | Part 4 — Desktop E2E |
 | Mobile E2E architecture — Detox WebView interactions, `waitForCurrentWebviewUrlToContain`, bridge server | Part 5 — Mobile E2E Architecture, Chapter 5.1 |
-| Swap flow (also PTX-team owned, same Live App embedding pattern) | Chapter 2.4 (overview); Part 8 (Swap deep dive) |
+| Swap flow (also PTX-team owned, same Live App embedding pattern) | Chapter 2.4 (overview); Part 7 (Swap deep dive) |
 | Live App / `WebPlatformPlayer` iframe mechanics and manifest resolution | Chapter 2.7 — Discover / Web3 |
-| Firebase remote config, `useFeature`, `OptionalFeatureMap`, flag overrides in tests | Part 4 — Feature Flags section |
-| CLI test helpers — `liveDataCommand`, `liveDataWithAddressCommand` | Part 7 — CLI |
-| Allure reporting — `addTmsLink`, `addBugLink`, `getDescription`, `$TmsLink`, `$Tag` | Part 4 — Reporting |
+| Firebase remote config, `useFeature`, `OptionalFeatureMap`, flag overrides in tests | Part 3 Ch 3.4 — Firebase & Feature Flags |
+| CLI test helpers — `liveDataCommand`, `liveDataWithAddressCommand` | Part 6 — CLI |
+| Allure reporting — `addTmsLink`, `addBugLink`, `getDescription`, `$TmsLink`, `$Tag` | Part 3 Ch 3.5 — Allure Reporting & Xray |
 | Modular Drawer feature — `lldModularDrawer` flag, `ModularDrawerLocation` enum | Chapter 2.7 and Part 4 |
 
 ---
@@ -2817,7 +2817,7 @@ You now have a complete map of Ledger Live's stake and earn feature — from the
 ## Swap (Overview)
 
 <div class="chapter-intro">
-Swap is the highest-complexity feature in Ledger Wallet. It spans two codebases, seven providers, two signing paradigms, and the largest Page Object Model in the desktop test suite. This chapter gives you the product-level mental model you need before reading the E2E code: what Swap does, where it lives in the app, how the user flow unfolds step by step, and which test artefacts cover it. The deep technical dive — Live App architecture, Wallet API, manifest wiring, deployment pipeline — lives in Part 7 (Swap deep dive, formerly Part 7 and renumbered Part 8 after the guide's index was finalized). Cross-references to that part are distributed throughout this chapter; follow them when you need to go deeper on any sub-topic.
+Swap is the highest-complexity feature in Ledger Wallet. It spans two codebases, seven providers, two signing paradigms, and the largest Page Object Model in the desktop test suite. This chapter gives you the product-level mental model you need before reading the E2E code: what Swap does, where it lives in the app, how the user flow unfolds step by step, and which test artefacts cover it. The deep technical dive — Live App architecture, Wallet API, manifest wiring, deployment pipeline — lives in Part 7 (Swap Live App). Cross-references to that part are distributed throughout this chapter; follow them when you need to go deeper on any sub-topic.
 </div>
 
 ---
@@ -3136,7 +3136,7 @@ The Swap Live App lives in `swap-live-app` (a separate GitHub repository under `
 3. The swap backend (`swap.ledger.com`) — infrastructure team territory
 4. The feature flag or manifest service that controls which URL the webview loads
 
-Part 7 of this guide (formerly the current Part 7, renumbered Part 8 after the guide index was finalized) covers all four of these layers in detail — Live App architecture, manifest schema, Wallet API method reference, feature flag wiring, and the E2E environment switching mechanism.
+Part 7 of this guide (Swap Live App) covers all four of these layers in detail — Live App architecture, manifest schema, Wallet API method reference, feature flag wiring, and the E2E environment switching mechanism.
 
 ---
 
@@ -3255,7 +3255,7 @@ The `goAndWaitForSwapToBeReady()` helper retries the webview attachment up to 90
 
 | Topic | Where to go |
 |---|---|
-| Live App architecture — manifest, Wallet API, webview boot sequence, manifest environments | Part 7 (Swap Deep Dive, formerly Part 8 after renumber) — start at Ch 7.1 |
+| Live App architecture — manifest, Wallet API, webview boot sequence, manifest environments | Part 7 (Swap Live App) — start at Ch 7.1 |
 | ERC-20 storage model — why allowances persist across CI runs | Part 6 Ch 6.2 |
 | Five-layer CLI integration — POM method through to `node apps/cli/bin/index.js` | Part 6 Ch 6.4 |
 | QAA-615 walkthrough — canonical revoke implementation, `revokeTokenApproval` POM method | Part 6 Ch 6.8 |
@@ -3885,7 +3885,7 @@ in depth, see **Part 7** (Live Apps general).
 |---|---|
 | Tribe and team ownership (PTX tribe) | Part 0, Ch 0.3 |
 | Wallet API in depth | Part 7 — Live Apps general |
-| Swap (closely related; same WebPTXPlayer) | Chapter 2.4 (overview) and Part 8 (deep dive) |
+| Swap (closely related; same WebPTXPlayer) | Chapter 2.4 (overview) and Part 7 (deep dive) |
 | Send flow (device signing, relevant to Sell) | Chapter 2.1 |
 | Live App manifest provider and RemoteLiveAppProvider | Part 7 — Live Apps general |
 | E2E fixture format (`BuySell`, `Fiat`, `AccountType`) | `libs/ledger-live-common/src/e2e/models/BuySell.ts`, `e2e/enum/Account.ts` |
@@ -5221,7 +5221,7 @@ The mobile POMs:
 
 `discover.page.ts` is small (~70 lines): it has a hard-coded list of well-known Live Apps (`MoonPay`, `Ramp`, `Kiln`, `Lido`, `1inch`, `Zerion`, `Transak`), helpers to open Discover via deeplink (`discover/<appName>`), and search-bar interactions (`typeInCatalogSearchBar`, `goBackFromCatalogSearch`). It does not have any wallet-api-aware methods; its job is purely catalog navigation.
 
-`swapLiveApp.ts` is bigger because it has to drive the webview content: source/target selection, amount entry, provider choice, the device confirmation overlay, the success state. It is also one of the most-touched POMs in the mobile suite because Swap is exercised constantly (see Ch 2.4 / Part 8 for the deep dive).
+`swapLiveApp.ts` is bigger because it has to drive the webview content: source/target selection, amount entry, provider choice, the device confirmation overlay, the success state. It is also one of the most-touched POMs in the mobile suite because Swap is exercised constantly (see Ch 2.4 / Part 7 for the deep dive).
 
 A simple desktop POM for a hypothetical "MyLiveApp":
 
@@ -5322,19 +5322,19 @@ For QA, this is the "isolate the Live App from the wallet" test: if the local Li
 - **Ch 2.1 (Send and Receive)** — the Wallet API's `transaction.sign` and `transaction.signAndBroadcast` ultimately go through the same coin-module bridges that Send/Receive uses. There is no separate "Live App send"; a Live App-driven transaction is byte-for-byte identical at the device level to a native-flow transaction.
 - **Ch 2.2 (Portfolio)** — `account.list` and `account.receive` are the read paths Live Apps use to populate their account dropdowns. The same accounts you see in Portfolio are the ones a Live App sees through `account.list`.
 - **Ch 2.3 (Stake)** — Lido staking inside Ledger Wallet is a `walletApp`-type Live App; the in-wallet Earn dashboard combines native staking flows for some chains and Live App stakers for others.
-- **Ch 2.4 (Swap)** — the Swap UI inside Ledger Wallet *is* the swap-live-app, a `walletApp`-type Live App. Everything in this chapter applies to it. The deep-dive on swap-specific frameworks (Centralized Native, DEX-in-CEX, Native DEX) lives in current Part 7, which becomes Part 8.
+- **Ch 2.4 (Swap)** — the Swap UI inside Ledger Wallet *is* the swap-live-app, a `walletApp`-type Live App. Everything in this chapter applies to it. The deep-dive on swap-specific frameworks (Centralized Native, DEX-in-CEX, Native DEX) lives in Part 7.
 - **Ch 2.5 (Buy and Sell)** — Buy/Sell is the `buy-sell-ui` Live App, plus partner-specific webBrowser Live Apps for MoonPay / Ramp / Coinbase Pay etc.
 - **Ch 2.6 (Device Management)** — `device.transport`, `device.select` and `device.exchange` Wallet API methods are the same machinery used by My Ledger; advanced Live Apps such as Recover use them.
 - **Part 4 Ch 4.x (Desktop E2E)** — the desktop POM hierarchy (`AppPage` → `WebViewAppPage` → per-Live-App pages) and the swap.page.ts (the largest POM) are the Live App testing surface.
 - **Part 5 Ch 5.1 (Mobile E2E architecture)** — the WebSocket bridge that imports accounts and overrides feature flags is exactly the bridge Discover/Live App specs use to set up state.
-- **Part 8 (Swap deep dive)** — for the full swap-live-app architecture, the Exchange device app, the partner integration frameworks, and the end-to-end Swap QA matrix.
+- **Part 7 (Swap Live App)** — for the full swap-live-app architecture, the Exchange device app, the partner integration frameworks, and the end-to-end Swap QA matrix.
 
 ### 2.7.21 What This Chapter Did Not Cover
 
 A few topics are deliberately deferred:
 
-- **The Exchange SDK** (`github.com/LedgerHQ/exchange-sdk`) — the higher-level helper library Swap/Buy/Sell Live Apps use on top of the Wallet API. It deserves its own treatment in the Swap deep-dive (Part 8).
-- **The Exchange device app** — the firmware-side app that signs the swap nonce passed via `exchange.start`. Also covered in Part 8.
+- **The Exchange SDK** (`github.com/LedgerHQ/exchange-sdk`) — the higher-level helper library Swap/Buy/Sell Live Apps use on top of the Wallet API. It deserves its own treatment in the Swap deep-dive (Part 7).
+- **The Exchange device app** — the firmware-side app that signs the swap nonce passed via `exchange.start`. Also covered in Part 7.
 - **The wallet-api repo's internal architecture** — the `wallet-api-core`, `wallet-api-server`, `wallet-api-client` packages and how they relate. Worth a focused appendix entry but not in this chapter's scope.
 - **dApp-specific manifests for EVM Live Apps** (`dappUrl`, `nanoApp`, `networks` params) — covered briefly here but with full depth in the Aave / Curve / Uniswap onboarding playbooks (PTX team).
 - **Localisation of Live Apps** — Manifest V2 dropped translatable strings; localisation now lives in the Live App itself or in the host's i18n bundle.
@@ -5583,7 +5583,7 @@ Firmware updates orchestrate three components in order — MCU, SE BOLOS OS, use
 
 Discover hosts everything else, classified into <code>walletApp</code> (Wallet-API integrations), <code>dapp</code> (WalletConnect-bridged third-party frontends), and <code>webBrowser</code> (plain webviews with no wallet capabilities). The right POM bucket follows the category, and picking the wrong one tends to surface as flaky tests rather than obvious failures.
 
-<strong>Next:</strong> Part 4 introduces the shared tooling that every test in this guide leans on — the monorepo conventions, the <code>pnpm</code> and <code>turbo</code> commands, the libraries that desktop, mobile, and the CLI all depend on, and the cross-cutting helpers (logging, feature flags, environment files) that show up in every spec. Part 4 is the connective tissue. Once you have it, Part 5's desktop E2E and Part 6's mobile E2E will read as variations on a single toolchain rather than two unrelated stacks, and Part 7's CLI work will fit alongside both as another consumer of the same libraries.
+<strong>Next:</strong> Part 3 introduces the shared tooling that every test in this guide leans on — the monorepo conventions, the <code>pnpm</code> and <code>turbo</code> commands, the libraries that desktop, mobile, and the CLI all depend on, and the cross-cutting helpers (logging, feature flags, environment files) that show up in every spec. Part 3 is the connective tissue. Once you have it, Part 4's desktop E2E and Part 5's mobile E2E will read as variations on a single toolchain rather than two unrelated stacks, and Part 6's CLI work will fit alongside both as another consumer of the same libraries.
 </div>
 
 

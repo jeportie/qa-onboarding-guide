@@ -239,7 +239,7 @@ Ledger Live is built on a modern JavaScript/TypeScript stack with specific choic
 | **Gitleaks** | Secret detection in commits | [gitleaks.io](https://gitleaks.io/) |
 
 <div class="chapter-outro">
-This is a large stack, but you do not need to master everything at once. As a QA engineer, your primary tools are Playwright, Detox, Speculos, Jest, and Allure. Part 6 provides crash courses for every technology listed here.
+This is a large stack, but you do not need to master everything at once. As a QA engineer, your primary tools are Playwright, Detox, Speculos, Jest, and Allure. Part 3 covers the cross-cutting tools (Speculos, Allure, feature flags); Part 4 walks Playwright zero-to-advanced for desktop; Part 5 does the same for Detox on mobile.
 </div>
 
 <div class="resource-box">

@@ -5626,7 +5626,7 @@ pnpm test:ios:debug -- --testPathPattern "swapExportHistoryOperations"
 
 Expected output: **1 test passing**, the SOL → native-ETH export. The test takes about 45–90 seconds end-to-end (Speculos boot, app launch, userdata hydration, navigation, CSV write, CSV read, teardown).
 
-If this run is red, **stop**. It means either your environment is broken (Speculos not running, wrong Detox build, stale metro cache) or the step 1 spec has started failing for unrelated reasons. Chapters 4.4 (Toolchain) and 4.8 (Running & Debugging) walk through the recovery paths. Fix the environment first; resume QAA-702 once the baseline is green.
+If this run is red, **stop**. It means either your environment is broken (Speculos not running, wrong Detox build, stale metro cache) or the step 1 spec has started failing for unrelated reasons. Chapters 5.4 (Toolchain) and 5.8 (Running & Debugging) walk through the recovery paths. Fix the environment first; resume QAA-702 once the baseline is green.
 
 ### 5.10.7 Phase 1 — Check if the Pair Exists in the Current Fixture
 
@@ -6266,13 +6266,13 @@ The existing pnpm command rebuilds and rebooks every time; `--reuse` is up to 30
 
 ## Part 5 Final Assessment
 
-You have walked the full mobile E2E stack: React Native primitives, the iOS/Android toolchain, Detox's matcher-action-expectation DSL, the WebSocket bridge that layers Redux and device-event control on top of Detox, the POM hub, the sharding algorithm, and one real ticket (QAA-702) shipped end to end. This assessment samples the load-bearing ideas across Chapters 4.1-4.11. Eighty percent to pass. If you miss a question, jump back to the referenced chapter — the answer is always grounded in a concrete file or command, not general knowledge.
+You have walked the full mobile E2E stack: React Native primitives, the iOS/Android toolchain, Detox's matcher-action-expectation DSL, the WebSocket bridge that layers Redux and device-event control on top of Detox, the POM hub, the sharding algorithm, and one real ticket (QAA-702) shipped end to end. This assessment samples the load-bearing ideas across Chapters 5.1-5.11. Eighty percent to pass. If you miss a question, jump back to the referenced chapter — the answer is always grounded in a concrete file or command, not general knowledge.
 
 <a id="part-4-final-assessment"></a>
 
 <div class="quiz-container" data-pass-threshold="80">
 <h3>Part 5 Final Assessment</h3>
-<p class="quiz-subtitle">10 questions · 80% to pass · Covers Chapters 4.1-4.11</p>
+<p class="quiz-subtitle">10 questions · 80% to pass · Covers Chapters 5.1-5.11</p>
 <div class="quiz-progress"><div class="quiz-progress-bar"></div></div>
 
 <div class="quiz-question" data-correct="C">
