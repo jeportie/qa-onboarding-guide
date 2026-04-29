@@ -4307,6 +4307,304 @@ The diagnostic playbook in 6.9.9 is the artifact you'll reach for most often in 
 
 ---
 
+## CLI Commands Cookbook
+
+<a id="cli-commands-cookbook"></a>
+
+<div class="chapter-intro">
+This chapter is the copy-paste reference. The earlier chapters explained <em>why</em> the four QAA-canonical commands exist and how the five-layer wrappers consume them. This one collects the raw <code>pnpm run:cli ...</code> invocations you will reach for during a debug session, sorted by the question you're trying to answer. Treat it as a kitchen book, not a tutorial — every entry assumes you've read 6.1-6.6 and know the trade-offs. The recipes were factored out of real on-call sessions: rebuild native deps when the device disappears, escape mock mode when accounts come back as <code>mock:1:...</code>, find the CAL token id you can never remember, drive an approve/revoke against a live Stax over USB, generate a userdata fixture without a device, and so on.
+</div>
+
+### 6.10.1 Setup and meta
+
+```bash
+# install
+pnpm i
+
+# build the CLI once (produces apps/cli/lib/cli.js consumed by the bin)
+pnpm build:cli
+
+# rebuild on every save during development
+pnpm dev:cli
+
+# run an arbitrary CLI command
+pnpm run:cli <command> [...flags]
+
+# rebuild native device deps (node-hid, usb) — required after a Node bump
+# or when `deviceInfo` reports the device but every transport call hangs
+pnpm build:device-deps
+```
+
+The `pnpm run:cli` script just invokes `apps/cli/bin/index.js`, which loads `apps/cli/lib/cli.js`. If you forgot to build, you'll see a stale dispatch — `pnpm build:cli` then re-run.
+
+### 6.10.2 Environment hygiene (read this before anything else fails)
+
+```bash
+# fail-loud audit before any device-touching command
+env | grep -E '^(MOCK|DEVICE_PROXY_URL|SPECULOS_|CI)='
+
+# the canonical "I want a real device" reset
+unset MOCK DEVICE_PROXY_URL SPECULOS_API_PORT SPECULOS_APDU_PORT
+```
+
+Why this comes first: `MOCK` is a *string* env. `getEnv("MOCK")` returns `"0"` for `MOCK=0`, and `if ("0")` is truthy in JavaScript, so the bridge silently swaps in the mock implementation. The tell is account ids of the form `mock:1:<family>:MOCK_<family>_0` and a "successful" send with no device prompt. The env var declaration in `libs/env/src/env.ts:630-633` even warns: *"Avoid falsy values."*
+
+| Env var | Effect |
+|---|---|
+| `MOCK` | any non-empty value enables mock bridges; **leave unset** for real-device runs |
+| `DEVICE_PROXY_URL` | route HID through a remote proxy (`createTransportHttp`) — overrides USB |
+| `SPECULOS_API_PORT` | use Speculos HTTP transport; **unregisters HID** so a real device is invisible |
+| `SPECULOS_APDU_PORT` (+ `SPECULOS_BUTTON_PORT`, `SPECULOS_HOST`) | same for the APDU/TCP variant |
+| `DISABLE_TRANSACTION_BROADCAST` | sign-only mode (no RPC push); see 6.6 for the discipline |
+| `CI` | suppresses HID auto-registration in the setup file |
+
+### 6.10.3 Device introspection
+
+```bash
+# device + firmware identity (must be on dashboard, not in an app)
+pnpm run:cli deviceInfo
+
+# list installed apps on the device
+pnpm run:cli listApps
+
+# list apps available for Speculos (requires COINAPPS env var)
+pnpm run:cli speculosList
+
+# read & verify the address on-device for a given currency
+pnpm run:cli getAddress --currency ethereum --path "44'/60'/0'/0/0" --verify
+
+# print the derivation schemes for *every* supported currency (no flags)
+pnpm run:cli derivation
+```
+
+`DeviceOnDashboardExpected` from `deviceInfo` is not a failure — it just means an app is already open. That's exactly the state `send` and `signMessage` want; switch to dashboard only for firmware/app management commands.
+
+### 6.10.4 Account discovery and the `--id` format
+
+```bash
+# scan with the device (slow) — returns one real account
+pnpm run:cli sync --currency ethereum --index 0 --length 1
+
+# from a saved Live userdata file (no device required)
+pnpm run:cli sync --appjsonFile ~/Library/Application\ Support/Ledger\ Live/app.json \
+  --currency ethereum --index 0 --length 1
+
+# paginate operations to keep the output manageable
+pnpm run:cli sync --currency ethereum --index 0 --paginateOperations 20
+```
+
+The id printed at the end of every account block is what subsequent commands consume:
+
+```
+js:2:ethereum:0xE32ad14b89F334dF1CD1036c2a0E39A19248b75a:
+└─ <type>:<version>:<currencyId>:<xpubOrAddress>:<derivationMode>
+```
+
+The trailing `:` is the empty default derivation mode and is significant — keep it. Single-quote the id when passing it on the shell because of the colons.
+
+### 6.10.5 Send native and ERC-20
+
+```bash
+# native ETH send
+pnpm run:cli send \
+  --id 'js:2:ethereum:0xE32ad14b89F334dF1CD1036c2a0E39A19248b75a:' \
+  --recipient 0xRECIPIENT \
+  --amount 0.001 \
+  --wait-confirmation
+
+# ERC-20 transfer (uses the token sub-account; --token resolves it via CAL)
+pnpm run:cli send \
+  --id 'js:2:ethereum:0xE32ad14b89F334dF1CD1036c2a0E39A19248b75a:' \
+  --token ethereum/erc20/usd__coin \
+  --recipient 0xRECIPIENT \
+  --amount 1.5
+
+# send-to-self for sanity checks (no recipient guessing)
+pnpm run:cli send --id '...' --self-transaction --amount 0.0001
+
+# send max balance
+pnpm run:cli send --id '...' --recipient 0xRECIPIENT --use-all-amount
+```
+
+### 6.10.6 Approvals — revoke, approve, allowance
+
+```bash
+# revoke (set allowance to 0)
+pnpm run:cli send \
+  --id 'js:2:ethereum:0xE32...8b75a:' \
+  --mode revokeApproval \
+  --token ethereum/erc20/usd_tether__erc20_ \
+  --spender 0x40aA958dd87FC8305b97f2BA922CDdCa374bcD7f \
+  --wait-confirmation
+
+# approve a finite amount in token units (USDC has 6 decimals → 10 = 10 * 10^6)
+pnpm run:cli send \
+  --id '...' \
+  --mode approve \
+  --token ethereum/erc20/usd__coin \
+  --spender 0xSPENDER \
+  --approveAmount 10 \
+  --wait-confirmation
+
+# approve the unlimited (2^256 - 1) allowance
+pnpm run:cli send --id '...' --mode approve \
+  --token ethereum/erc20/usd__coin \
+  --spender 0xSPENDER \
+  --approveAmount unlimited
+
+# read the current allowance — no device, no signing, no broadcast
+pnpm run:cli tokenAllowance \
+  --currency ethereum \
+  --ownerAddress 0xE32...8b75a \
+  --token ethereum/erc20/usd__coin \
+  --spender 0xSPENDER \
+  --format json
+```
+
+**Argument order trap.** `--spender` is always an `0x…` address, `--approveAmount` is always a number (or `unlimited`). Swapping them produces `invalid address (argument="_spender", value="10", ...)` because ethers tries to encode the number as an address. Pin them in your muscle memory: spender → who, amount → how much.
+
+**USDT quirk.** USDT's contract reverts if you go from a non-zero allowance directly to a different non-zero allowance. Always revoke first if there's an existing allowance, then approve. Other ERC-20s don't share this behaviour.
+
+### 6.10.7 CAL token id lookup
+
+The slug under `<chain>/<standard>/<slug>` is generated, not free-form. Don't guess — query the CAL service:
+
+```bash
+# by ticker on a specific chain
+curl -s 'https://crypto-assets-service.api.ledger.com/v1/tokens?network=ethereum&ticker=USDC&output=id,name,ticker,contract_address&limit=5' | jq
+
+# by contract address (most precise)
+curl -s 'https://crypto-assets-service.api.ledger.com/v1/tokens?network=ethereum&contract_address=0xdAC17F958D2ee523a2206206994597C13D831ec7&output=id,ticker&limit=1' | jq
+
+# cross-chain by ticker (find every USDC across L2s)
+curl -s 'https://crypto-assets-service.api.ledger.com/v1/tokens?network_family=evm&ticker=USDC&output=id,ticker,contract_address' | jq
+
+# verify a candidate id before running send
+TOKEN_ID="ethereum/erc20/usd__coin"
+curl -s "https://crypto-assets-service.api.ledger.com/v1/tokens?id=${TOKEN_ID}&output=id" | jq
+# [] → wrong id → CLI will error with `Token <…> not found`
+```
+
+Two converter quirks to remember (both handled client-side in `libs/ledgerjs/packages/cryptoassets/src/api-token-converter.ts`):
+
+- MultiversX: pass `multiversx/esdt/*`; the API gets `elrond/esdt/*`.
+- Stellar: `stellar/asset/<ADDR>` is lowercased before the API call — case is forgiving here.
+
+### 6.10.8 Broadcast control and confirmations
+
+```bash
+# sign only — print the signed payload, do not push to the chain
+pnpm run:cli send --id '...' --recipient ... --amount ... --disable-broadcast
+
+# same but driven by env (test-fixture pattern)
+DISABLE_TRANSACTION_BROADCAST=1 pnpm run:cli send --id '...' --recipient ... --amount ...
+
+# wait for on-chain confirmation (EVM only; default timeout 120s)
+pnpm run:cli send --id '...' --recipient ... --amount ... \
+  --wait-confirmation --wait-confirmation-timeout 60000
+
+# push a pre-signed operation JSON (the same shape `send --disable-broadcast` prints)
+pnpm run:cli broadcast --id '<accountId>' --signed-operation /tmp/signed.json
+# the file must contain an object with `operation` and `signature` keys; pass `-` for stdin
+```
+
+The "ignore-errors" flag keeps a multi-tx pipeline going past a single failure:
+
+```bash
+pnpm run:cli send --id '...' --recipient 0xA --amount 0.01 \
+  --recipient 0xB --amount 0.02 --ignore-errors --format json
+```
+
+### 6.10.9 Output shaping
+
+```bash
+# machine-parseable, one JSON object per emitted event
+pnpm run:cli send ... --format json
+
+# silence the human log entirely (useful when the wrapper parses stderr)
+pnpm run:cli send ... --format silent
+```
+
+The only `--format` consumers in `apps/cli/src/commands/blockchain/` are `send` and `tokenAllowance`. Other commands print their own output shape — don't pass `--format` to them.
+
+### 6.10.10 Speculos and proxy transports
+
+```bash
+# Speculos HTTP API (DMK transport) — the QAA default in CI
+SPECULOS_API_PORT=5001 pnpm run:cli send --id '...' --recipient ... --amount ...
+
+# Speculos APDU/TCP variant (lower-level, used by some legacy setups)
+SPECULOS_APDU_PORT=9999 SPECULOS_BUTTON_PORT=9998 SPECULOS_HOST=127.0.0.1 \
+  pnpm run:cli getAddress --currency ethereum
+
+# Remote real-device proxy (rare, useful for cross-machine debugging)
+DEVICE_PROXY_URL=ws://host:port pnpm run:cli deviceInfo
+
+# Force-remove every Speculos Docker container at the end of a manual session
+pnpm run:cli cleanSpeculos
+```
+
+`SPECULOS_API_PORT` *unregisters* the HID transport (see `apps/cli/src/live-common-setup.ts:131`). If a Speculos var is set, your physical Stax becomes invisible until you `unset` it.
+
+### 6.10.11 Live data fixtures (no device needed)
+
+```bash
+# generate a userdata snapshot for one currency and dump JSON to stdout
+pnpm run:cli liveData --currency ethereum --add > /tmp/userdata.json
+
+# update an existing app.json in-place (matches a running Live install)
+pnpm run:cli liveData --appjson ~/Library/Application\ Support/Ledger\ Live/app.json \
+  --currency ethereum --add
+
+# repeat the command per currency to build a multi-chain fixture
+pnpm run:cli liveData --appjson /tmp/app.json --currency ethereum --add
+pnpm run:cli liveData --appjson /tmp/app.json --currency bitcoin --add
+pnpm run:cli liveData --appjson /tmp/app.json --currency polygon --add
+```
+
+`--currency` is single-valued in `scanCommonOpts`; running the command once per chain against a shared `--appjson` file is the canonical fan-out pattern.
+
+`liveData` is the workhorse referenced in 6.1.6 — no Speculos, no RPC, no signing. Run it freely.
+
+### 6.10.12 Quick debug recipes
+
+```bash
+# is my account scanning correctly? show me a balance and a few ops
+pnpm run:cli sync --currency ethereum --index 0 --paginateOperations 10
+
+# what's the on-chain allowance right now?
+pnpm run:cli tokenAllowance --currency ethereum \
+  --ownerAddress 0xE32...8b75a \
+  --token ethereum/erc20/usd__coin \
+  --spender 0xSPENDER --format json
+
+# estimate the max spendable on the main account and every token sub-account
+pnpm run:cli estimateMaxSpendable --id '...'
+
+# device addresses for a non-default path
+pnpm run:cli getAddress --currency ethereum --path "44'/60'/1'/0/0" --verify
+
+# sign an arbitrary message (EIP-191)
+pnpm run:cli signMessage --currency ethereum --path "44'/60'/0'/0/0" --message "hello"
+```
+
+### 6.10.13 The "nothing happens on Stax" checklist
+
+When `send` prints `✔️ broadcasted!` but the device never woke up, run through this in order:
+
+1. `env | grep -E '^(MOCK|DEVICE_PROXY_URL|SPECULOS_)='` — must be empty.
+2. Account id starts with `js:` (or `bitcoin:` / `xrp:` / etc.), **not** `mock:`.
+3. `lsof | grep -i ledger` — only one process should hold the HID handle. Close Live Desktop, the Manager web UI, ledgerctl.
+4. The Stax is unlocked and the **correct currency app** is open (Ethereum app for an Ethereum send, not Bitcoin).
+5. `pnpm build:device-deps` if `node-hid` was rebuilt for a different Node version recently.
+6. As a last resort: replug the cable (Stax over USB occasionally needs a fresh enumeration after macOS sleep).
+
+### 6.10.14 What is *not* in this cookbook
+
+`bot.ts`, `botPortfolio.ts`, `botTransfer.ts` — out of QAA scope (different team owns the stress harness). `confirmOp`, `getTransactionStatus`, `testDetectOpCollision`, `testGetTrustedInputFromTxHash` — useful only inside the bot or in coin-specific debugging; reach for `--wait-confirmation` instead. `generateTestScanAccounts`, `generateTestTransaction` — fixture generators superseded by `liveData` for QAA flows. If you find yourself typing one of these by hand, double-check that the answer isn't "use `liveData` + the four canonical commands".
+
+---
+
 ## Part 6 Final Assessment
 
 You have walked the full QAA CLI stack: the `apps/cli` binary that is the canonical CLI for QA work, the blockchain primer that makes ERC-20 allowances less mysterious, the manual revoke tools (revoke.cash, Etherscan) that fill the gaps when the harness isn't available, the five-layer integration that turns one Bash command into a typed POM method that drives Speculos in parallel, the Speculos lifecycle and snapshot/restore pattern that keeps two-app tests honest, the broadcast-env discipline with its non-negotiable `try/finally`, the daily workflow with its `wallet-cli` escalation rules, and one real ticket (QAA-615) walked line by line. This assessment samples the load-bearing ideas across Chapters 6.1-6.8. Eighty percent to pass. If you miss a question, jump back to the referenced chapter — the answer is always grounded in a concrete file, command, or commit, not general knowledge.

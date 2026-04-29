@@ -72,6 +72,7 @@
   - [6.7 Daily CLI Workflow](part6#daily-cli-workflow)
   - [6.8 Walkthrough: QAA-615](part6#walkthrough-qaa-615-line-by-line)
   - [6.9 CLI Exercises](part6#cli-exercises-and-challenges)
+  - [6.10 CLI Commands Cookbook](part6#cli-commands-cookbook)
   - [Part 6 Assessment](part6#part-6-final-assessment)
 
 - [**Part 7 -- Swap Live App**](part7)
