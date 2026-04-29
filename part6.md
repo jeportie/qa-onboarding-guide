@@ -1800,6 +1800,8 @@ The pattern is overwhelmingly **`liveDataCommand` plus, optionally, an address-r
 
 The mobile workspace consumes the same helpers but through a different mechanism. `e2e/mobile/jest.environment.ts` line 29 imports `* as cliCommandsUtils`, and line 138 does `Object.assign(this.global, cliCommandsUtils)`. Every helper becomes a Jest global. Type definitions live at `e2e/mobile/types/global.d.ts:104-111`. A mobile spec calls e.g. `await liveDataCommand(account)(userdataPath)` *without an import statement*, because the helper is already on the global. This is a deliberate divergence between the two workspaces: desktop uses ESM imports (Playwright/Vitest convention); mobile uses globals (Jest convention, easier interop with Detox's existing globals).
 
+> **Hard rule for mobile — do not copy desktop's import pattern over.** On mobile, calling `import { liveDataCommand } from "@ledgerhq/live-common/...";` in a spec gives you a *second module instance* of `cliCommandsUtils` (live-common ships dual CommonJS / ESM builds and Detox/Jest can resolve through a different path than the harness did). The Speculos transport registry is module-private; the harness wrote into one instance, your import reads from another, and the CLI subprocess fails with `NoDevice` even though Speculos is healthy. The full mechanism, the failure mode, and the debug confirm-line are documented in **Part 5 §5.7** (search "Mobile dual-package hazard"). On mobile, use the global. Always.
+
 The desktop fixture engine is the other consumption path. `e2e/desktop/tests/fixtures/common.ts` consumes the `cliCommands: [...]` field from each test's fixture data and runs each curried function in the test setup phase. A typical use:
 
 ```ts

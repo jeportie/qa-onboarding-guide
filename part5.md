@@ -3292,6 +3292,35 @@ What it does:
 4. **Installs failure hooks.** `handleTestEvent` (not shown above) reacts to Jest's `hook_failure` and `test_fn_failure` events: it flips `IS_FAILED`, takes a Speculos screenshot, an app screenshot, captures the native view hierarchy XML, pulls the bridge log, and attaches everything to Allure. This is why failing tests have rich Allure reports even though no test code mentions Allure.
 5. **Tears down carefully.** On teardown, it closes the bridge server/client, disconnects DMK Speculos transports, and triggers GC.
 
+<div class="resource-box" style="border-left: 6px solid #dc2626; background: #fef2f2;">
+<h4 style="color: #991b1b; margin-top: 0;">Mobile dual-package hazard — never <code>import</code> what is already a global</h4>
+
+<p>This is the single most expensive mistake a new mobile QA can make. Read this section before you ever write <code>import { liveDataWithAddressCommand } from "@ledgerhq/live-common/...";</code> in a mobile spec.</p>
+
+<p><code>@ledgerhq/live-common</code> ships <strong>two builds</strong> of every module:</p>
+
+<ul>
+<li><code>libs/ledger-live-common/lib/e2e/cliCommandsUtils.js</code> — CommonJS</li>
+<li><code>libs/ledger-live-common/lib-es/e2e/cliCommandsUtils.js</code> — ES modules</li>
+</ul>
+
+<p>The harness (<code>jest.environment.ts</code>) boots, imports <code>cliCommandsUtils</code> through <strong>one</strong> of those paths, and assigns the result to globals (<code>globalThis.liveDataWithAddressCommand</code>, <code>globalThis.CLI</code>, etc.). At the same time, the harness calls <code>CLI.registerSpeculosTransport(port, address)</code> — which writes the port → transport mapping into a <strong>module-private registry</strong> living inside that specific module instance.</p>
+
+<p>If your spec then writes <code>import { liveDataWithAddressCommand } from "@ledgerhq/live-common/...";</code>, Node/Detox can resolve through a <strong>different</strong> path (different <code>package.json</code> entry — <code>main</code> vs <code>module</code> vs conditional exports — different bundler resolution, different <code>node_modules</code> hoist level — any of these). You get a <strong>second module instance</strong> of <code>cliCommandsUtils</code>. Same source code, completely separate in-memory state. The transport registry in your imported instance is <em>empty</em>.</p>
+
+<p><strong>The failure mode.</strong> Your test calls <code>liveDataWithAddressCommand(...)</code>, which spawns the CLI subprocess. The subprocess inherits <code>process.env.SPECULOS_API_PORT</code> correctly, but the CLI then asks live-common's transport registry "give me the transport for port X" — and that registry is also a separate instance, also empty, because the registration happened in the harness's instance, not the import's. CLI falls through to the only transport it can find — <strong>HID</strong> — and fails with <code>NoDevice</code>. Speculos is running. The port env var is set. The CLI binary is fine. The harness is fine. You have two clones of the same module disagreeing about state.</p>
+
+<p><strong>Mental model.</strong> Every time you <code>import</code> something from <code>@ledgerhq/live-common</code> in a mobile spec, you might be spinning up a clone of the module's runtime state — disconnected from whatever the harness already configured. The globals are the harness's configured version. The imports are not.</p>
+
+<p><strong>The rule.</strong> On mobile E2E, <strong>never <code>import</code> a CLI helper, an enum, or anything else the harness has already exposed as a global</strong>. Use <code>liveDataWithAddressCommand</code>, <code>CLI</code>, <code>Account</code>, <code>Currency</code>, etc. directly from <code>globalThis</code> (i.e., as the bare identifier — TypeScript knows about them because of <code>types/global.d.ts</code>). The duplication isn't stylistic — it routes you to a different module instance with different runtime state.</p>
+
+<p><strong>Why desktop doesn't have this problem.</strong> Playwright runs the spec, the POMs, and any imports in a single Node process with a single module graph; the harness's <code>cliCommandsUtils</code> instance and the spec's are the same instance. Mobile's split between the Detox runner, the Jest worker process, and the harness server makes dual-package issues painful and silent. Items 3 above (globals installation) is your contract — respect it.</p>
+
+<p><strong>How to spot it in a PR.</strong> Search the diff for <code>from "@ledgerhq/live-common</code>. If the imported symbol is also a documented global (see <code>types/global.d.ts</code>), reject the import and use the global. The desktop's import-everything style does not transfer to mobile.</p>
+
+<p><strong>How to debug it when it bites.</strong> Symptoms: <code>NoDevice</code> error from the CLI subprocess, but Speculos is healthy and the port env var is correct. Confirm with: <code>console.log((globalThis as any).cliCommandsUtils === require("@ledgerhq/live-common/...").cliCommandsUtils)</code> — if that prints <code>false</code>, you have two instances. Cure: delete the import, use the global.</p>
+</div>
+
 #### `jest.globalSetup.ts`
 
 Runs **once** before any Jest workers start:
@@ -4818,6 +4847,14 @@ Test A passes alone but fails when run after Test B.
 **Fix:** The harness already sets `resetModules: true`. What you likely need is `device.reloadReactNative()` in a `beforeEach` — it reboots the JS runtime without reinstalling the native side. If that's not enough, `device.launchApp({ delete: true })` reinstalls fresh.
 
 Do not attempt to run tests in parallel by bumping `maxWorkers`. The bridge port alone makes that impossible; the codebase pins `maxWorkers: 1` on purpose.
+
+#### Symptom: `NoDevice` from a CLI helper, but Speculos is running
+
+`liveDataWithAddressCommand`, `tokenAllowance`, or any other CLI helper rejects with `NoDevice` / `transport not found`, even though Speculos is up, `SPECULOS_API_PORT` is set in the env, and the CLI binary works when you run it by hand.
+
+**Diagnosis:** Dual-package hazard. Your spec is `import`-ing the helper from `@ledgerhq/live-common` instead of using the global the harness installed. You now have two module instances — the harness registered the Speculos transport against one, and your CLI call is reading the registry of the other (which is empty), so the CLI falls through to HID and finds nothing. Full mechanism in §5.7 (the dual-package hazard callout).
+
+**Fix:** Delete the `import` line. Call the helper as a bare global identifier (it is declared in `types/global.d.ts`). Confirm with `console.log((globalThis as any).cliCommandsUtils === require("@ledgerhq/live-common/...").cliCommandsUtils)` — if that prints `false`, you have the bug; deleting the import will make it `true` and the test will pass.
 
 ### 5.8.6 Screenshots, Videos, View Hierarchy Dumps
 
