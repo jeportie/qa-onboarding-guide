@@ -4603,6 +4603,142 @@ When `send` prints `✔️ broadcasted!` but the device never woke up, run throu
 
 `bot.ts`, `botPortfolio.ts`, `botTransfer.ts` — out of QAA scope (different team owns the stress harness). `confirmOp`, `getTransactionStatus`, `testDetectOpCollision`, `testGetTrustedInputFromTxHash` — useful only inside the bot or in coin-specific debugging; reach for `--wait-confirmation` instead. `generateTestScanAccounts`, `generateTestTransaction` — fixture generators superseded by `liveData` for QAA flows. If you find yourself typing one of these by hand, double-check that the answer isn't "use `liveData` + the four canonical commands".
 
+### 6.10.15 Derivation paths and account discovery
+
+`getAddress` requires `--path` (`apps/cli/src/commands/blockchain/getAddress.ts:51-53` literally throws if it's missing). It does not derive a default path for you. So you need to know two things: what a path *means*, and how to find the right one for the account you actually care about.
+
+**Path anatomy (BIP-44).**
+
+```
+44' / 60' / 0' / 0 / 0
+│    │    │    │   │
+│    │    │    │   └── address index (0 = first address)
+│    │    │    └────── change: 0 = external/receive, 1 = internal/change
+│    │    └─────────── account index (0 = first account)
+│    └──────────────── coin type (SLIP-0044: 0=BTC, 60=ETH, 144=XRP, 195=TRX, 501=SOL, 354=DOT, ...)
+└───────────────────── purpose: 44' = BIP-44; 49' = BIP-49 (P2SH-segwit); 84' = BIP-84 (native segwit); 86' = BIP-86 (taproot)
+```
+
+`'` (apostrophe) marks **hardened** derivation. BIP-44 mandates hardening for the first three levels.
+
+**Derivation modes that actually exist** (from a fresh `pnpm run:cli derivation` run on this branch — modes are case-sensitive and currency-specific):
+
+```
+  native_segwit: Bitcoin 1: 84'/0'/<account>'/<change>/<address>
+  taproot:       Bitcoin 1: 86'/0'/<account>'/<change>/<address>
+  segwit:        Bitcoin 1: 49'/0'/<account>'/<change>/<address>
+  default:       Bitcoin 1: 44'/0'/<account>'/<change>/<address>
+  ethM:          Ethereum 1: 44'/60'/0'/<account>
+  ethMM:         Ethereum 1: 44'/60'/0'/0/<account>
+  default:       Ethereum 1: 44'/60'/<account>'/<change>/<address>
+  default:       XRP 1:      44'/144'/<account>'/<change>/<address>
+  sep5:          Stellar 1:  44'/148'/<account>'
+  ...
+```
+
+A few traps the output makes obvious:
+
+- **No mode is literally named `legacy`.** The Bitcoin BIP-44 (legacy P2PKH) path is `default`. Pass `--derivationMode default` (or omit; empty string maps to default) for legacy BTC.
+- **`ethM` and `ethMM` are old Ledger Live derivations** (MyEtherWallet and early MetaMask compat). `default` is the BIP-44 path you almost certainly want.
+- The output prints **mode lines only** — there are no per-currency header lines. The `Bitcoin 1` / `Ethereum 1` text on each line (the default account name) is what tells you which currency a line is for. Filter by it: `pnpm run:cli derivation | grep ': Ethereum '`.
+
+**The discovery recipe.**
+
+```bash
+# 1) what schemes does this currency support?
+pnpm run:cli derivation | grep ': Ethereum '
+
+# 2) what accounts do I actually have on this device?
+pnpm run:cli sync --currency ethereum
+# every account block prints `<address> on <path>` plus the full `--id` string
+
+# 3) re-verify a specific path on-device (Ethereum app must be open)
+pnpm run:cli getAddress --currency ethereum --path "44'/60'/0'/0/0" --verify
+
+# 4) read a non-default account by index (sync does the path-finding)
+pnpm run:cli sync --currency bitcoin --index 1 --length 1
+```
+
+Step 2 is the one most QAA flows need. `sync` walks every supported derivation scheme, asks the device to derive each candidate, queries the chain for activity, and stops when it sees enough empty accounts in a row. The path you can paste back into `getAddress` is in the `freshAddressPath` field printed inline next to the address.
+
+**No global "list every id" command, by design.** The CLI is stateless. An account id (`<type>:<version>:<currencyId>:<xpubOrAddress>:<derivationMode>`) is *computed* from the device + currency + scheme on every run; nothing is persisted in the CLI itself. The two places a persisted set of ids actually lives:
+
+```bash
+# 1) a Live Desktop userdata file (what Live writes for itself)
+pnpm run:cli sync --appjsonFile "$HOME/Library/Application Support/Ledger Live/app.json" \
+  --currency ethereum
+# drop --currency to walk every account in the file
+
+# 2) a liveData-generated fixture (the same shape, written by the CLI)
+pnpm run:cli liveData --currency ethereum --add > /tmp/userdata.json
+pnpm run:cli sync --appjsonFile /tmp/userdata.json
+```
+
+Both routes read the JSON; neither talks to the device. That's how you "list every id" — by pointing `sync` at a file. There's no other catalogue.
+
+### 6.10.16 Installing and managing apps on the device
+
+The `app` command (`apps/cli/src/commands/device/app.ts`) drives the manager flow: install / uninstall / open / quit / debug. The device must be **on the dashboard** for install and uninstall (an open app blocks the manager APDUs).
+
+```bash
+# show what's currently on the device
+pnpm run:cli listApps
+
+# show what *can* be installed on this device, with version + (installed)/(outdated!) tags
+pnpm run:cli managerListApps
+pnpm run:cli managerListApps --format json
+
+# install one or more apps by name (multi-valued; pass -i twice)
+pnpm run:cli app --install Ethereum --install Bitcoin
+
+# uninstall by name
+pnpm run:cli app --uninstall Ethereum
+
+# install by currency keyword (resolved via inferManagerApp → managerAppName)
+pnpm run:cli app --install ethereum   # same as --install Ethereum
+
+# open / close an app
+pnpm run:cli app --open Ethereum
+pnpm run:cli app --quit                # closes whatever is open, returns to dashboard
+
+# inspect a single app entry from the catalog (versionName lookup)
+pnpm run:cli app --debug Ethereum
+
+# verbose mode: emit progress events instead of swallowing them with ignoreElements
+pnpm run:cli app --install Bitcoin --verbose
+```
+
+**Bulk operations** (rarely what you want during a debug session, but useful for fixture-bring-up):
+
+```bash
+# install every app the device's catalog currently lists
+pnpm run:cli appsInstallAll
+
+# bulk-uninstall via the device's "uninstall all" command, with a per-app fallback
+pnpm run:cli appUninstallAll
+```
+
+**Adjacent device commands worth knowing:**
+
+| Command | Purpose |
+|---|---|
+| `deviceInfo` | firmware identity (`mcuVersion`, `seVersion`, `targetId`, …) — must be on dashboard |
+| `deviceVersion` | just the firmware version string |
+| `deviceAppVersion` | version of the app currently open |
+| `genuineCheck` | full Ledger HSM genuineness round-trip |
+| `getDeviceRunningMode` | dashboard / app / OSU / recovery |
+| `getBatteryStatus` | Stax/Flex battery state |
+| `firmwareUpdate --to-my-own-risk` | forced firmware update (**dangerous**, leave to firmware QA) |
+| `firmwareRepair` | recover a bricked install |
+| `appsCheckAllAppVersions` | report any installed app whose version is below the catalog |
+| `appsUpdateTestAll` | exercise the auto-update flow against the full catalog |
+| `customLockScreenLoad / Fetch / Remove` | Stax/Flex lock-screen image management |
+| `i18n` | install/list device translations |
+
+`app --install` resolves names via `inferManagerApp` (`apps/cli/src/scan.ts:123-130`): you can pass either a currency keyword (`ethereum`, `bitcoin`) or a literal manager-app name (`Ethereum`, `Bitcoin`). The keyword path goes through `findCryptoCurrencyByKeyword` then maps to `currency.managerAppName`. If you mistype an app name you'll get `application '<name>' not found` from the catalog lookup — copy-paste from `managerListApps` output to be safe.
+
+**Why two list commands?** `listApps` calls `@ledgerhq/live-common/hw/listApps` directly and reports what is **physically installed** on the device. `managerListApps` runs the full `listAppsUseCase` pipeline that Live's Manager UI uses — it cross-references the device with the catalog, returning the same data the Manager would render (every installable app, with `installed` / `outdated` flags). Use `listApps` for "what's on the device right now"; use `managerListApps` for "what *can* go on it, and what's already there".
+
 ---
 
 ## Part 6 Final Assessment
