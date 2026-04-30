@@ -4058,8 +4058,213 @@ A 7-section, ~1-page spike report is the right size. Do not write 4 pages. The d
 <div class="quiz-score"></div>
 </div>
 
+### 6.8.18 The Real Implementation — A Postmortem of Hard Moments
+
+<div class="chapter-intro">
+The previous sections described what the code does and why each line was written. This section documents the actual implementation journey taken when a QA intern (Jerome PORTIER) finished QAA-615 to production-ready quality — including every red herring, root cause, and lesson learned. It is written as a postmortem, not a tutorial: the goal is to give future contributors the vocabulary to recognize similar failures faster. Read it after 6.8.1–6.8.17; it presupposes the five-layer architecture, Speculos lifecycle, and broadcast-env discipline already explained there.
+</div>
+
+**What was shipped on top of the senior's starting commit.**
+
+| Commit | Content |
+|---|---|
+| `test(common): add revokeTokenCommand CLI wrapper` | Finalized `revokeTokenCommand`; foundation for `getTokenAllowanceCommand` |
+| `test(desktop): add revoke token approval E2E spec` | New `revoke.swap.spec.ts` with `expect(remaining).toBe("0")` assertion |
+| `test(mobile): add revoke token approval E2E spec` | New `swap.revoke.spec.ts` mobile spec using global declarations (not imports) |
+| `chore(changeset): add changeset for QAA-615 revoke token approval` | `.changeset/*.md` entry for `@ledgerhq/live-common: patch` |
+| `fix(desktop): correct provider.uiName usage and playwright import in revoke spec` | Two correctness fixes caught by first run |
+| `chore(changeset): trim QAA-615 entry (bridge fix landed on develop)` | Removed bridge fix mention after rebase conflict resolution |
+| `test(common): add getTokenAllowanceCommand for exact-zero revoke assertions` | Added after reviewer feedback on assertion precision |
+
+Total: 7 commits, 5 files changed.
+
+#### Hard Moment #1 — The Generic-Alpaca Bridge: Why `revokeApproval` Dropped Its Calldata
+
+**What happened.** The first desktop run failed not in the test assertion, but in the CLI itself. The `send --mode revokeApproval` call produced a transaction with no calldata. The Ethereum node received a raw ETH transfer to the token contract address instead of an `approve(spender, 0)` function call. The on-chain allowance was unchanged.
+
+**Root cause.** `transactionToIntent()` in `libs/coin-modules/coin-evm/src/bridge/generic-alpaca/utils.ts` builds a `TransactionIntent` from a live-common `Transaction`. When a `craftTransactionData` function is provided (as it is for EVM coins), its return value is placed into `res.data`. Then, unconditionally, the code read `transaction.data` and overwrote `res.data` if the result was truthy — but `transaction.data` is `undefined` for a `revokeApproval` transaction (no raw calldata is set by the caller; the calldata is supposed to be *synthesized* by `craftTransactionData`). The overwrite path only preserved data when `transaction.data` was a non-empty Buffer — which it wasn't here.
+
+**The fix.** An `if/else` guard separating the two cases:
+
+```ts
+if (!transaction.data || transaction.data.length === 0) {
+  // No raw calldata supplied — synthesize via craftTransactionData
+  const resolvedCraftTransactionData = craftTransactionData ?? defaultCraftTransactionData;
+  res.data = resolvedCraftTransactionData(res);
+} else {
+  // Raw calldata already present (e.g., custom tx) — forward as buffer
+  res.data = { type: "buffer", value: transaction.data };
+}
+```
+
+This fix was first developed on the feature branch, then discovered to have also landed independently on `develop` via a parallel bug report. Develop's version was adopted during the rebase conflict resolution (see Hard Moment #4).
+
+**Lesson.** When a CLI command silently produces a zero-calldata transaction, the first place to look is the bridge's `transactionToIntent` — specifically any path where calldata is synthesized from mode/amount and then has an unconditional assignment below it. Two-path intent synthesis (craft from mode vs. forward raw buffer) must be an `if/else`, never sequential assignments.
+
+#### Hard Moment #2 — The Mobile Module Instance Trap (The Hardest Debug)
+
+This is the most important lesson of the session. It took hours of debugging and multiple wrong hypotheses before the root cause was found.
+
+**What happened.** The mobile E2E spec `swap.revoke.spec.ts` failed with:
+
+```
+NoDevice — cannot open device with path IOService:/...Stax@01100000
+```
+
+Every CLI invocation in the spec fell back to `TransportNodeHid` (USB), tried to open a physical Stax, and failed — even with a Speculos instance running. Meanwhile, the existing spec `swapCheckProviderOKX.spec.ts` — using the same accounts, the same provider, the same Speculos config — worked perfectly.
+
+**Wrong hypotheses pursued in order:**
+
+1. *The physical Stax USB device.* Unplugging it changed the error from "cannot open device" to `NoDevice` — but did not fix the underlying routing failure.
+2. *`SPECULOS_ADDRESS` env var.* Tried `SPECULOS_ADDRESS=localhost`. This caused `Unsupported protocol localhost:` in Axios; the correct value is `http://localhost`. A wrong turn that consumed time.
+3. *Single Speculos instance not enough.* Hypothesized the harness needed two Speculos instances (one for Exchange app, one for Ethereum app). Tried switching `cliCommandsOnApp` to `[{ app: AppInfos.EXCHANGE }]`. Did not fix it.
+4. *Build cache / git rebase.* Tempting as a reset, but the problem was code logic, not a build artifact.
+
+**Root cause: `Object.assign(globalThis, cliCommandsUtils)` in `jest.environment.ts`.**
+
+The mobile Jest environment (`e2e/mobile/jest.environment.ts`, line 143) does:
+
+```ts
+Object.assign(globalThis, cliCommandsUtils);
+```
+
+This attaches every exported function from `cliCommandsUtils.ts` to the Jest global object. The Speculos transport registry — a module-level singleton — is part of that module instance. When the Jest environment loads, *one* instance of `cliCommandsUtils` is created, its Speculos port is registered, and its functions are placed into `globalThis`.
+
+When a spec file then writes an explicit import:
+
+```ts
+import { liveDataWithAddressCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";
+```
+
+Node's module system resolves this to a **second, separate module instance** — independent from the one loaded by the Jest environment. This second instance has its own transport registry. That registry is empty: no Speculos port was ever registered on it. When the CLI is spawned from this second instance, it sees no Speculos transport and falls back to HID → physical device → NoDevice.
+
+**Why the working spec worked.** `swapCheckProviderOKX.spec.ts` had no such explicit imports. Every function it used — `liveDataWithAddressCommand`, `isTokenAllowanceSufficientCommand` — was accessed as a Jest global (populated by the environment). Those calls hit the singleton with the registered transport. The revoke spec's explicit imports bypassed it entirely.
+
+**The fix.** Remove all imports of symbols already declared in `e2e/mobile/types/global.d.ts`. Access them as globals, exactly as the existing specs do:
+
+```ts
+// WRONG — creates a second module instance with an empty transport registry
+import { liveDataWithAddressCommand } from "@ledgerhq/live-common/e2e/cliCommandsUtils";
+
+// CORRECT — uses the singleton already in globalThis via jest.environment.ts
+const fixture = await liveDataWithAddressCommand(...);  // no import needed
+```
+
+The `global.d.ts` declarations give TypeScript type safety without triggering a new module load:
+
+```ts
+// e2e/mobile/types/global.d.ts
+declare var revokeTokenCommand: typeof import("@ledgerhq/live-common/e2e/cliCommandsUtils").revokeTokenCommand;
+declare var getTokenAllowanceCommand: typeof import("@ledgerhq/live-common/e2e/cliCommandsUtils").getTokenAllowanceCommand;
+```
+
+**The rule for all mobile E2E specs.** If a function is declared in `global.d.ts`, never import it. Use it directly — it is a Jest global. If you add a new CLI wrapper that specs need, add its `global.d.ts` declaration and never import it from spec files.
+
+**Why this is subtle.** Jest's module system loads the environment and test modules in separate require contexts. Node's normal deduplication (the `require()` cache) does not prevent two instances when the environment and the spec use different resolution paths. No error is thrown. The empty transport registry is invisible; the only symptom is HID fallback, which looks like a device configuration problem.
+
+#### Hard Moment #3 — Assertion Correctness: `isTokenAllowanceSufficientCommand` vs `getTokenAllowanceCommand`
+
+**What happened.** The first version of the revoke spec asserted:
+
+```ts
+const isRevoked = await isTokenAllowanceSufficientCommand(fromAccount, provider.contractAddress!, 0);
+expect(isRevoked).toBe(true);  // allowance >= 0 is trivially true for any value
+```
+
+A code reviewer flagged this: `isTokenAllowanceSufficientCommand` returns `true` if `currentAllowance >= threshold`. With `threshold = 0`, this is satisfied by every non-negative allowance — including a completely unrevoked `100 000 000 USDT` allowance. The assertion would pass even if the revoke silently failed.
+
+**The fix.** Add `getTokenAllowanceCommand` — a new wrapper that returns the raw on-chain allowance as a decimal string:
+
+```ts
+export const getTokenAllowanceCommand = async (
+  account: TokenAccount,
+  spenderAddress: string,
+): Promise<string> => {
+  const ownerAddress = account.parentAccount?.address ?? account.address;
+  if (!ownerAddress) throw new Error("Token allowance check requires the main account address");
+  const output = await runCliGetTokenAllowance({
+    currency: account.currency.speculosApp.name,
+    token: account.currency.id,
+    spenderAddress,
+    index: account.index,
+    format: "json",
+    ownerAddress,
+  });
+  const { allowanceStr } = parseTokenAllowanceCliOutput(output);
+  return allowanceStr;
+};
+```
+
+The spec then asserts the exact value:
+
+```ts
+const remaining = await getTokenAllowanceCommand(fromAccount, provider.contractAddress!);
+expect(remaining).toBe("0");
+```
+
+If the revoke fails and the allowance is still `100000000`, this assertion fails. The test now verifies what it claims to verify.
+
+**Lesson.** Boolean threshold helpers (`isX`) are design tools for *decisions* (should we run the approve flow?). They are not assertion tools for *verification* (did the revoke succeed?). For post-condition checks, use a raw-value helper that returns the actual on-chain value and compare it directly to the expected state.
+
+#### Hard Moment #4 — The Merge Conflict with `develop`: Taking the Better Fix
+
+**What happened.** During `git rebase develop`, a conflict appeared in `libs/coin-modules/coin-evm/src/bridge/generic-alpaca/utils.ts`. The feature branch had committed a fix for the bridge's calldata-overwrite bug (Hard Moment #1). Develop had independently received a fix for the *same* bug, written by a different engineer, reviewed separately.
+
+**Decision.** Take develop's version wholesale and drop the feature branch's bridge-fix commit entirely. Reasons:
+
+1. Develop's fix had been independently reviewed — it was the authoritative version.
+2. The `if/else` structure was cleaner than the feature branch's sequential assignments.
+3. Dropping the commit from the feature branch simplified the changeset: the `@ledgerhq/coin-evm` entry was no longer needed.
+
+**How to execute this in practice:**
+
+```bash
+# Drop the bridge-fix commit before rebasing (interactive rebase)
+git rebase -i HEAD~N   # mark the bridge-fix commit as 'drop'
+git rebase develop     # now rebases cleanly with no conflict
+```
+
+Or, if the rebase conflict is already in progress:
+
+```bash
+# Accept develop's version of the conflicting file
+git checkout --theirs libs/coin-modules/coin-evm/src/bridge/generic-alpaca/utils.ts
+git add libs/coin-modules/coin-evm/src/bridge/generic-alpaca/utils.ts
+git rebase --continue
+```
+
+After the rebase, the changeset file that mentioned the bridge fix was trimmed with a separate `chore(changeset): trim QAA-615 entry` commit.
+
+**Lesson.** When develop independently fixes the same bug you fixed on a feature branch, defer to develop's version and drop your commit. Carrying a parallel fix creates divergent history and sets up a re-conflict if the code moves. The exception: if your version is strictly better, open a separate PR to develop for just that fix, get it reviewed, and then rebase on top of it.
+
+#### Commit and PR Conventions at Ledger Live
+
+The following conventions are enforced by hooks and required by reviewers. Memorize them before your first PR.
+
+**Commit types (`commitlint.config.js`):**
+- `test` — new or updated test code (specs, helpers, fixtures)
+- `chore` — changeset files, tooling, config
+- `fix` — bug fixes in product or test infrastructure
+- `feat` — new user-visible features (requires a changeset)
+
+**Changeset discipline:**
+- Every commit that changes a published package (e.g., `@ledgerhq/live-common`) requires a changeset file.
+- Run `pnpm changeset`, select the affected packages, choose `patch`/`minor`/`major`, write a one-line description.
+- Commit the generated `.changeset/*.md` file separately from the code change: `chore(changeset): add changeset for QAA-615 revoke token approval`.
+- If a fix you committed is later superseded by develop (Hard Moment #4), trim or remove the relevant changeset entry with another `chore(changeset): trim ...` commit.
+
+**GPG signing:**
+- Commits are GPG-signed. If the signing key is unavailable in the current shell session (e.g., sandboxed environment), the commit hook fails. Run the commit outside the sandbox or unlock the key first.
+
+**Force-push convention:**
+- After a rebase, use `git push --force-with-lease`. The `--lease` check ensures you cannot overwrite a concurrent push to the same remote branch. Never use bare `--force` on a shared branch.
+
+**PR description:**
+- Title: imperative, lowercase, under 70 characters. No Jira ticket in the title.
+- Body: what the PR adds (bulleted list), why it exists (link the Jira ticket), test plan (what to run and what to verify). After review adds new commits, update the description to include the new items explicitly.
+
 <div class="chapter-outro">
-You now own the whole shape of QAA-615. The senior's commit was a runway, not a destination — 37 lines that prove the path works, with four obvious do-list items waiting on top: the <code>@step</code> rename, the proper hook ordering, mobile parity, and a tightened type guard. Plus the spike report. None of those is hard; all of them are necessary. Ship them. Chapter 6.9 turns the page from this guided walkthrough to your own hands: a set of CLI exercises and challenges that exercise every layer of what you just read, with grading rubrics so you can self-assess before bringing your work to a reviewer.
+You now own the whole shape of QAA-615. The senior's commit was a runway, not a destination — 37 lines that prove the path works, with four obvious do-list items waiting on top: the <code>@step</code> rename, the proper hook ordering, mobile parity, and a tightened type guard. Plus the spike report. None of those is hard; all of them are necessary. The postmortem above adds the fifth layer: the four hard moments you will encounter again in some form on every non-trivial E2E feature. Ship them. Chapter 6.9 turns the page from this guided walkthrough to your own hands: a set of CLI exercises and challenges that exercise every layer of what you just read, with grading rubrics so you can self-assess before bringing your work to a reviewer.
 </div>
 
 ## CLI Exercises and Challenges
